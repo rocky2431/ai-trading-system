@@ -105,10 +105,11 @@
       "priority": "P0",
       "dependencies": ["0"],
       "estimated_days": 3,
-      "status": "in_progress",
+      "status": "completed",
       "type": "architecture",
       "trace_to": "specs/architecture.md#langgraph-state-persistence",
-      "started_at": "2025-12-10T02:30:00"
+      "started_at": "2025-12-10T02:30:00",
+      "completed_at": "2025-12-10T03:00:00"
     },
     {
       "id": "8",
@@ -474,7 +475,7 @@
   "metadata": {
     "last_updated": "2025-12-10",
     "total_tasks": 38,
-    "completed_tasks": 7,
+    "completed_tasks": 8,
     "in_progress_tasks": 0,
     "priority_distribution": {
       "P0": 27,
@@ -492,9 +493,9 @@
   },
   "stats": {
     "total": 38,
-    "completed": 7,
+    "completed": 8,
     "in_progress": 0,
-    "pending": 31,
+    "pending": 30,
     "blocked": 0
   }
 }

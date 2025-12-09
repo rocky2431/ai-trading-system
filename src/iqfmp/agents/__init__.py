@@ -26,10 +26,13 @@ from iqfmp.agents.orchestrator import (
 )
 from iqfmp.agents.factor_generation import (
     FactorFamily,
+    FactorFieldValidator,
     FactorGenerationAgent,
     FactorGenerationConfig,
     FactorGenerationError,
     FactorPromptTemplate,
+    FieldConstraintViolationError,
+    FieldValidationResult,
     GeneratedFactor,
     InvalidFactorError,
     SecurityViolationError,
@@ -53,10 +56,13 @@ __all__ = [
     "StateValidationError",
     # Factor Generation
     "FactorFamily",
+    "FactorFieldValidator",
     "FactorGenerationAgent",
     "FactorGenerationConfig",
     "FactorGenerationError",
     "FactorPromptTemplate",
+    "FieldConstraintViolationError",
+    "FieldValidationResult",
     "GeneratedFactor",
     "InvalidFactorError",
     "SecurityViolationError",

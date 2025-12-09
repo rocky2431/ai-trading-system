@@ -1,5 +1,14 @@
 """Core engine modules for IQFMP."""
 
+from iqfmp.core.review import (
+    HumanReviewGate,
+    NotifierBase,
+    ReviewConfig,
+    ReviewDecision,
+    ReviewQueue,
+    ReviewRequest,
+    ReviewStatus,
+)
 from iqfmp.core.sandbox import (
     ExecutionResult,
     ExecutionStatus,
@@ -24,4 +33,12 @@ __all__ = [
     "ExecutionStatus",
     "SandboxConfig",
     "SandboxExecutor",
+    # Review
+    "HumanReviewGate",
+    "NotifierBase",
+    "ReviewConfig",
+    "ReviewDecision",
+    "ReviewQueue",
+    "ReviewRequest",
+    "ReviewStatus",
 ]

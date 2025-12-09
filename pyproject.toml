@@ -93,11 +93,18 @@ requires = ["hatchling>=1.21.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/iqfmp"]
+packages = ["src/iqfmp", "vendor/qlib/qlib"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/iqfmp",
+    "vendor/qlib/qlib",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+pythonpath = ["src", "vendor/qlib"]
 addopts = [
     "-v",
     "--tb=short",
@@ -134,7 +141,8 @@ exclude_lines = [
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-src = ["src", "tests"]
+src = ["src", "tests", "vendor/qlib"]
+exclude = ["vendor/qlib/qlib/**", "!vendor/qlib/qlib/contrib/crypto/**"]
 
 [tool.ruff.lint]
 select = [

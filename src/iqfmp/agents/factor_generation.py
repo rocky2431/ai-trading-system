@@ -37,6 +37,20 @@ class InvalidFactorError(FactorGenerationError):
     pass
 
 
+class FieldConstraintViolationError(FactorGenerationError):
+    """Raised when generated code uses disallowed fields for the factor family."""
+
+    def __init__(self, message: str, violations: list[str] | None = None) -> None:
+        """Initialize with violation details.
+
+        Args:
+            message: Error message
+            violations: List of disallowed field names that were used
+        """
+        super().__init__(message)
+        self.violations = violations or []
+
+
 class FactorFamily(Enum):
     """Factor family definitions with allowed fields."""
 
@@ -98,6 +112,58 @@ class FactorFamily(Enum):
 
         return list(set(base_fields + family_specific.get(self, [])))
 
+    def get_field_descriptions(self) -> dict[str, str]:
+        """Get descriptions for each allowed field.
+
+        Returns:
+            Dictionary mapping field names to descriptions
+        """
+        base_descriptions = {
+            "open": "Opening price of the period",
+            "high": "Highest price during the period",
+            "low": "Lowest price during the period",
+            "close": "Closing price of the period",
+            "volume": "Trading volume during the period",
+        }
+
+        family_descriptions = {
+            FactorFamily.MOMENTUM: {
+                "returns": "Price returns over a period",
+                "price_change": "Absolute price change",
+                "momentum": "Price momentum indicator",
+                "roc": "Rate of change indicator",
+            },
+            FactorFamily.VALUE: {
+                "book_value": "Book value per share",
+                "earnings": "Earnings per share",
+                "pe_ratio": "Price to earnings ratio",
+                "pb_ratio": "Price to book ratio",
+            },
+            FactorFamily.VOLATILITY: {
+                "returns": "Price returns for volatility calculation",
+                "std": "Standard deviation of returns",
+                "atr": "Average true range",
+            },
+            FactorFamily.QUALITY: {
+                "roe": "Return on equity",
+                "roa": "Return on assets",
+                "profit_margin": "Profit margin ratio",
+            },
+            FactorFamily.SENTIMENT: {
+                "sentiment_score": "Aggregate sentiment score",
+                "news_count": "Number of news articles",
+            },
+            FactorFamily.LIQUIDITY: {
+                "bid_ask_spread": "Bid-ask spread",
+                "turnover": "Trading turnover rate",
+                "amihud": "Amihud illiquidity measure",
+            },
+        }
+
+        result = base_descriptions.copy()
+        result.update(family_descriptions.get(self, {}))
+        return result
+
 
 @dataclass
 class GeneratedFactor:
@@ -125,6 +191,25 @@ class GeneratedFactor:
             "code": self.code,
             "family": self.family.value,
             "metadata": self.metadata,
+        }
+
+
+@dataclass
+class FieldValidationResult:
+    """Result of field constraint validation."""
+
+    is_valid: bool
+    used_fields: set[str]
+    allowed_fields: set[str]
+    violations: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize result to dictionary."""
+        return {
+            "is_valid": self.is_valid,
+            "used_fields": list(self.used_fields),
+            "allowed_fields": list(self.allowed_fields),
+            "violations": self.violations,
         }
 
 
@@ -199,6 +284,7 @@ def volatility_20d(df):
         user_request: str,
         factor_family: Optional[FactorFamily] = None,
         include_examples: bool = False,
+        include_field_constraints: bool = False,
     ) -> str:
         """Render the full prompt for factor generation.
 
@@ -206,6 +292,7 @@ def volatility_20d(df):
             user_request: User's natural language request
             factor_family: Optional factor family constraint
             include_examples: Whether to include few-shot examples
+            include_field_constraints: Whether to include strict field constraints
 
         Returns:
             Rendered prompt string
@@ -216,8 +303,21 @@ def volatility_20d(df):
             allowed_fields = factor_family.get_allowed_fields()
             parts.append(
                 f"\nFactor Family: {factor_family.value}"
-                f"\nAllowed Fields: {', '.join(allowed_fields)}"
+                f"\nAllowed Fields: {', '.join(sorted(allowed_fields))}"
             )
+
+            if include_field_constraints:
+                field_descriptions = factor_family.get_field_descriptions()
+                constraint_text = (
+                    "\n\n**IMPORTANT FIELD CONSTRAINTS:**"
+                    "\nYou MUST only use the allowed fields listed above."
+                    "\nDo NOT use any fields outside this list."
+                    "\n\nField Descriptions:"
+                )
+                for field_name in sorted(allowed_fields):
+                    desc = field_descriptions.get(field_name, "Data field")
+                    constraint_text += f"\n- {field_name}: {desc}"
+                parts.append(constraint_text)
 
         if include_examples:
             parts.append(f"\n{self._examples}")
@@ -245,6 +345,7 @@ class FactorGenerationConfig:
 
     name: str
     security_check_enabled: bool = True
+    field_constraint_enabled: bool = True
     max_retries: int = 3
     timeout_seconds: float = 30.0
     include_examples: bool = True
@@ -352,6 +453,93 @@ class ASTSecurityChecker:
         return ""
 
 
+class FactorFieldValidator:
+    """Validator for factor field constraints.
+
+    Extracts field names from generated code and validates
+    them against the allowed fields for a factor family.
+    """
+
+    # Patterns to extract field names from code
+    # df['field'], df["field"], df.field, df.loc[:, 'field']
+    BRACKET_SINGLE_PATTERN = re.compile(r"df\s*\[\s*'([a-zA-Z_][a-zA-Z0-9_]*)'\s*\]")
+    BRACKET_DOUBLE_PATTERN = re.compile(r'df\s*\[\s*"([a-zA-Z_][a-zA-Z0-9_]*)"\s*\]')
+    DOT_PATTERN = re.compile(r"df\.([a-zA-Z_][a-zA-Z0-9_]*)")
+    LOC_SINGLE_PATTERN = re.compile(r"df\.loc\s*\[\s*[^,]*,\s*'([a-zA-Z_][a-zA-Z0-9_]*)'\s*\]")
+    LOC_DOUBLE_PATTERN = re.compile(r'df\.loc\s*\[\s*[^,]*,\s*"([a-zA-Z_][a-zA-Z0-9_]*)"\s*\]')
+    LIST_SINGLE_PATTERN = re.compile(r"'([a-zA-Z_][a-zA-Z0-9_]*)'")
+    LIST_DOUBLE_PATTERN = re.compile(r'"([a-zA-Z_][a-zA-Z0-9_]*)"')
+
+    # Common pandas attributes to exclude from field extraction
+    PANDAS_ATTRS = {
+        "pct_change", "rolling", "mean", "std", "sum", "min", "max",
+        "shift", "diff", "cumsum", "cumprod", "fillna", "dropna",
+        "copy", "head", "tail", "iloc", "loc", "values", "index",
+        "columns", "shape", "dtypes", "apply", "map", "transform",
+        "groupby", "resample", "ewm", "expanding", "rank", "abs",
+        "clip", "corr", "cov", "count", "describe", "quantile",
+    }
+
+    def extract_fields(self, code: str) -> set[str]:
+        """Extract field names used in the code.
+
+        Args:
+            code: Python code to analyze
+
+        Returns:
+            Set of field names found in the code
+        """
+        fields: set[str] = set()
+
+        # Extract from bracket notation with single quotes
+        fields.update(self.BRACKET_SINGLE_PATTERN.findall(code))
+
+        # Extract from bracket notation with double quotes
+        fields.update(self.BRACKET_DOUBLE_PATTERN.findall(code))
+
+        # Extract from dot notation (filter out pandas methods)
+        dot_matches = self.DOT_PATTERN.findall(code)
+        for match in dot_matches:
+            if match not in self.PANDAS_ATTRS:
+                fields.add(match)
+
+        # Extract from loc accessor
+        fields.update(self.LOC_SINGLE_PATTERN.findall(code))
+        fields.update(self.LOC_DOUBLE_PATTERN.findall(code))
+
+        # Try to extract fields from list patterns like ['close', 'volume']
+        # Look for list-like patterns used with df[]
+        list_pattern = re.compile(r"df\s*\[\s*\[([^\]]+)\]\s*\]")
+        list_matches = list_pattern.findall(code)
+        for match in list_matches:
+            fields.update(self.LIST_SINGLE_PATTERN.findall(match))
+            fields.update(self.LIST_DOUBLE_PATTERN.findall(match))
+
+        return fields
+
+    def validate(self, code: str, family: FactorFamily) -> FieldValidationResult:
+        """Validate field usage against factor family constraints.
+
+        Args:
+            code: Python code to validate
+            family: Factor family to validate against
+
+        Returns:
+            Validation result with details
+        """
+        used_fields = self.extract_fields(code)
+        allowed_fields = set(family.get_allowed_fields())
+
+        violations = [f for f in used_fields if f not in allowed_fields]
+
+        return FieldValidationResult(
+            is_valid=len(violations) == 0,
+            used_fields=used_fields,
+            allowed_fields=allowed_fields,
+            violations=violations,
+        )
+
+
 class FactorGenerationAgent:
     """Agent for generating Qlib-compatible factors from natural language."""
 
@@ -370,6 +558,7 @@ class FactorGenerationAgent:
         self.llm_provider = llm_provider
         self.template = FactorPromptTemplate()
         self.security_checker = ASTSecurityChecker()
+        self.field_validator = FactorFieldValidator()
 
     async def generate(
         self,
@@ -390,16 +579,18 @@ class FactorGenerationAgent:
             FactorGenerationError: If LLM call fails
             InvalidFactorError: If no valid code is generated
             SecurityViolationError: If code fails security checks
+            FieldConstraintViolationError: If code uses disallowed fields
         """
         # Validate input
         if not user_request or not user_request.strip():
             raise ValueError("Request cannot be empty")
 
-        # Build prompt
+        # Build prompt with field constraints if enabled
         prompt = self.template.render(
             user_request=user_request,
             factor_family=factor_family,
             include_examples=self.config.include_examples,
+            include_field_constraints=self.config.field_constraint_enabled,
         )
         system_prompt = self.template.get_system_prompt()
 
@@ -424,6 +615,17 @@ class FactorGenerationAgent:
             if not is_safe:
                 raise SecurityViolationError(
                     f"Security violations: {', '.join(violations)}"
+                )
+
+        # Field constraint validation
+        if self.config.field_constraint_enabled and factor_family:
+            validation_result = self.field_validator.validate(code, factor_family)
+            if not validation_result.is_valid:
+                raise FieldConstraintViolationError(
+                    f"Field constraint violations for {factor_family.value} family: "
+                    f"{', '.join(validation_result.violations)}. "
+                    f"Allowed fields: {', '.join(sorted(validation_result.allowed_fields))}",
+                    violations=validation_result.violations,
                 )
 
         # Extract factor name and description

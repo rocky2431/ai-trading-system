@@ -64,9 +64,10 @@
       "priority": "P0",
       "dependencies": ["0"],
       "estimated_days": 3,
-      "status": "pending",
+      "status": "completed",
       "type": "architecture",
-      "trace_to": "specs/architecture.md#qlib-deep-fork"
+      "trace_to": "specs/architecture.md#qlib-deep-fork",
+      "completed_at": "2025-12-10T00:35:00"
     },
     {
       "id": "5",
@@ -468,7 +469,7 @@
   "metadata": {
     "last_updated": "2025-12-09",
     "total_tasks": 38,
-    "completed_tasks": 4,
+    "completed_tasks": 5,
     "in_progress_tasks": 0,
     "priority_distribution": {
       "P0": 27,
@@ -486,9 +487,9 @@
   },
   "stats": {
     "total": 38,
-    "completed": 4,
+    "completed": 5,
     "in_progress": 0,
-    "pending": 34,
+    "pending": 33,
     "blocked": 0
   }
 }

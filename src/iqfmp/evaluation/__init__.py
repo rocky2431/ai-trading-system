@@ -31,6 +31,21 @@ from iqfmp.evaluation.research_ledger import (
     ThresholdExceededWarning,
     TrialRecord,
 )
+from iqfmp.evaluation.stability_analyzer import (
+    InsufficientDataError,
+    InvalidDataError,
+    MarketRegime,
+    MarketStabilityAnalyzer,
+    MarketStabilityResult,
+    RegimeStabilityAnalyzer,
+    RegimeStabilityResult,
+    StabilityAnalyzer,
+    StabilityConfig,
+    StabilityReport,
+    StabilityScore,
+    TimeStabilityAnalyzer,
+    TimeStabilityResult,
+)
 
 __all__ = [
     # CV Splitter
@@ -55,4 +70,18 @@ __all__ = [
     "ThresholdConfig",
     "ThresholdExceededWarning",
     "TrialRecord",
+    # Stability Analyzer
+    "InsufficientDataError",
+    "InvalidDataError",
+    "MarketRegime",
+    "MarketStabilityAnalyzer",
+    "MarketStabilityResult",
+    "RegimeStabilityAnalyzer",
+    "RegimeStabilityResult",
+    "StabilityAnalyzer",
+    "StabilityConfig",
+    "StabilityReport",
+    "StabilityScore",
+    "TimeStabilityAnalyzer",
+    "TimeStabilityResult",
 ]

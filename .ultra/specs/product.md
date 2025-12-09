@@ -57,18 +57,24 @@
 
 ### 3.1 MVP Feature Scope
 
-**MVP Features (Phase 1-2)**:
-1. Agent 驱动的因子自动生成
-2. 多维度因子评估与防过拟合
-3. Qlib 深度集成（非 Docker）
-4. 因子知识库与去重
-5. 基础监控面板
+> **Research Decision**: 用户选择**端到端完整**模式，MVP 包含从因子生成到实盘执行的完整链路。
 
-**Post-MVP Features**:
-- 策略自动组装
-- 实盘交易执行
-- 高级风控模块
+**MVP Features (12 weeks, ~53 工作日)**:
+
+| Epic | 核心能力 | 优先级 | 预估 |
+|------|----------|--------|------|
+| **E1: 因子生成** | Agent 驱动的因子自动生成 | P0 | 10d |
+| **E2: 防过拟合** | Research Ledger + 多切片验证 + 动态阈值 | P0 | 12d |
+| **E3: 策略组装** | 多因子策略生成 + 回测优化 | P0 | 12d |
+| **E4: 交易执行** | ccxt 实盘执行 + 风控模块 | P0 | 9d |
+| **E5: Dashboard** | React 监控面板 (与后端并行开发) | P1 | 10d |
+
+**Post-MVP Features (Phase 2+)**:
+- 因子自动修复 (LLM 迭代优化)
+- 因子聚类分析
+- 贝叶斯参数优化
 - 链上数据集成
+- 社交情绪因子
 
 ### 3.2 Epic Breakdown
 
@@ -155,41 +161,155 @@
 
 ---
 
-#### Epic 3: Qlib 深度集成
+#### Epic 3: 策略组装引擎
 
-**User Story 3.1**
-**As a** 系统
-**I want to** 直接执行因子代码（非 Docker 隔离）
-**So that** 反馈速度更快、调试更方便
+**User Story 3.1** (S-001)
+**As a** 量化研究员
+**I want to** 从验证通过的因子中选择组合
+**So that** 我能构建多因子策略
 
 **Acceptance Criteria**:
-- [ ] Qlib 直接初始化
-- [ ] 因子代码实时执行
-- [ ] 支持加密货币数据源
-- [ ] 执行时间 < 30s/因子
+- [ ] 支持因子库筛选（按家族/稳定性/IC）
+- [ ] 支持手动选择因子组合
+- [ ] 显示因子间相关性矩阵
+- [ ] 警告高度相关的因子组合
 
 **Priority**: P0
-**Trace to**: plan.md Module 3
+**Estimated**: 2d
 
 ---
 
-**User Story 3.2**
+**User Story 3.2** (S-002)
+**As a** 系统
+**I want to** 自动生成多因子策略代码
+**So that** 减少手动编码工作
+
+**Acceptance Criteria**:
+- [ ] LLM 生成策略框架代码
+- [ ] 支持多因子加权组合
+- [ ] 代码符合 Qlib Strategy 规范
+- [ ] 生成代码可直接执行
+
+**Priority**: P0
+**Estimated**: 3d
+
+---
+
+**User Story 3.3** (S-003)
 **As a** 量化研究员
-**I want to** 自定义开仓平仓逻辑
+**I want to** 自定义开仓/平仓/止盈止损逻辑
 **So that** 我能实现复杂的多空策略
 
 **Acceptance Criteria**:
-- [ ] 支持多空双向
-- [ ] 自定义止盈止损
+- [ ] 支持多空双向信号
+- [ ] 自定义止盈止损条件
 - [ ] 仓位管理（凯利公式/固定比例）
-- [ ] 风控检查（最大回撤/单笔亏损上限）
+- [ ] 时间止损支持
 
-**Priority**: P1
-**Trace to**: Phase 3
+**Priority**: P0
+**Estimated**: 2d
 
 ---
 
-#### Epic 4: 因子库管理
+**User Story 3.4** (S-004)
+**As a** 系统
+**I want to** 执行策略回测并生成报告
+**So that** 验证策略有效性
+
+**Acceptance Criteria**:
+- [ ] 多空双向回测
+- [ ] 完整绩效指标（Sharpe/MaxDD/Win Rate）
+- [ ] 分时段/分市场绩效分解
+- [ ] 可视化回测报告
+
+**Priority**: P0
+**Estimated**: 3d
+
+---
+
+#### Epic 4: 交易执行层
+
+**User Story 4.1** (T-001)
+**As a** 系统
+**I want to** 通过 ccxt 连接 Binance/OKX
+**So that** 获取实时数据和执行订单
+
+**Acceptance Criteria**:
+- [ ] 支持 Binance Futures API
+- [ ] 支持 OKX Swap API
+- [ ] 统一的交易所抽象接口
+- [ ] 自动重连机制
+
+**Priority**: P0
+**Estimated**: 2d
+
+---
+
+**User Story 4.2** (T-002)
+**As a** 系统
+**I want to** 执行多空双向订单
+**So that** 实现策略信号落地
+
+**Acceptance Criteria**:
+- [ ] 支持限价/市价订单
+- [ ] 支持开多/开空/平多/平空
+- [ ] 订单状态追踪
+- [ ] 部分成交处理
+
+**Priority**: P0
+**Estimated**: 2d
+
+---
+
+**User Story 4.3** (T-003)
+**As a** 系统
+**I want to** 实时监控持仓和 PnL
+**So that** 掌握账户状态
+
+**Acceptance Criteria**:
+- [ ] 实时持仓同步
+- [ ] 未实现/已实现 PnL 计算
+- [ ] 保证金使用率监控
+- [ ] WebSocket 实时推送
+
+**Priority**: P0
+**Estimated**: 2d
+
+---
+
+**User Story 4.4** (T-004)
+**As a** 系统
+**I want to** 执行风控检查
+**So that** 防止重大亏损
+
+**Acceptance Criteria**:
+- [ ] 最大回撤限制（可配置，默认 20%）
+- [ ] 单笔亏损上限（可配置）
+- [ ] 持仓集中度检查
+- [ ] 触发风控时自动减仓/平仓
+
+**Priority**: P0
+**Estimated**: 2d
+
+---
+
+**User Story 4.5** (T-005)
+**As a** 用户
+**I want to** 紧急情况一键平仓所有头寸
+**So that** 快速止损
+
+**Acceptance Criteria**:
+- [ ] Dashboard 一键平仓按钮
+- [ ] API 紧急平仓接口
+- [ ] 平仓前确认提示
+- [ ] 平仓结果通知
+
+**Priority**: P0
+**Estimated**: 1d
+
+---
+
+#### Epic 5: 因子库管理
 
 **User Story 4.1**
 **As a** 量化研究员
@@ -311,7 +431,11 @@
 ### 6.2 Business Constraints
 
 - **Team Size**: 1 人开发（初期）
-- **Timeline**: Phase 1-2（8周）为 MVP
+- **Timeline**: 12 周完成端到端 MVP
+- **Development Strategy**: 分 3 阶段递进
+  - Phase 1 (Week 1-4): 核心研究引擎
+  - Phase 2 (Week 5-8): 策略与执行
+  - Phase 3 (Week 9-12): Dashboard 与优化
 
 ---
 

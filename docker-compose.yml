@@ -1,0 +1,85 @@
+version: "3.9"
+
+services:
+  # TimescaleDB - Time series database for market data and factor values
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: iqfmp-timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: iqfmp
+      POSTGRES_PASSWORD: iqfmp_dev
+      POSTGRES_DB: iqfmp
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iqfmp -d iqfmp"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Redis - Cache and message broker
+  redis:
+    image: redis:7-alpine
+    container_name: iqfmp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Qdrant - Vector database for factor similarity search
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: iqfmp-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # RabbitMQ - Message queue for async tasks (Celery)
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: iqfmp-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: iqfmp
+      RABBITMQ_DEFAULT_PASS: iqfmp_dev
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  timescaledb_data:
+  redis_data:
+  qdrant_data:
+  rabbitmq_data:
+
+networks:
+  default:
+    name: iqfmp-network

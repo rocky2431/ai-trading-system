@@ -70,6 +70,14 @@ credentials.json
 # Ultra Builder Pro
 .ultra/context-archive/session-*.md
 .ultra/backups/
+.ultra/changes/archive/
+
+# Ruff
+.ruff_cache/
+
+# Coverage
+coverage.xml
+coverage_html/
 
 # Qlib
 ~/.qlib/

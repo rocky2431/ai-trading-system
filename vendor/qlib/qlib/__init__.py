@@ -2,12 +2,8 @@
 # Licensed under the MIT License.
 from pathlib import Path
 
-from setuptools_scm import get_version
-
-try:
-    from ._version import version as __version__
-except ImportError:
-    __version__ = get_version(root="..", relative_to=__file__)
+# Hardcoded version for IQFMP fork (avoids setuptools-scm dependency)
+__version__ = "0.9.6.99"  # Based on Qlib 0.9.6 with IQFMP crypto extensions
 __version__bak = __version__  # This version is backup for QlibConfig.reset_qlib_version
 import logging
 import os

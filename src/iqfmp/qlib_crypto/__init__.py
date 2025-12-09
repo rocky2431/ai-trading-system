@@ -9,6 +9,7 @@ and trading features including:
 """
 
 from iqfmp.qlib_crypto.data.handler import (
+    QLIB_AVAILABLE,
     CryptoDataConfig,
     CryptoDataHandler,
     CryptoField,
@@ -23,6 +24,7 @@ from iqfmp.qlib_crypto.data.validator import (
 
 __all__ = [
     # Handler
+    "QLIB_AVAILABLE",
     "CryptoDataHandler",
     "CryptoDataConfig",
     "CryptoField",

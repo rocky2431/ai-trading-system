@@ -25,7 +25,7 @@
       "priority": "P0",
       "dependencies": ["0"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "in_progress",
       "type": "feature",
       "trace_to": "specs/architecture.md#code-execution-safety"
     },

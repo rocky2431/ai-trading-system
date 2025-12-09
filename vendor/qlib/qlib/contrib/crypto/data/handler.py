@@ -398,6 +398,173 @@ def _create_crypto_data_handler():
             rename_map = {k: v for k, v in column_mapping.items() if k in df.columns}
             return df.rename(columns=rename_map)
 
+        # === Funding Rate Methods ===
+
+        def align_funding_rate(self, method: str = "ffill") -> pd.DataFrame:
+            """Align sparse funding rate data to match OHLCV frequency.
+
+            Funding rates are typically settled every 8 hours (00:00, 08:00, 16:00 UTC),
+            but OHLCV data may be hourly or more granular. This method aligns the
+            sparse funding rate data to match the OHLCV frequency.
+
+            Args:
+                method: Alignment method:
+                    - "ffill": Forward fill (carry last known rate)
+                    - "interpolate": Linear interpolation between settlements
+                    - "distribute": Distribute rate evenly (rate / 8 for hourly data)
+
+            Returns:
+                DataFrame with aligned funding_rate column.
+            """
+            if self._crypto_data is None:
+                raise RuntimeError("Data not loaded. Call load() first.")
+
+            df = self._crypto_data.copy()
+
+            if "funding_rate" not in df.columns:
+                return df
+
+            if method == "ffill":
+                df["funding_rate"] = df["funding_rate"].ffill()
+            elif method == "interpolate":
+                df["funding_rate"] = df["funding_rate"].interpolate(method="linear")
+            elif method == "distribute":
+                # Count periods between funding settlements (typically 8 hours)
+                settlement_interval = 8  # hours
+                df["funding_rate"] = df["funding_rate"].ffill() / settlement_interval
+            else:
+                raise ValueError(f"Unknown alignment method: {method}")
+
+            return df
+
+        # === Basis Calculation Methods ===
+
+        def calculate_basis(self, method: str = "absolute") -> Optional[pd.Series]:
+            """Calculate basis (spread between mark price and index price).
+
+            Args:
+                method: Calculation method:
+                    - "absolute": mark_price - index_price
+                    - "percentage": (mark_price - index_price) / index_price * 100
+
+            Returns:
+                Series with basis values, or None if mark/index prices unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            mark = self.get_field(CryptoField.MARK_PRICE)
+            index = self.get_field(CryptoField.INDEX_PRICE)
+
+            if mark is None or index is None:
+                return None
+
+            if method == "absolute":
+                return mark - index
+            elif method == "percentage":
+                return (mark - index) / index * 100
+            else:
+                raise ValueError(f"Unknown basis calculation method: {method}")
+
+        def calculate_annualized_basis(self) -> Optional[pd.Series]:
+            """Calculate annualized basis rate.
+
+            Returns:
+                Series with annualized basis rate (percentage), or None if unavailable.
+            """
+            basis_pct = self.calculate_basis(method="percentage")
+            if basis_pct is None:
+                return None
+
+            # Estimate data frequency to annualize
+            freq_minutes = self._estimate_data_frequency()
+            periods_per_year = (365 * 24 * 60) / freq_minutes
+
+            return basis_pct * periods_per_year / 100  # Convert to decimal rate
+
+        # === Open Interest Methods ===
+
+        def calculate_oi_change(self, method: str = "absolute") -> Optional[pd.Series]:
+            """Calculate open interest change rate.
+
+            Args:
+                method: Calculation method:
+                    - "absolute": Absolute change (diff)
+                    - "percentage": Percentage change
+
+            Returns:
+                Series with OI change values, or None if OI unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            oi = self.get_field(CryptoField.OPEN_INTEREST)
+            if oi is None:
+                return None
+
+            if method == "absolute":
+                return oi.diff().dropna()
+            elif method == "percentage":
+                # Handle division by zero gracefully
+                pct_change = oi.pct_change() * 100
+                # Replace inf values with NaN, then forward fill or use 0
+                pct_change = pct_change.replace([np.inf, -np.inf], np.nan)
+                return pct_change.dropna()
+            else:
+                raise ValueError(f"Unknown OI change method: {method}")
+
+        def normalize_oi(self, method: str = "contract_value") -> Optional[pd.Series]:
+            """Normalize open interest to contract value.
+
+            Args:
+                method: Normalization method:
+                    - "contract_value": OI * close price (notional value)
+
+            Returns:
+                Series with normalized OI values, or None if OI unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            oi = self.get_field(CryptoField.OPEN_INTEREST)
+            close = self.get_field(CryptoField.CLOSE)
+
+            if oi is None or close is None:
+                return None
+
+            if method == "contract_value":
+                return oi * close
+            else:
+                raise ValueError(f"Unknown OI normalization method: {method}")
+
+        # === Exchange Detection Methods ===
+
+        def detect_exchange_format(self, data: pd.DataFrame) -> Exchange:
+            """Auto-detect exchange format from column names.
+
+            Args:
+                data: DataFrame to analyze.
+
+            Returns:
+                Detected Exchange enum value.
+            """
+            columns = set(col.lower() for col in data.columns)
+
+            # OKX has distinctive short column names
+            if {"ts", "instid", "o", "h", "l", "c"}.intersection(columns):
+                return Exchange.OKX
+
+            # Bybit uses turnover and openInterest
+            if "turnover" in columns or "openinterest" in columns:
+                return Exchange.BYBIT
+
+            # Binance uses openTime and camelCase
+            if "opentime" in columns or "closetime" in columns:
+                return Exchange.BINANCE
+
+            # Default to Binance (most common format)
+            return Exchange.BINANCE
+
         # === Private Helpers ===
 
         def _normalize_columns(

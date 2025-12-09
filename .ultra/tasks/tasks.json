@@ -51,9 +51,10 @@
       "priority": "P0",
       "dependencies": ["2"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "completed",
       "type": "feature",
-      "trace_to": "specs/architecture.md#code-execution-safety"
+      "trace_to": "specs/architecture.md#code-execution-safety",
+      "completed_at": "2025-12-10T00:15:00"
     },
     {
       "id": "4",
@@ -467,7 +468,7 @@
   "metadata": {
     "last_updated": "2025-12-09",
     "total_tasks": 38,
-    "completed_tasks": 3,
+    "completed_tasks": 4,
     "in_progress_tasks": 0,
     "priority_distribution": {
       "P0": 27,
@@ -485,9 +486,9 @@
   },
   "stats": {
     "total": 38,
-    "completed": 3,
+    "completed": 4,
     "in_progress": 0,
-    "pending": 35,
+    "pending": 34,
     "blocked": 0
   }
 }

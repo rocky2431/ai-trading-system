@@ -2,20 +2,36 @@
 
 This module provides CryptoDataHandler, a Qlib-compatible data handler
 that supports cryptocurrency-specific data fields.
+
+Deep Fork Strategy:
+- If Qlib is installed: Inherits from DataHandlerLP for full compatibility
+- If Qlib is not installed: Uses standalone implementation
 """
 
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 
 from iqfmp.qlib_crypto.data.validator import (
     DataValidator,
     ValidationError,
     ValidationResult,
 )
+
+# Try to import Qlib components
+QLIB_AVAILABLE = False
+_QlibDataHandlerLP = None
+
+try:
+    from qlib.data.dataset.handler import DataHandlerLP as QlibDataHandlerLP
+    QLIB_AVAILABLE = True
+    _QlibDataHandlerLP = QlibDataHandlerLP
+except (ImportError, LookupError, Exception):
+    # Qlib not available or has version detection issues
+    pass
 
 
 class CryptoField(str, Enum):
@@ -66,40 +82,18 @@ class TimeFrame(str, Enum):
     W1 = "1w"
 
     def to_minutes(self) -> int:
-        """Convert timeframe to minutes.
-
-        Returns:
-            Number of minutes in the timeframe.
-        """
+        """Convert timeframe to minutes."""
         mapping = {
-            "1m": 1,
-            "5m": 5,
-            "15m": 15,
-            "30m": 30,
-            "1h": 60,
-            "4h": 240,
-            "8h": 480,
-            "1d": 1440,
-            "1w": 10080,
+            "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+            "1h": 60, "4h": 240, "8h": 480, "1d": 1440, "1w": 10080,
         }
         return mapping[self.value]
 
     def to_pandas_freq(self) -> str:
-        """Convert timeframe to pandas frequency string.
-
-        Returns:
-            Pandas frequency string.
-        """
+        """Convert timeframe to pandas frequency string."""
         mapping = {
-            "1m": "1min",
-            "5m": "5min",
-            "15m": "15min",
-            "30m": "30min",
-            "1h": "1h",
-            "4h": "4h",
-            "8h": "8h",
-            "1d": "1D",
-            "1w": "1W",
+            "1m": "1min", "5m": "5min", "15m": "15min", "30m": "30min",
+            "1h": "1h", "4h": "4h", "8h": "8h", "1d": "1D", "1w": "1W",
         }
         return mapping[self.value]
 
@@ -109,11 +103,8 @@ class CryptoDataConfig:
     """Configuration for CryptoDataHandler."""
 
     fields: list[CryptoField] = field(default_factory=lambda: [
-        CryptoField.OPEN,
-        CryptoField.HIGH,
-        CryptoField.LOW,
-        CryptoField.CLOSE,
-        CryptoField.VOLUME,
+        CryptoField.OPEN, CryptoField.HIGH, CryptoField.LOW,
+        CryptoField.CLOSE, CryptoField.VOLUME,
     ])
     exchange: Exchange = Exchange.BINANCE
     timeframe: TimeFrame = TimeFrame.H1
@@ -145,350 +136,296 @@ EXCHANGE_COLUMN_MAPPINGS: dict[Exchange, dict[str, str]] = {
 }
 
 
-class CryptoDataHandler:
-    """Data handler for cryptocurrency market data.
+# === Base class for standalone mode ===
+class _StandaloneDataHandler:
+    """Standalone base class when Qlib is not available."""
+    pass
 
-    This class provides a Qlib-compatible interface for loading,
-    validating, and transforming cryptocurrency market data.
 
-    Attributes:
-        config: Handler configuration.
-        data: Loaded data (None until load() is called).
-    """
+# === Factory function to create the handler class ===
+def _create_crypto_data_handler():
+    """Create CryptoDataHandler with conditional Qlib inheritance."""
 
-    def __init__(self, config: Optional[CryptoDataConfig] = None) -> None:
-        """Initialize the data handler.
+    # Choose base class
+    if QLIB_AVAILABLE and _QlibDataHandlerLP is not None:
+        BaseClass = _QlibDataHandlerLP
+    else:
+        BaseClass = _StandaloneDataHandler
 
-        Args:
-            config: Optional configuration. Uses defaults if not provided.
+    class _CryptoDataHandler(BaseClass):  # type: ignore[misc]
+        """Data handler for cryptocurrency market data.
+
+        This class provides a Qlib-compatible interface for loading,
+        validating, and transforming cryptocurrency market data.
+
+        Deep Fork Integration:
+        - When Qlib is installed: Inherits from DataHandlerLP
+        - When Qlib is not installed: Standalone implementation
+        - Always implements Qlib-compatible interface (fetch, get_cols)
         """
-        self.config = config or CryptoDataConfig()
-        self.data: Optional[pd.DataFrame] = None
-        self._validator = DataValidator()
 
-    def load(
-        self,
-        data: pd.DataFrame,
-        exchange: Optional[Exchange] = None,
-        validate: bool = False,
-        fill_na: bool = False,
-    ) -> None:
-        """Load data into the handler.
+        def __init__(
+            self,
+            config: Optional[CryptoDataConfig] = None,
+            **kwargs: Any,
+        ) -> None:
+            """Initialize the data handler."""
+            if QLIB_AVAILABLE and _QlibDataHandlerLP is not None:
+                super().__init__(**kwargs)
 
-        Args:
-            data: DataFrame with cryptocurrency data.
-            exchange: Exchange format for column mapping.
-            validate: Whether to validate data before loading.
-            fill_na: Whether to fill NaN values.
+            self.config = config or CryptoDataConfig()
+            self.data: Optional[pd.DataFrame] = None
+            self._validator = DataValidator()
 
-        Raises:
-            ValidationError: If validation fails and validate=True.
-        """
-        if data.empty:
+        # === Qlib-compatible interface ===
+
+        def fetch(
+            self,
+            selector: Any = None,
+            level: str = "feature",
+            col_set: str = "__all",
+        ) -> pd.DataFrame:
+            """Fetch data (Qlib-compatible interface)."""
+            if self.data is None:
+                return pd.DataFrame()
+
+            df = self.data.copy()
+
+            # Apply selector
+            if selector is not None and "symbol" in df.columns:
+                if isinstance(selector, str):
+                    df = df[df["symbol"] == selector]
+                elif isinstance(selector, (list, tuple)):
+                    df = df[df["symbol"].isin(selector)]
+
+            # Apply column set filter
+            if col_set != "__all":
+                cols = self.get_cols(col_set)
+                available = [c for c in cols if c in df.columns]
+                df = df[available]
+
+            return df
+
+        def get_cols(self, col_set: str = "__all") -> list[str]:
+            """Get column names (Qlib-compatible interface)."""
+            if self.data is None:
+                return []
+
+            if col_set == "__all":
+                return list(self.data.columns)
+
+            feature_cols = [
+                "open", "high", "low", "close", "volume",
+                "funding_rate", "open_interest", "basis",
+            ]
+            label_cols = ["label", "target", "return"]
+
+            if col_set == "feature":
+                return [c for c in feature_cols if c in self.data.columns]
+            elif col_set == "label":
+                return [c for c in label_cols if c in self.data.columns]
+
+            return list(self.data.columns)
+
+        # === Core methods ===
+
+        def load(
+            self,
+            data: pd.DataFrame,
+            exchange: Optional[Exchange] = None,
+            validate: bool = False,
+            fill_na: bool = False,
+        ) -> None:
+            """Load data into the handler."""
+            if data.empty:
+                if validate:
+                    raise ValidationError("DataFrame is empty")
+                self.data = data
+                return
+
+            # Apply exchange-specific column mappings
+            if exchange:
+                data = self._normalize_columns(data, exchange)
+            elif self.config.exchange:
+                data = self._normalize_columns(data, self.config.exchange)
+
+            # Normalize column names
+            data = data.copy()
+            data.columns = [col.lower() for col in data.columns]
+
+            # Validate if requested
             if validate:
-                raise ValidationError("DataFrame is empty")
+                result = self.validate(data)
+                if not result.is_valid:
+                    raise ValidationError(
+                        f"Validation failed: missing required columns: {result.errors}"
+                    )
+
+            # Fill NaN values if requested
+            if fill_na:
+                data = self._fill_na(data)
+
             self.data = data
-            return
 
-        # Apply exchange-specific column mappings
-        if exchange:
-            data = self._normalize_columns(data, exchange)
-        elif self.config.exchange:
-            data = self._normalize_columns(data, self.config.exchange)
+        def validate(self, data: Optional[pd.DataFrame] = None) -> ValidationResult:
+            """Validate data."""
+            if data is None:
+                data = self.data
+            if data is None:
+                return ValidationResult(is_valid=False, errors=["No data to validate"])
+            return self._validator.validate(data)
 
-        # Normalize column names to lowercase
-        data = data.copy()
-        data.columns = [col.lower() for col in data.columns]
+        def get_field(self, field: CryptoField) -> Optional[pd.Series]:
+            """Get a specific field from the loaded data."""
+            if self.data is None:
+                raise RuntimeError("Data not loaded. Call load() first.")
+            field_name = field.value
+            if field_name in self.data.columns:
+                return self.data[field_name]
+            return None
 
-        # Validate if requested
-        if validate:
-            result = self.validate(data)
-            if not result.is_valid:
-                raise ValidationError(
-                    f"Validation failed: missing required columns: "
-                    f"{result.errors}"
-                )
-
-        # Fill NaN values if requested
-        if fill_na:
-            data = self._fill_na(data)
-
-        self.data = data
-
-    def validate(self, data: Optional[pd.DataFrame] = None) -> ValidationResult:
-        """Validate data.
-
-        Args:
-            data: DataFrame to validate. Uses loaded data if not provided.
-
-        Returns:
-            ValidationResult with errors and warnings.
-        """
-        if data is None:
-            data = self.data
-        if data is None:
-            return ValidationResult(
-                is_valid=False,
-                errors=["No data to validate"],
-            )
-        return self._validator.validate(data)
-
-    def get_field(self, field: CryptoField) -> Optional[pd.Series]:
-        """Get a specific field from the loaded data.
-
-        Args:
-            field: The field to retrieve.
-
-        Returns:
-            Series with field data, or None if not found.
-
-        Raises:
-            RuntimeError: If data not loaded.
-        """
-        if self.data is None:
-            raise RuntimeError("Data not loaded. Call load() first.")
-
-        field_name = field.value
-        if field_name in self.data.columns:
-            return self.data[field_name]
-        return None
-
-    def get_symbols(self) -> list[str]:
-        """Get list of symbols in the data.
-
-        Returns:
-            List of unique symbol names.
-        """
-        if self.data is None:
+        def get_symbols(self) -> list[str]:
+            """Get list of symbols in the data."""
+            if self.data is None:
+                return []
+            if "symbol" in self.data.columns:
+                return list(self.data["symbol"].unique())
             return []
 
-        if "symbol" in self.data.columns:
-            return list(self.data["symbol"].unique())
-        return []
+        def calculate_returns(self) -> Optional[pd.Series]:
+            """Calculate simple returns from close prices."""
+            if self.data is None:
+                return None
+            close = self.get_field(CryptoField.CLOSE)
+            if close is None:
+                return None
+            return close.pct_change().dropna()
 
-    def calculate_returns(self) -> Optional[pd.Series]:
-        """Calculate simple returns from close prices.
+        def calculate_funding_adjusted_returns(self) -> Optional[pd.Series]:
+            """Calculate funding-adjusted returns for perpetual futures."""
+            if self.data is None:
+                return None
+            close = self.get_field(CryptoField.CLOSE)
+            funding = self.get_field(CryptoField.FUNDING_RATE)
+            if close is None:
+                return None
+            returns = close.pct_change()
+            if funding is not None:
+                returns = returns - funding
+            return returns.dropna()
 
-        Returns:
-            Series of returns, or None if data not loaded.
-        """
-        if self.data is None:
+        def resample(self, timeframe: TimeFrame) -> pd.DataFrame:
+            """Resample data to a different timeframe."""
+            if self.data is None:
+                raise RuntimeError("Data not loaded. Call load() first.")
+
+            current_minutes = self._estimate_data_frequency()
+            target_minutes = timeframe.to_minutes()
+
+            if target_minutes < current_minutes:
+                raise ValueError(
+                    f"Cannot resample from {current_minutes}min to "
+                    f"{target_minutes}min (upsampling not supported)"
+                )
+
+            datetime_col = self._find_datetime_column()
+            if datetime_col is None:
+                raise ValueError("No datetime column found for resampling")
+
+            df = self.data.copy()
+            df = df.set_index(datetime_col)
+
+            agg_rules: dict[str, Any] = {}
+            if "open" in df.columns:
+                agg_rules["open"] = "first"
+            if "high" in df.columns:
+                agg_rules["high"] = "max"
+            if "low" in df.columns:
+                agg_rules["low"] = "min"
+            if "close" in df.columns:
+                agg_rules["close"] = "last"
+            if "volume" in df.columns:
+                agg_rules["volume"] = "sum"
+            if "funding_rate" in df.columns:
+                agg_rules["funding_rate"] = "sum"
+            if "open_interest" in df.columns:
+                agg_rules["open_interest"] = "last"
+
+            freq = timeframe.to_pandas_freq()
+            resampled = df.resample(freq).agg(agg_rules)
+            return resampled.reset_index()
+
+        def to_qlib_format(self) -> pd.DataFrame:
+            """Convert data to Qlib-compatible format."""
+            if self.data is None:
+                raise RuntimeError("Data not loaded. Call load() first.")
+
+            df = self.data.copy()
+            column_mapping = {
+                "open": "$open", "high": "$high", "low": "$low",
+                "close": "$close", "volume": "$volume",
+                "funding_rate": "$funding_rate",
+                "open_interest": "$open_interest", "basis": "$basis",
+            }
+            rename_map = {k: v for k, v in column_mapping.items() if k in df.columns}
+            return df.rename(columns=rename_map)
+
+        # === Private helpers ===
+
+        def _normalize_columns(
+            self, data: pd.DataFrame, exchange: Exchange
+        ) -> pd.DataFrame:
+            """Normalize column names based on exchange format."""
+            if exchange not in EXCHANGE_COLUMN_MAPPINGS:
+                return data
+            mapping = EXCHANGE_COLUMN_MAPPINGS[exchange]
+            df = data.copy()
+            existing = {col.lower(): col for col in df.columns}
+            rename_map = {}
+            for old_name, new_name in mapping.items():
+                if old_name.lower() in existing:
+                    rename_map[existing[old_name.lower()]] = new_name
+            if rename_map:
+                df = df.rename(columns=rename_map)
+            return df
+
+        def _fill_na(self, data: pd.DataFrame) -> pd.DataFrame:
+            """Fill NaN values in the data."""
+            df = data.copy()
+            price_cols = ["open", "high", "low", "close"]
+            for col in price_cols:
+                if col in df.columns:
+                    df[col] = df[col].ffill()
+            if "volume" in df.columns:
+                df["volume"] = df["volume"].fillna(0)
+            if "funding_rate" in df.columns:
+                df["funding_rate"] = df["funding_rate"].fillna(0)
+            return df
+
+        def _find_datetime_column(self) -> Optional[str]:
+            """Find the datetime column in loaded data."""
+            if self.data is None:
+                return None
+            for col in ["datetime", "timestamp", "date", "time", "open_time"]:
+                if col in self.data.columns:
+                    return col
             return None
 
-        close = self.get_field(CryptoField.CLOSE)
-        if close is None:
-            return None
+        def _estimate_data_frequency(self) -> int:
+            """Estimate the data frequency in minutes."""
+            if self.data is None or len(self.data) < 2:
+                return 60
+            datetime_col = self._find_datetime_column()
+            if datetime_col is None:
+                return 60
+            dt = pd.to_datetime(self.data[datetime_col])
+            diff = dt.diff().dropna()
+            if len(diff) == 0:
+                return 60
+            return int(diff.median().total_seconds() / 60)
 
-        return close.pct_change().dropna()
+    return _CryptoDataHandler
 
-    def calculate_funding_adjusted_returns(self) -> Optional[pd.Series]:
-        """Calculate funding-adjusted returns for perpetual futures.
 
-        Returns:
-            Series of adjusted returns, or None if data not available.
-        """
-        if self.data is None:
-            return None
-
-        close = self.get_field(CryptoField.CLOSE)
-        funding = self.get_field(CryptoField.FUNDING_RATE)
-
-        if close is None:
-            return None
-
-        returns = close.pct_change()
-
-        if funding is not None:
-            # Subtract funding rate from returns (for long positions)
-            returns = returns - funding
-
-        return returns.dropna()
-
-    def resample(self, timeframe: TimeFrame) -> pd.DataFrame:
-        """Resample data to a different timeframe.
-
-        Args:
-            timeframe: Target timeframe.
-
-        Returns:
-            Resampled DataFrame.
-
-        Raises:
-            ValueError: If trying to upsample (lower to higher frequency).
-            RuntimeError: If data not loaded.
-        """
-        if self.data is None:
-            raise RuntimeError("Data not loaded. Call load() first.")
-
-        # Check if we're trying to upsample
-        current_minutes = self._estimate_data_frequency()
-        target_minutes = timeframe.to_minutes()
-
-        if target_minutes < current_minutes:
-            raise ValueError(
-                f"Cannot resample from {current_minutes}min to "
-                f"{target_minutes}min (upsampling not supported)"
-            )
-
-        # Find datetime column
-        datetime_col = self._find_datetime_column()
-        if datetime_col is None:
-            raise ValueError("No datetime column found for resampling")
-
-        # Set datetime as index for resampling
-        df = self.data.copy()
-        df = df.set_index(datetime_col)
-
-        # Define aggregation rules
-        agg_rules: dict[str, Any] = {}
-        if "open" in df.columns:
-            agg_rules["open"] = "first"
-        if "high" in df.columns:
-            agg_rules["high"] = "max"
-        if "low" in df.columns:
-            agg_rules["low"] = "min"
-        if "close" in df.columns:
-            agg_rules["close"] = "last"
-        if "volume" in df.columns:
-            agg_rules["volume"] = "sum"
-        if "quote_volume" in df.columns:
-            agg_rules["quote_volume"] = "sum"
-        if "trades" in df.columns:
-            agg_rules["trades"] = "sum"
-        if "funding_rate" in df.columns:
-            agg_rules["funding_rate"] = "sum"  # Cumulative funding
-        if "open_interest" in df.columns:
-            agg_rules["open_interest"] = "last"
-
-        # Perform resampling
-        freq = timeframe.to_pandas_freq()
-        resampled = df.resample(freq).agg(agg_rules)
-
-        return resampled.reset_index()
-
-    def to_qlib_format(self) -> pd.DataFrame:
-        """Convert data to Qlib-compatible format.
-
-        Returns:
-            DataFrame in Qlib format with proper column naming.
-        """
-        if self.data is None:
-            raise RuntimeError("Data not loaded. Call load() first.")
-
-        df = self.data.copy()
-
-        # Qlib uses $column naming convention for features
-        column_mapping = {
-            "open": "$open",
-            "high": "$high",
-            "low": "$low",
-            "close": "$close",
-            "volume": "$volume",
-            "funding_rate": "$funding_rate",
-            "open_interest": "$open_interest",
-            "basis": "$basis",
-        }
-
-        # Only rename columns that exist
-        rename_map = {k: v for k, v in column_mapping.items() if k in df.columns}
-        df = df.rename(columns=rename_map)
-
-        return df
-
-    def _normalize_columns(
-        self, data: pd.DataFrame, exchange: Exchange
-    ) -> pd.DataFrame:
-        """Normalize column names based on exchange format.
-
-        Args:
-            data: DataFrame with exchange-specific columns.
-            exchange: Source exchange.
-
-        Returns:
-            DataFrame with normalized column names.
-        """
-        if exchange not in EXCHANGE_COLUMN_MAPPINGS:
-            return data
-
-        mapping = EXCHANGE_COLUMN_MAPPINGS[exchange]
-        df = data.copy()
-
-        # Rename columns
-        existing_cols = {col.lower(): col for col in df.columns}
-        rename_map = {}
-
-        for old_name, new_name in mapping.items():
-            old_lower = old_name.lower()
-            if old_lower in existing_cols:
-                rename_map[existing_cols[old_lower]] = new_name
-
-        if rename_map:
-            df = df.rename(columns=rename_map)
-
-        return df
-
-    def _fill_na(self, data: pd.DataFrame) -> pd.DataFrame:
-        """Fill NaN values in the data.
-
-        Args:
-            data: DataFrame with potential NaN values.
-
-        Returns:
-            DataFrame with NaN values filled.
-        """
-        df = data.copy()
-
-        # Forward fill for price columns
-        price_cols = ["open", "high", "low", "close", "mark_price", "index_price"]
-        for col in price_cols:
-            if col in df.columns:
-                df[col] = df[col].ffill()
-
-        # Fill volume with 0
-        if "volume" in df.columns:
-            df["volume"] = df["volume"].fillna(0)
-
-        # Fill funding rate with 0
-        if "funding_rate" in df.columns:
-            df["funding_rate"] = df["funding_rate"].fillna(0)
-
-        return df
-
-    def _find_datetime_column(self) -> Optional[str]:
-        """Find the datetime column in loaded data.
-
-        Returns:
-            Column name if found, None otherwise.
-        """
-        if self.data is None:
-            return None
-
-        datetime_candidates = ["datetime", "timestamp", "date", "time", "open_time"]
-        for col in datetime_candidates:
-            if col in self.data.columns:
-                return col
-        return None
-
-    def _estimate_data_frequency(self) -> int:
-        """Estimate the data frequency in minutes.
-
-        Returns:
-            Estimated frequency in minutes.
-        """
-        if self.data is None or len(self.data) < 2:
-            return 60  # Default to hourly
-
-        datetime_col = self._find_datetime_column()
-        if datetime_col is None:
-            return 60
-
-        # Calculate time difference between consecutive rows
-        dt_series = pd.to_datetime(self.data[datetime_col])
-        diff = dt_series.diff().dropna()
-
-        if len(diff) == 0:
-            return 60
-
-        # Get median difference in minutes
-        median_diff = diff.median().total_seconds() / 60
-        return int(median_diff)
+# Create the actual class
+CryptoDataHandler = _create_crypto_data_handler()

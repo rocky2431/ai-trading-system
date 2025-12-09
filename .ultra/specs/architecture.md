@@ -100,6 +100,8 @@
 
 ## 3. Technology Stack
 
+> **Research Validation**: 技术选型已通过 Round 3 验证，关键组件文档确认完成。
+
 ### 3.1 Backend Stack
 
 #### 3.1.1 Runtime & Framework Selection
@@ -114,14 +116,113 @@
 
 #### 3.1.2 Technical Details
 
-| 组件 | 技术选型 | 版本 | 理由 |
-|------|---------|------|------|
-| Runtime | Python | 3.12+ | Qlib 兼容、性能优化 |
-| API Framework | FastAPI | 0.110+ | 异步支持、类型提示 |
-| Agent Framework | LangGraph + LangChain | 0.2+ | 状态机编排、官方维护 |
-| LLM Provider | OpenRouter | v1 | 多模型支持、无 vendor lock-in |
-| Quant Kernel | Qlib | latest | 微软维护、社区丰富 |
-| Trading | ccxt | 4.x | 统一交易所接口 |
+| 组件 | 技术选型 | 版本 | 理由 | 验证状态 |
+|------|---------|------|------|----------|
+| Runtime | Python | 3.12+ | Qlib 兼容、性能优化 | ✅ |
+| API Framework | FastAPI | 0.110+ | 异步支持、类型提示 | ✅ |
+| Agent Framework | **LangGraph** | 0.2+ | 状态机编排、Checkpoint 支持 | ✅ 文档验证 |
+| LLM Provider | **OpenRouter** | v1 | 多模型切换 (DeepSeek/Claude/GPT) | ✅ |
+| Quant Kernel | **Qlib (Fork)** | latest | 深度定制加密货币支持 | ✅ 文档验证 |
+| Trading | ccxt | 4.x | 统一交易所接口 | ✅ |
+| Task Queue | **Celery + Redis** | 5.3+ | 异步任务、分布式回测 | ✅ |
+
+#### 3.1.3 LLM Provider Strategy
+
+```python
+# OpenRouter 多模型配置
+LLM_MODELS = {
+    "factor_generation": "deepseek/deepseek-coder",      # 代码生成
+    "strategy_design": "anthropic/claude-3.5-sonnet",    # 策略设计
+    "code_review": "openai/gpt-4o",                      # 代码审查
+    "fallback": "deepseek/deepseek-chat"                 # 备用
+}
+```
+
+#### 3.1.4 Qlib Deep Fork 策略
+
+> **用户决策 (Round 4)**: 深度 Fork - 完全定制加密货币支持
+
+**文档验证结果**:
+- ✅ 官方有 `scripts/data_collector/crypto/` 数据收集器
+- ✅ DataHandlerLP 支持自定义特征和数据加载
+- ✅ Provider.register 可注册自定义数据提供者
+
+**深度 Fork 范围**:
+
+```
+qlib-crypto/
+├── qlib/                        # 核心 Fork
+│   ├── data/
+│   │   ├── crypto_handler.py    # CryptoDataHandler (新增)
+│   │   ├── funding_rate.py      # 资金费率处理 (新增)
+│   │   └── orderbook.py         # 订单簿数据 (新增)
+│   ├── contrib/
+│   │   └── crypto_factors/      # 加密货币因子库 (新增)
+│   └── backtest/
+│       └── crypto_executor.py   # 多空执行器 (新增)
+├── scripts/
+│   └── sync_upstream.sh         # 上游同步脚本
+└── tests/
+    └── crypto/                  # 加密货币专属测试
+```
+
+**CryptoDataHandler 完整实现**:
+
+```python
+class CryptoDataHandler(DataHandlerLP):
+    """深度定制加密货币数据处理器"""
+
+    CRYPTO_FIELDS = [
+        # 基础 OHLCV
+        'open', 'high', 'low', 'close', 'volume',
+        # 衍生品特有
+        'funding_rate', 'open_interest', 'basis', 'premium',
+        # 订单簿
+        'bid_volume', 'ask_volume', 'spread', 'depth_imbalance',
+        # 链上数据 (可选)
+        'whale_flow', 'exchange_reserve'
+    ]
+
+    def __init__(self, instruments, start_time, end_time, **kwargs):
+        super().__init__(instruments, start_time, end_time, **kwargs)
+        self._init_crypto_features()
+        self._setup_funding_rate_handler()
+
+    def _setup_funding_rate_handler(self):
+        """资金费率时间对齐处理"""
+        self.funding_schedule = {
+            'binance': ['00:00', '08:00', '16:00'],
+            'okx': ['00:00', '08:00', '16:00'],
+        }
+```
+
+**上游同步策略**:
+- 每周检查 qlib/qlib 上游更新
+- 使用 git rebase 合并非冲突更新
+- 关键变更手动评估
+
+#### 3.1.5 LangGraph 状态持久化
+
+**文档验证结果**:
+- ✅ 支持 SqliteSaver (开发) / PostgresSaver (生产)
+- ✅ thread_id 隔离不同会话
+- ✅ checkpoint_id 支持 time-travel 调试
+
+```python
+from langgraph.checkpoint.postgres import PostgresSaver
+
+# 生产环境使用 PostgreSQL
+checkpointer = PostgresSaver.from_conn_string(
+    "postgresql://user:pass@localhost/iqfmp"
+)
+
+# 编译 Agent 图
+graph = workflow.compile(checkpointer=checkpointer)
+
+# 执行（支持断点续传）
+config = {"configurable": {"thread_id": "factor-mining-session-1"}}
+result = graph.invoke(state, config)
+```
 
 ---
 
@@ -163,23 +264,47 @@
 
 #### 3.4.1 Framework Selection
 
-**Decision**: React + TypeScript + Ant Design
+**Decision**: React + TypeScript + shadcn/ui
 
 **Rationale**:
 - **Traces to**: plan.md - 已有 React 基础
-- **Team Expertise**: 熟悉 React 生态
-- **Ecosystem**: Ant Design 适合数据密集型 Dashboard
+- **User Choice**: 现代设计、高度可定制
+- **Ecosystem**: shadcn/ui 基于 Radix，可访问性好
 
 #### 3.4.2 Technical Details
 
-| 组件 | 技术 | 版本 |
-|------|------|------|
-| Framework | React | 18.3+ |
-| Language | TypeScript | 5.x |
-| UI Library | Ant Design | 5.x |
-| State | Zustand | 4.x |
-| Charts | ECharts / Recharts | latest |
-| Build | Vite | 5.x |
+| 组件 | 技术 | 版本 | 说明 |
+|------|------|------|------|
+| Framework | React | 18.3+ | 稳定版本 |
+| Language | TypeScript | 5.x | 类型安全 |
+| UI Library | **shadcn/ui** | latest | 可定制组件 |
+| Styling | Tailwind CSS | 3.x | 原子化 CSS |
+| State | Zustand | 4.x | 轻量状态管理 |
+| Charts | Recharts | latest | React 原生图表 |
+| Data Fetching | TanStack Query | 5.x | 缓存 + 自动重试 |
+| Build | Vite | 5.x | 快速构建 |
+| WebSocket | socket.io-client | 4.x | 实时推送 |
+
+#### 3.4.3 Dashboard 核心页面
+
+```
+dashboard/
+├── pages/
+│   ├── AgentMonitor.tsx      # Agent 运行状态
+│   ├── FactorExplorer.tsx    # 因子库浏览
+│   ├── StrategyBuilder.tsx   # 策略构建器
+│   ├── Backtest.tsx          # 回测结果
+│   ├── LiveTrading.tsx       # 实盘监控
+│   ├── ResearchLedger.tsx    # 研究账本
+│   └── Settings.tsx          # 系统配置
+├── components/
+│   ├── charts/               # 图表组件
+│   ├── tables/               # 数据表格
+│   └── forms/                # 表单组件
+└── hooks/
+    ├── useWebSocket.ts       # WebSocket 连接
+    └── useFactorData.ts      # 因子数据查询
+```
 
 ---
 
@@ -599,11 +724,88 @@ trading-system-v3/
 
 ## 8. Security Architecture
 
-### 8.1 Code Execution Safety
+> **用户决策 (Round 4)**: 严格模式 - 生产级安全要求
 
-- **AST 解析**: 禁止 os.system, exec, eval
-- **沙箱环境**: 限制可访问的模块
+### 8.1 Code Execution Safety (严格模式)
+
+**三重防护机制**:
+
+```
+用户输入 → [1. AST 静态分析] → [2. 沙箱执行] → [3. 人工审核] → 执行
+                 ↓                  ↓                ↓
+            禁止危险函数        RestrictedPython   所有代码需确认
+```
+
+**8.1.1 AST 静态分析 (Layer 1)**
+
+```python
+class ASTSecurityChecker:
+    """严格模式 AST 安全检查"""
+
+    FORBIDDEN_FUNCTIONS = {
+        'eval', 'exec', 'compile', 'open', 'input',
+        '__import__', 'getattr', 'setattr', 'delattr',
+    }
+
+    FORBIDDEN_MODULES = {
+        'os', 'sys', 'subprocess', 'shutil', 'socket',
+        'requests', 'urllib', 'ftplib', 'smtplib',
+    }
+
+    def check(self, code: str) -> SecurityReport:
+        tree = ast.parse(code)
+        violations = []
+        for node in ast.walk(tree):
+            # 检查危险函数调用
+            # 检查危险模块导入
+            # 检查属性访问模式
+        return SecurityReport(safe=len(violations) == 0, violations=violations)
+```
+
+**8.1.2 沙箱执行 (Layer 2)**
+
+```python
+from RestrictedPython import compile_restricted
+from RestrictedPython.Guards import safe_builtins
+
+class SandboxExecutor:
+    """隔离执行环境"""
+
+    ALLOWED_GLOBALS = {
+        '__builtins__': safe_builtins,
+        'pd': pd,
+        'np': np,
+        'qlib': qlib_safe_subset,
+    }
+
+    def execute(self, code: str, timeout: int = 60) -> Result:
+        byte_code = compile_restricted(code, '<factor>', 'exec')
+        # 资源限制: CPU/Memory
+        with resource_limits(timeout=timeout, memory_mb=512):
+            exec(byte_code, self.ALLOWED_GLOBALS)
+```
+
+**8.1.3 人工审核流程 (Layer 3)**
+
+```python
+class HumanReviewGate:
+    """所有生成代码必须人工确认"""
+
+    async def submit_for_review(self, factor: Factor) -> ReviewStatus:
+        # 1. 生成代码摘要
+        summary = self.generate_summary(factor.code)
+
+        # 2. 发送通知 (Telegram/Slack)
+        await self.notify_reviewer(summary)
+
+        # 3. 等待确认 (默认阻塞)
+        return await self.wait_for_approval(factor.id, timeout=3600)
+```
+
+- **AST 解析**: 禁止 os.system, exec, eval, 动态 import
+- **沙箱环境**: RestrictedPython + 资源限制
 - **超时控制**: 单因子执行 < 60s
+- **人工审核**: 所有代码必须经过人工确认后才能执行
 
 ### 8.2 API Security
 
@@ -671,20 +873,147 @@ See `.ultra/config.json`:
 
 ---
 
-## 11. Open Questions
+## 11. Risk Mitigation Architecture
 
-### 11.1 Technical Uncertainties
+> **用户决策 (Round 4)**: 生产系统定位 - 完整风控 + 高可用
 
-1. **Qlib 加密货币数据格式**: 需要验证现有数据结构兼容性
-2. **LangGraph 状态管理**: 复杂 Pipeline 的状态持久化方案
+### 11.1 Production System Requirements
+
+**系统可用性目标**:
+- SLA: 99.5% (允许每月约 3.5 小时停机)
+- RTO: < 30 分钟 (恢复时间目标)
+- RPO: < 5 分钟 (数据丢失容忍)
+
+**关键组件冗余**:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                   Production Architecture                    │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   ┌─────────┐     ┌─────────┐     ┌─────────┐              │
+│   │ Primary │────▶│  Redis  │◀────│ Backup  │              │
+│   │  Node   │     │ Sentinel│     │  Node   │              │
+│   └─────────┘     └─────────┘     └─────────┘              │
+│        │                                │                    │
+│        ▼                                ▼                    │
+│   ┌─────────────────────────────────────────┐              │
+│   │         TimescaleDB (Primary + Replica)  │              │
+│   └─────────────────────────────────────────┘              │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 11.2 Trading Risk Control
+
+**硬性风控规则 (不可覆盖)**:
+
+```python
+class RiskController:
+    """生产级风控引擎"""
+
+    # 硬性限制 (不可通过配置修改)
+    MAX_SINGLE_LOSS_PCT = 0.02        # 单笔最大亏损 2%
+    MAX_DAILY_LOSS_PCT = 0.05         # 日最大亏损 5%
+    MAX_POSITION_PCT = 0.10           # 单策略最大仓位 10%
+    MAX_TOTAL_POSITION_PCT = 0.50     # 总仓位上限 50%
+    EMERGENCY_CLOSE_THRESHOLD = 0.08  # 紧急平仓阈值 8%
+
+    def check_order(self, order: Order) -> RiskDecision:
+        checks = [
+            self._check_single_loss(order),
+            self._check_daily_loss(order),
+            self._check_position_limit(order),
+            self._check_market_hours(order),
+            self._check_liquidity(order),
+        ]
+        return RiskDecision.combine(checks)
+
+    async def emergency_close_all(self, reason: str):
+        """紧急全平仓 - 需要人工确认"""
+        await self.notify_admin(f"Emergency close triggered: {reason}")
+        if await self.wait_admin_confirm(timeout=300):
+            await self.close_all_positions()
+```
+
+### 11.3 Monitoring & Alerting
+
+**监控维度**:
+
+| 维度 | 指标 | 告警阈值 |
+|------|------|----------|
+| 系统健康 | CPU/Memory/Disk | > 80% |
+| 交易延迟 | Order latency | > 500ms |
+| 数据延迟 | Market data lag | > 10s |
+| PnL | Daily drawdown | > 3% |
+| 异常 | Error rate | > 1% |
+
+**告警通道**:
+- Telegram Bot (实时)
+- Email (非紧急)
+- PagerDuty (7x24 紧急)
+
+### 11.4 Disaster Recovery
+
+**备份策略**:
+- TimescaleDB: 每小时增量备份，每日全量备份
+- Redis: RDB + AOF 持久化
+- 因子代码: Git 版本控制
+
+**恢复流程**:
+1. 自动切换到备用节点 (< 30s)
+2. 暂停所有活跃策略
+3. 验证数据一致性
+4. 人工确认后恢复交易
+
+---
+
+## 12. Cost Analysis
+
+### 12.1 Monthly Cost Estimate
+
+| 项目 | 成本 | 说明 |
+|------|------|------|
+| 云服务器 (主节点) | $200 | 4 vCPU, 16GB RAM |
+| 云服务器 (备份) | $100 | 2 vCPU, 8GB RAM |
+| TimescaleDB 托管 | $50 | 基础版 |
+| Redis 托管 | $30 | 基础版 |
+| LLM API (OpenRouter) | $210 | ~1M tokens/day |
+| Monitoring (Grafana Cloud) | $20 | 基础版 |
+| **Total** | **~$610/月** | |
+
+### 12.2 Scaling Considerations
+
+- 初期: 单主节点 + 备份
+- 中期: 分离回测与交易节点
+- 长期: Kubernetes 集群
+
+---
+
+## 13. Open Questions
+
+### 13.1 Technical Uncertainties
+
+1. ~~**Qlib 加密货币数据格式**~~: ✅ 已通过 Round 3 验证
+2. ~~**LangGraph 状态管理**~~: ✅ 已确认 PostgresSaver 方案
 3. **向量化因子表示**: 最佳 embedding 方法待调研
 
-### 11.2 Performance Targets Validation
+### 13.2 Performance Targets Validation
 
 - **因子执行 < 30s**: 需要实际测试验证
 - **10 并发生成**: LLM API 限流处理
 
+### 13.3 Round 4 Decision Impact
+
+| 决策 | 影响 | 应对 |
+|------|------|------|
+| 完整版 MVP | 时间压力 ↑ | 严格优先级管理 |
+| 严格安全模式 | 开发速度 ↓ | 提前构建安全框架 |
+| 深度 Fork | 维护成本 ↑ | 自动化同步脚本 |
+| 生产系统 | 质量要求 ↑ | 增加测试投入 |
+
 ---
 
-**Document Status**: Draft
+**Document Status**: Draft → In Review
 **Last Updated**: 2025-12-09
+**Round 4 Decisions Integrated**: ✅

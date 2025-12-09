@@ -147,9 +147,11 @@
       "priority": "P0",
       "dependencies": ["5"],
       "estimated_days": 3,
-      "status": "pending",
+      "status": "completed",
       "type": "feature",
-      "trace_to": "specs/product.md#user-story-21"
+      "trace_to": "specs/product.md#user-story-21",
+      "started_at": "2025-12-10T05:00:00",
+      "completed_at": "2025-12-10T05:30:00"
     },
     {
       "id": "11",
@@ -479,7 +481,7 @@
   "metadata": {
     "last_updated": "2025-12-10",
     "total_tasks": 38,
-    "completed_tasks": 10,
+    "completed_tasks": 11,
     "in_progress_tasks": 0,
     "priority_distribution": {
       "P0": 27,
@@ -497,9 +499,9 @@
   },
   "stats": {
     "total": 38,
-    "completed": 10,
+    "completed": 11,
     "in_progress": 0,
-    "pending": 28,
+    "pending": 27,
     "blocked": 0
   }
 }

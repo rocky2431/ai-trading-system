@@ -105,9 +105,10 @@
       "priority": "P0",
       "dependencies": ["0"],
       "estimated_days": 3,
-      "status": "pending",
+      "status": "in_progress",
       "type": "architecture",
-      "trace_to": "specs/architecture.md#langgraph-state-persistence"
+      "trace_to": "specs/architecture.md#langgraph-state-persistence",
+      "started_at": "2025-12-10T02:30:00"
     },
     {
       "id": "8",

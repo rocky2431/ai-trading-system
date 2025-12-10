@@ -1,0 +1,163 @@
+{
+  "version": "4.0",
+  "updated": "2025-12-10",
+  "completed_tasks": [
+    {
+      "id": "0",
+      "title": "初始化项目结构与开发环境",
+      "branch": "feat/task-0-project-init",
+      "merged_at": "2025-12-09T22:55:00",
+      "tests_passed": true
+    },
+    {
+      "id": "1",
+      "title": "实现 AST 安全检查器",
+      "branch": "feat/task-1-ast-security",
+      "merged_at": "2025-12-09T23:10:00",
+      "tests_passed": true,
+      "coverage": "90%"
+    },
+    {
+      "id": "2",
+      "title": "实现沙箱执行器",
+      "branch": "feat/task-2-sandbox-executor",
+      "merged_at": "2025-12-09T23:45:00",
+      "tests_passed": true,
+      "coverage": "85%"
+    },
+    {
+      "id": "3",
+      "title": "实现人工审核网关",
+      "branch": "feat/task-3-human-review-gate",
+      "merged_at": "2025-12-10T00:15:00",
+      "tests_passed": true,
+      "coverage": "87%"
+    },
+    {
+      "id": "4",
+      "title": "搭建 Qlib Deep Fork 基础结构",
+      "branch": "feat/task-4-qlib-fork",
+      "merged_at": "2025-12-10T00:35:00",
+      "tests_passed": true,
+      "coverage": "82%"
+    },
+    {
+      "id": "5",
+      "title": "实现 CryptoDataHandler 完整功能",
+      "branch": "feat/task-5-crypto-data-handler",
+      "merged_at": "2025-12-10T01:30:00",
+      "tests_passed": true,
+      "coverage": "85%"
+    },
+    {
+      "id": "6",
+      "title": "配置 OpenRouter LLM 集成",
+      "branch": "feat/task-6-llm-provider",
+      "merged_at": "2025-12-10T02:15:00",
+      "tests_passed": true,
+      "coverage": "88%"
+    },
+    {
+      "id": "7",
+      "title": "实现 LangGraph Agent 编排框架",
+      "branch": "feat/task-7-langgraph-orchestrator",
+      "merged_at": "2025-12-10T03:00:00",
+      "tests_passed": true,
+      "coverage": "86%"
+    },
+    {
+      "id": "8",
+      "title": "实现自然语言因子生成",
+      "branch": "feat/task-8-factor-generation",
+      "merged_at": "2025-12-10T03:45:00",
+      "tests_passed": true,
+      "coverage": "84%"
+    },
+    {
+      "id": "9",
+      "title": "实现因子家族约束生成",
+      "branch": "feat/task-9-factor-family-constraints",
+      "merged_at": "2025-12-10T04:30:00",
+      "tests_passed": true,
+      "coverage": "85%"
+    },
+    {
+      "id": "10",
+      "title": "实现 CryptoCVSplitter 多切片验证",
+      "branch": "feat/task-10-crypto-cv-splitter",
+      "merged_at": "2025-12-10T05:30:00",
+      "tests_passed": true,
+      "coverage": "87%"
+    },
+    {
+      "id": "11",
+      "title": "实现 Research Ledger 研究账本",
+      "branch": "feat/task-11-research-ledger",
+      "merged_at": "2025-12-10T06:30:00",
+      "tests_passed": true,
+      "coverage": "86%"
+    },
+    {
+      "id": "12",
+      "title": "实现 StabilityAnalyzer 稳定性分析",
+      "branch": "feat/task-12-stability-analyzer",
+      "merged_at": "2025-12-10T07:30:00",
+      "tests_passed": true,
+      "coverage": "85%"
+    },
+    {
+      "id": "13",
+      "title": "实现 FactorEvaluator 因子评估引擎",
+      "branch": "feat/task-13-factor-evaluator",
+      "merged_at": "2025-12-10T08:30:00",
+      "tests_passed": true,
+      "coverage": "88%"
+    },
+    {
+      "id": "14",
+      "title": "实现因子选择组合功能",
+      "branch": "feat/task-14-factor-selection",
+      "merged_at": "2025-12-10T09:20:00",
+      "tests_passed": true,
+      "coverage": "89%"
+    },
+    {
+      "id": "15",
+      "title": "实现策略代码自动生成",
+      "branch": "feat/task-15-strategy-generator",
+      "merged_at": "2025-12-10T10:30:00",
+      "tests_passed": true,
+      "coverage": "90%"
+    },
+    {
+      "id": "16",
+      "title": "实现开平仓止盈止损逻辑",
+      "branch": "feat/task-16-position-management",
+      "merged_at": "2025-12-10T11:15:00",
+      "tests_passed": true,
+      "coverage": "85%"
+    },
+    {
+      "id": "17",
+      "title": "实现策略回测引擎",
+      "branch": "feat/task-17-backtest-engine",
+      "merged_at": "2025-12-10T12:00:00",
+      "tests_passed": true,
+      "coverage": "93%"
+    },
+    {
+      "id": "18",
+      "title": "实现 ccxt 交易所连接",
+      "branch": "feat/task-18-exchange-connection",
+      "merged_at": "2025-12-10T12:45:00",
+      "tests_passed": true,
+      "coverage": "71%"
+    }
+  ],
+  "summary": {
+    "total_completed": 19,
+    "total_pending": 19,
+    "last_completed_task": "18",
+    "next_task": "19"
+  }
+}

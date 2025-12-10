@@ -93,6 +93,19 @@ from iqfmp.exchange.risk import (
     LossLimiter,
     RiskController,
 )
+from iqfmp.exchange.emergency import (
+    # Enums
+    CloseStatus,
+    RequestStatus,
+    # Models
+    CloseRequest,
+    CloseResult,
+    ConfirmationToken,
+    # Classes
+    ConfirmationGate,
+    EmergencyCloseManager,
+    TelegramNotifier,
+)
 
 __all__ = [
     # Adapters
@@ -171,4 +184,15 @@ __all__ = [
     "DrawdownMonitor",
     "LossLimiter",
     "RiskController",
+    # Emergency - Enums
+    "CloseStatus",
+    "RequestStatus",
+    # Emergency - Models
+    "CloseRequest",
+    "CloseResult",
+    "ConfirmationToken",
+    # Emergency - Classes
+    "ConfirmationGate",
+    "EmergencyCloseManager",
+    "TelegramNotifier",
 ]

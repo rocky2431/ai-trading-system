@@ -18,6 +18,15 @@
       "implementedAt": "2025-12-10T11:15:00",
       "commit": "merged to main",
       "branch": "feat/task-16-position-management"
+    },
+    {
+      "id": "feat-17",
+      "name": "实现策略回测引擎 (S-004)",
+      "status": "pending",
+      "taskId": "17",
+      "implementedAt": "2025-12-10T12:00:00",
+      "commit": "merged to main",
+      "branch": "feat/task-17-backtest-engine"
     }
   ]
 }

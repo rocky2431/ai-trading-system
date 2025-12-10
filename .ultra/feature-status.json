@@ -152,12 +152,20 @@
       "merged_at": "2025-12-10T12:45:00",
       "tests_passed": true,
       "coverage": "71%"
+    },
+    {
+      "id": "19",
+      "title": "实现多空订单执行",
+      "branch": "feat/task-19-order-execution",
+      "merged_at": "2025-12-10T13:30:00",
+      "tests_passed": true,
+      "coverage": "88%"
     }
   ],
   "summary": {
-    "total_completed": 19,
-    "total_pending": 19,
-    "last_completed_task": "18",
-    "next_task": "19"
+    "total_completed": 20,
+    "total_pending": 18,
+    "last_completed_task": "19",
+    "next_task": "20"
   }
 }

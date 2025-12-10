@@ -357,10 +357,11 @@
       "priority": "P0",
       "dependencies": ["23", "11"],
       "estimated_days": 1,
-      "status": "in_progress",
+      "status": "completed",
       "type": "feature",
       "trace_to": "specs/architecture.md#api-design",
-      "started_at": "2025-12-10T17:30:00"
+      "started_at": "2025-12-10T17:30:00",
+      "completed_at": "2025-12-10T18:00:00"
     },
     {
       "id": "26",
@@ -528,8 +529,8 @@
   },
   "stats": {
     "total": 38,
-    "completed": 25,
-    "in_progress": 1,
+    "completed": 26,
+    "in_progress": 0,
     "pending": 12,
     "blocked": 0
   }

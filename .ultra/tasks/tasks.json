@@ -385,10 +385,11 @@
       "priority": "P1",
       "dependencies": ["0"],
       "estimated_days": 2,
-      "status": "in_progress",
+      "status": "completed",
       "type": "architecture",
       "trace_to": "specs/architecture.md#frontend-stack",
-      "started_at": "2025-12-10T19:00:00"
+      "started_at": "2025-12-10T19:00:00",
+      "completed_at": "2025-12-10T19:30:00"
     },
     {
       "id": "28",
@@ -532,8 +533,8 @@
   },
   "stats": {
     "total": 38,
-    "completed": 27,
-    "in_progress": 1,
+    "completed": 28,
+    "in_progress": 0,
     "pending": 10,
     "blocked": 0
   }

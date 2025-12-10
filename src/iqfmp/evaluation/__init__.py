@@ -46,6 +46,18 @@ from iqfmp.evaluation.stability_analyzer import (
     TimeStabilityAnalyzer,
     TimeStabilityResult,
 )
+from iqfmp.evaluation.factor_evaluator import (
+    CVResult,
+    EvaluationConfig,
+    EvaluationFailedError,
+    EvaluationPipeline,
+    EvaluationResult,
+    FactorEvaluator,
+    FactorMetrics,
+    FactorReport,
+    InvalidFactorError,
+    MetricsCalculator,
+)
 
 __all__ = [
     # CV Splitter
@@ -84,4 +96,15 @@ __all__ = [
     "StabilityScore",
     "TimeStabilityAnalyzer",
     "TimeStabilityResult",
+    # Factor Evaluator
+    "CVResult",
+    "EvaluationConfig",
+    "EvaluationFailedError",
+    "EvaluationPipeline",
+    "EvaluationResult",
+    "FactorEvaluator",
+    "FactorMetrics",
+    "FactorReport",
+    "InvalidFactorError",
+    "MetricsCalculator",
 ]

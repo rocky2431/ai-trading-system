@@ -280,28 +280,143 @@ def load_ohlcv_sync(
     symbol: str = "ETHUSDT",
     timeframe: str = "1d",
     csv_path: Optional[Path] = None,
+    use_db: bool = True,
 ) -> pd.DataFrame:
-    """Synchronous helper for loading OHLCV data from CSV.
+    """Synchronous helper for loading OHLCV data from DB (primary) or CSV (fallback).
 
-    For use in non-async contexts (factor computation).
+    For use in non-async contexts (factor computation, backtesting).
+
+    Data loading priority:
+    1. TimescaleDB (if use_db=True and DB available)
+    2. CSV file (fallback)
 
     Args:
-        symbol: Trading pair
+        symbol: Trading pair (e.g., "ETHUSDT" or "ETH/USDT")
         timeframe: Data timeframe
         csv_path: Optional specific CSV path
+        use_db: Whether to try loading from DB first (default: True)
 
     Returns:
         DataFrame with OHLCV data
     """
-    provider = DataProvider()
+    import asyncio
 
+    provider = DataProvider()
+    df = None
+
+    # Try loading from DB first (using sync wrapper)
+    if use_db:
+        try:
+            df = _load_ohlcv_from_db_sync(symbol, timeframe)
+            if df is not None and len(df) > 0:
+                logger.info(f"Loaded {len(df)} rows from TimescaleDB for {symbol}")
+                return provider.load_dataframe(df)
+        except Exception as e:
+            logger.debug(f"DB load failed, falling back to CSV: {e}")
+
+    # Try specific CSV path
     if csv_path and csv_path.exists():
         df = pd.read_csv(csv_path)
+        logger.info(f"Loaded {len(df)} rows from CSV: {csv_path}")
         return provider.load_dataframe(df)
 
-    # Try to load from default locations
-    df = provider._load_from_csv(symbol, timeframe)
+    # Try to load from default CSV locations
+    df = provider._load_from_csv(symbol.replace("/", ""), timeframe)
     if df is not None:
+        logger.info(f"Loaded {len(df)} rows from default CSV for {symbol}")
         return df
 
-    raise ValueError(f"No CSV data found for {symbol} {timeframe}")
+    raise ValueError(f"No data found for {symbol} {timeframe} (tried DB and CSV)")
+
+
+def _load_ohlcv_from_db_sync(
+    symbol: str,
+    timeframe: str,
+    exchange: str = "binance",
+) -> Optional[pd.DataFrame]:
+    """Synchronously load OHLCV data from TimescaleDB.
+
+    Uses a synchronous SQLAlchemy session for non-async contexts.
+
+    Args:
+        symbol: Trading pair
+        timeframe: Data timeframe
+        exchange: Exchange name
+
+    Returns:
+        DataFrame or None if not available
+    """
+    try:
+        from sqlalchemy import create_engine, select, and_
+        from sqlalchemy.orm import Session
+        import os
+
+        # Get database URL from environment
+        database_url = os.getenv("DATABASE_URL", "")
+        if not database_url:
+            return None
+
+        # Convert async URL to sync URL
+        sync_url = database_url.replace("postgresql+asyncpg://", "postgresql://")
+        sync_url = sync_url.replace("asyncpg://", "postgresql://")
+
+        engine = create_engine(sync_url)
+
+        # Normalize symbol (support both "ETHUSDT" and "ETH/USDT" formats)
+        symbol_normalized = symbol.replace("/", "")
+        symbol_ccxt = symbol if "/" in symbol else _format_ccxt_symbol_static(symbol)
+
+        from iqfmp.db.models import OHLCVDataORM
+
+        with Session(engine) as session:
+            # Try both symbol formats
+            for sym in [symbol_ccxt, symbol_normalized, symbol.upper()]:
+                query = (
+                    select(OHLCVDataORM)
+                    .where(and_(
+                        OHLCVDataORM.symbol == sym,
+                        OHLCVDataORM.timeframe == timeframe,
+                    ))
+                    .order_by(OHLCVDataORM.timestamp.asc())
+                )
+
+                result = session.execute(query)
+                rows = result.scalars().all()
+
+                if rows:
+                    data = []
+                    for row in rows:
+                        data.append({
+                            "timestamp": row.timestamp,
+                            "open": row.open,
+                            "high": row.high,
+                            "low": row.low,
+                            "close": row.close,
+                            "volume": row.volume,
+                            "symbol": row.symbol,
+                        })
+
+                    df = pd.DataFrame(data)
+                    df["timestamp"] = pd.to_datetime(df["timestamp"])
+                    df = df.sort_values("timestamp").reset_index(drop=True)
+
+                    logger.info(f"Found {len(df)} rows in DB for symbol={sym}")
+                    return df
+
+        return None
+
+    except Exception as e:
+        logger.debug(f"DB sync load failed: {e}")
+        return None
+
+
+def _format_ccxt_symbol_static(symbol: str) -> str:
+    """Convert symbol to CCXT format (BTC/USDT)."""
+    symbol = symbol.upper()
+    if symbol.endswith("USDT"):
+        return symbol[:-4] + "/USDT"
+    elif symbol.endswith("BTC"):
+        return symbol[:-3] + "/BTC"
+    elif symbol.endswith("ETH"):
+        return symbol[:-3] + "/ETH"
+    return symbol

@@ -497,10 +497,11 @@
       "priority": "P1",
       "dependencies": ["17", "13"],
       "estimated_days": 3,
-      "status": "in_progress",
+      "status": "completed",
       "type": "feature",
       "trace_to": "specs/architecture.md#testing-strategy",
-      "started_at": "2025-12-10T23:35:00"
+      "started_at": "2025-12-10T23:35:00",
+      "completed_at": "2025-12-10T23:55:00"
     },
     {
       "id": "36",
@@ -548,8 +549,8 @@
   },
   "stats": {
     "total": 38,
-    "completed": 35,
-    "in_progress": 1,
+    "completed": 36,
+    "in_progress": 0,
     "pending": 2,
     "blocked": 0
   }

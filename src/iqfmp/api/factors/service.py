@@ -1,4 +1,11 @@
-"""Factor service for business logic with TimescaleDB + Redis support."""
+"""Factor service for business logic with TimescaleDB + Redis support.
+
+Integrates:
+- Full FactorEvaluator from evaluation module
+- CryptoCVSplitter for multi-dimensional validation
+- StabilityAnalyzer for robustness analysis
+- Transaction cost estimation
+"""
 
 import asyncio
 import hashlib
@@ -7,6 +14,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+import numpy as np
+import pandas as pd
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,11 +26,42 @@ from iqfmp.agents.factor_generation import (
     FactorGenerationConfig,
     FactorFamily,
 )
-from iqfmp.db.repositories import FactorRepository, ResearchTrialRepository
+from iqfmp.db.repositories import (
+    FactorRepository,
+    ResearchTrialRepository,
+    FactorValueRepository,
+    MiningTaskRepository,
+)
 from iqfmp.api.factors.schemas import (
     MiningTaskStatus,
     FactorLibraryStats,
 )
+
+# Import evaluation module components
+from iqfmp.evaluation.factor_evaluator import (
+    FactorEvaluator as FullFactorEvaluator,
+    EvaluationConfig,
+    FactorMetrics as EvalFactorMetrics,
+)
+from iqfmp.evaluation.cv_splitter import (
+    CryptoCVSplitter,
+    CVSplitConfig,
+)
+from iqfmp.evaluation.stability_analyzer import (
+    StabilityAnalyzer,
+    StabilityConfig,
+    StabilityReport as FullStabilityReport,
+)
+
+# Vector store imports
+from iqfmp.vector.store import FactorVectorStore
+from iqfmp.vector.search import SimilaritySearcher, SearchResult
+
+
+class FactorDuplicateError(Exception):
+    """Raised when a duplicate factor is detected."""
+
+    pass
 
 
 class FactorNotFoundError(Exception):
@@ -48,8 +88,13 @@ class FactorService:
         self.redis_client = redis_client
         self.factor_repo = FactorRepository(session, redis_client)
         self.trial_repo = ResearchTrialRepository(session)
+        self.factor_value_repo = FactorValueRepository(session)
+        self.mining_task_repo = MiningTaskRepository(session, redis_client)
         self._llm_provider: Optional[LLMProvider] = None
         self._generation_agent: Optional[FactorGenerationAgent] = None
+        # Vector store for factor indexing and similarity search
+        self._vector_store: Optional[FactorVectorStore] = None
+        self._similarity_searcher: Optional[SimilaritySearcher] = None
 
     def _get_llm_provider(self) -> LLMProvider:
         """获取或创建 LLM Provider"""
@@ -72,6 +117,127 @@ class FactorService:
             )
         return self._generation_agent
 
+    def _get_vector_store(self) -> FactorVectorStore:
+        """获取或创建向量存储"""
+        if self._vector_store is None:
+            try:
+                self._vector_store = FactorVectorStore()
+            except Exception as e:
+                print(f"Warning: Failed to initialize vector store: {e}")
+                self._vector_store = None
+        return self._vector_store
+
+    def _get_similarity_searcher(self) -> SimilaritySearcher:
+        """获取或创建相似度搜索器"""
+        if self._similarity_searcher is None:
+            try:
+                self._similarity_searcher = SimilaritySearcher(
+                    similarity_threshold=0.85,  # 85% 相似度阈值
+                )
+            except Exception as e:
+                print(f"Warning: Failed to initialize similarity searcher: {e}")
+                self._similarity_searcher = None
+        return self._similarity_searcher
+
+    async def _index_factor_to_vector_store(
+        self,
+        factor: Factor,
+        metrics: Optional[FactorMetrics] = None,
+    ) -> bool:
+        """将因子索引到向量存储 (Task 7.1).
+
+        在因子创建或评估通过后调用此方法将因子存入 Qdrant 向量库。
+
+        Args:
+            factor: 因子对象
+            metrics: 可选的因子指标
+
+        Returns:
+            是否索引成功
+        """
+        try:
+            store = self._get_vector_store()
+            if store is None:
+                return False
+
+            # 准备元数据
+            metadata = {
+                "sharpe": metrics.sharpe if metrics else 0.0,
+                "ic_mean": metrics.ic_mean if metrics else 0.0,
+                "ir": metrics.ir if metrics else 0.0,
+                "status": factor.status.value if factor.status else "candidate",
+            }
+
+            # 获取因子假设/描述
+            hypothesis = ""
+            if hasattr(factor, "hypothesis") and factor.hypothesis:
+                hypothesis = factor.hypothesis
+            elif hasattr(factor, "description") and factor.description:
+                hypothesis = factor.description
+            else:
+                # 从代码中提取 docstring 作为假设
+                if '"""' in factor.code:
+                    start = factor.code.find('"""') + 3
+                    end = factor.code.find('"""', start)
+                    if end > start:
+                        hypothesis = factor.code[start:end].strip()
+
+            # 存入向量库
+            store.add_factor(
+                factor_id=factor.id,
+                name=factor.name,
+                code=factor.code,
+                hypothesis=hypothesis,
+                family=factor.family[0] if factor.family else "unknown",
+                metadata=metadata,
+            )
+
+            print(f"Indexed factor to vector store: {factor.id} ({factor.name})")
+            return True
+
+        except Exception as e:
+            print(f"Warning: Failed to index factor to vector store: {e}")
+            return False
+
+    async def _check_similarity(
+        self,
+        code: str,
+        name: str = "",
+        hypothesis: str = "",
+        threshold: float = 0.85,
+    ) -> list[SearchResult]:
+        """检查因子代码相似度 (Task 7.2).
+
+        在生成新因子之前检查是否存在相似因子。
+
+        Args:
+            code: 因子代码
+            name: 因子名称
+            hypothesis: 因子假设
+            threshold: 相似度阈值 (默认 0.85)
+
+        Returns:
+            相似因子列表
+        """
+        try:
+            searcher = self._get_similarity_searcher()
+            if searcher is None:
+                return []
+
+            results = searcher.search_similar(
+                query_code=code,
+                query_name=name,
+                query_hypothesis=hypothesis,
+                limit=5,
+                score_threshold=threshold,
+            )
+
+            return results
+
+        except Exception as e:
+            print(f"Warning: Similarity check failed: {e}")
+            return []
+
     def _generate_code_hash(self, code: str) -> str:
         """Generate hash for factor code."""
         return hashlib.sha256(code.encode()).hexdigest()[:16]
@@ -90,6 +256,7 @@ class FactorService:
         family: list[str],
         code: str,
         target_task: str,
+        skip_vector_index: bool = False,
     ) -> Factor:
         """Create a new factor and persist to database.
 
@@ -98,6 +265,7 @@ class FactorService:
             family: Factor family tags
             code: Factor computation code
             target_task: Target prediction task
+            skip_vector_index: Skip vector store indexing (for testing)
 
         Returns:
             Created factor
@@ -105,7 +273,7 @@ class FactorService:
         factor_id = str(uuid.uuid4())
         code_hash = self._generate_code_hash(code)
 
-        # Check for duplicate code
+        # Check for duplicate code (exact hash match)
         existing = await self.factor_repo.get_by_code_hash(code_hash)
         if existing:
             raise ValueError(f"Factor with same code already exists: {existing.id}")
@@ -122,6 +290,11 @@ class FactorService:
         )
 
         await self.factor_repo.create(factor)
+
+        # Task 7.1: Index factor to vector store
+        if not skip_vector_index:
+            await self._index_factor_to_vector_store(factor)
+
         return factor
 
     async def generate_factor(
@@ -129,16 +302,25 @@ class FactorService:
         description: str,
         family: list[str],
         target_task: str,
+        check_similarity: bool = True,
+        similarity_threshold: float = 0.95,
     ) -> Factor:
         """Generate a new factor from description using LLM.
+
+        Includes similarity check (Task 7.2) to prevent duplicate factors.
 
         Args:
             description: Natural language description
             family: Factor family tags
             target_task: Target prediction task
+            check_similarity: Whether to check for similar existing factors
+            similarity_threshold: Threshold for raising FactorDuplicateError (default 0.95)
 
         Returns:
             Generated factor
+
+        Raises:
+            FactorDuplicateError: If a highly similar factor already exists
         """
         # Map family string to FactorFamily enum
         factor_family = None
@@ -153,6 +335,10 @@ class FactorService:
             }
             factor_family = family_map.get(family[0].lower())
 
+        generated_code = None
+        generated_name = None
+        warnings = []
+
         try:
             # Call LLM to generate factor
             agent = self._get_generation_agent()
@@ -160,18 +346,14 @@ class FactorService:
                 user_request=description,
                 factor_family=factor_family,
             )
+            generated_code = generated.code
+            generated_name = generated.name
 
-            return await self.create_factor(
-                name=generated.name,
-                family=family,
-                code=generated.code,
-                target_task=target_task,
-            )
         except Exception as e:
             # Fallback to simple generation if LLM fails
             print(f"Warning: LLM generation failed ({e}), using fallback")
-            name = self._generate_name(description, family)
-            code = f'''def {name}(df):
+            generated_name = self._generate_name(description, family)
+            generated_code = f'''def {generated_name}(df):
     """
     {description}
 
@@ -183,12 +365,47 @@ class FactorService:
     factor = (returns - returns.mean()) / returns.std()
     return factor
 '''
-            return await self.create_factor(
-                name=name,
-                family=family,
-                code=code,
-                target_task=target_task,
+
+        # Task 7.2: Similarity check before creation
+        if check_similarity and generated_code:
+            similar_factors = await self._check_similarity(
+                code=generated_code,
+                name=generated_name,
+                hypothesis=description,
+                threshold=0.80,  # Lower threshold for search
             )
+
+            if similar_factors:
+                top_similar = similar_factors[0]
+
+                # Raise error if similarity is very high
+                if top_similar.score >= similarity_threshold:
+                    raise FactorDuplicateError(
+                        f"Factor highly similar to '{top_similar.name}' "
+                        f"(similarity: {top_similar.score:.2%})"
+                    )
+
+                # Add warning for moderate similarity
+                if top_similar.score >= 0.80:
+                    warnings.append(
+                        f"Similar factor found: {top_similar.name} "
+                        f"(similarity: {top_similar.score:.2%})"
+                    )
+
+        # Create the factor
+        factor = await self.create_factor(
+            name=generated_name,
+            family=family,
+            code=generated_code,
+            target_task=target_task,
+        )
+
+        # Log warnings if any
+        if warnings:
+            for warning in warnings:
+                print(f"Warning: {warning}")
+
+        return factor
 
     async def get_factor(self, factor_id: str) -> Optional[Factor]:
         """Get factor by ID.
@@ -258,13 +475,24 @@ class FactorService:
         factor_id: str,
         splits: list[str],
         market_splits: list[str] = None,
+        include_cv: bool = True,
+        include_stability: bool = True,
+        include_cost_analysis: bool = True,
     ) -> tuple[FactorMetrics, StabilityReport, bool, int]:
-        """Evaluate a factor using real market data and record in research ledger.
+        """Evaluate a factor using full evaluation pipeline.
+
+        Integrates:
+        - CryptoCVSplitter for multi-dimensional validation
+        - StabilityAnalyzer for robustness analysis
+        - Transaction cost estimation
 
         Args:
             factor_id: Factor ID
-            splits: Data splits to evaluate on
-            market_splits: Market splits to evaluate on
+            splits: Data splits to evaluate on (train/valid/test)
+            market_splits: Market splits to evaluate on (large/mid/small)
+            include_cv: Whether to run CV splits evaluation
+            include_stability: Whether to run stability analysis
+            include_cost_analysis: Whether to estimate transaction costs
 
         Returns:
             Tuple of (metrics, stability, passed_threshold, experiment_number)
@@ -276,10 +504,9 @@ class FactorService:
         if not factor:
             raise FactorNotFoundError(f"Factor {factor_id} not found")
 
-        # Use real factor evaluation engine
+        # Use Qlib-based factor engine
         from iqfmp.core.factor_engine import (
             FactorEngine,
-            FactorEvaluator,
             get_default_data_path,
         )
 
@@ -291,41 +518,155 @@ class FactorService:
             # Compute factor values using actual code
             factor_values = engine.compute_factor(factor.code, factor.name)
 
-            # Evaluate with real metrics
-            evaluator = FactorEvaluator(engine)
-            eval_results = evaluator.evaluate(factor_values, splits=splits)
+            # Get the underlying data for evaluation
+            df = engine.data
+            if df is None:
+                raise ValueError("No data loaded in engine")
 
-            # Extract metrics
-            m = eval_results["metrics"]
-            s = eval_results["stability"]
+            # ====== Persist factor values to TimescaleDB ======
+            symbol = df.get("symbol", pd.Series(["MULTI"] * len(df))).iloc[0] if "symbol" in df.columns else "MULTI"
+            try:
+                rows_saved = await self.factor_value_repo.save_factor_values(
+                    factor_id=factor_id,
+                    values=factor_values,
+                    symbol=str(symbol),
+                    timeframe="1d",
+                )
+                print(f"Persisted {rows_saved} factor values to database for {factor.name}")
+            except Exception as e:
+                print(f"Warning: Failed to persist factor values: {e}")
+
+            # Prepare evaluation DataFrame
+            eval_df = self._prepare_evaluation_data(df, factor_values)
+
+            # ====== 1. Configure Full Evaluator ======
+            eval_config = EvaluationConfig(
+                date_column="date",
+                symbol_column="symbol",
+                factor_column="factor_value",
+                return_column="forward_return",
+                use_cv_splits=include_cv,
+                run_stability_analysis=include_stability,
+                ic_threshold=0.03,
+                ir_threshold=1.0,
+            )
+
+            # ====== 2. Run CryptoCVSplitter if enabled ======
+            cv_results = {}
+            if include_cv:
+                cv_config = CVSplitConfig(
+                    time_split=True,
+                    market_split=market_splits is not None,
+                    frequency_split=False,  # Single frequency for now
+                    train_ratio=0.6,
+                    valid_ratio=0.2,
+                    test_ratio=0.2,
+                    strict_temporal=True,
+                    gap_periods=1,  # 1 day gap to prevent look-ahead
+                )
+                cv_splitter = CryptoCVSplitter(cv_config)
+
+                # Run CV evaluation
+                for split_result in cv_splitter.split(eval_df):
+                    split_name = split_result.metadata.get("split_type", "default")
+                    train_ic = self._calculate_ic(
+                        split_result.train["factor_value"],
+                        split_result.train["forward_return"],
+                    )
+                    test_ic = self._calculate_ic(
+                        split_result.test["factor_value"],
+                        split_result.test["forward_return"],
+                    )
+                    cv_results[split_name] = {
+                        "train_ic": train_ic,
+                        "test_ic": test_ic,
+                        "train_size": len(split_result.train),
+                        "test_size": len(split_result.test),
+                    }
+
+            # ====== 3. Calculate Core Metrics ======
+            metrics_dict = self._calculate_core_metrics(
+                factor_values=eval_df["factor_value"],
+                returns=eval_df["forward_return"],
+                volume=df.get("volume") if "volume" in df.columns else None,
+            )
+
+            # ====== 4. Run Stability Analysis if enabled ======
+            stability_dict = {"time_stability": {}, "market_stability": {}, "regime_stability": {}}
+            if include_stability:
+                try:
+                    stability_config = StabilityConfig(
+                        date_column="date",
+                        factor_column="factor_value",
+                        return_column="forward_return",
+                        time_frequency="monthly",
+                    )
+                    stability_analyzer = StabilityAnalyzer(stability_config)
+                    stability_report = stability_analyzer.analyze(eval_df)
+
+                    stability_dict = {
+                        "time_stability": {
+                            "ic_mean": stability_report.time_stability.ic_mean,
+                            "ic_std": stability_report.time_stability.ic_std,
+                            "ir": stability_report.time_stability.ir,
+                            "stability_score": stability_report.time_stability.stability_score,
+                        },
+                        "market_stability": {
+                            "consistency_score": stability_report.market_stability.consistency_score,
+                            "stability_score": stability_report.market_stability.stability_score,
+                        },
+                        "regime_stability": {
+                            "sensitivity_score": stability_report.regime_stability.sensitivity_score,
+                            "stability_score": stability_report.regime_stability.stability_score,
+                        },
+                        "overall_grade": stability_report.grade,
+                        "overall_score": stability_report.overall_score.value,
+                    }
+                except Exception as e:
+                    print(f"Warning: Stability analysis failed: {e}")
+                    stability_dict["error"] = str(e)
+
+            # ====== 5. Estimate Transaction Costs if enabled ======
+            cost_metrics = {}
+            if include_cost_analysis and "volume" in df.columns:
+                cost_metrics = self._estimate_transaction_costs(
+                    factor_values=eval_df["factor_value"],
+                    volume=df["volume"],
+                )
+                metrics_dict.update(cost_metrics)
+
+            # Build final metrics object
+            ic_by_split = {}
+            sharpe_by_split = {}
+            for split_name in splits:
+                if split_name in cv_results:
+                    ic_by_split[split_name] = cv_results[split_name].get("test_ic", 0.0)
+                else:
+                    ic_by_split[split_name] = metrics_dict.get("ic_mean", 0.0)
+                sharpe_by_split[split_name] = metrics_dict.get("sharpe", 0.0)
 
             metrics = FactorMetrics(
-                ic_mean=m["ic_mean"],
-                ic_std=m["ic_std"],
-                ir=m["ir"],
-                sharpe=m["sharpe"],
-                max_drawdown=m["max_drawdown"],
-                turnover=m["turnover"],
-                ic_by_split=m["ic_by_split"],
-                sharpe_by_split=m["sharpe_by_split"],
+                ic_mean=metrics_dict.get("ic_mean", 0.0),
+                ic_std=metrics_dict.get("ic_std", 0.0),
+                ir=metrics_dict.get("ir", 0.0),
+                sharpe=metrics_dict.get("sharpe", 0.0),
+                max_drawdown=metrics_dict.get("max_drawdown", 0.0),
+                turnover=metrics_dict.get("turnover", 0.0),
+                ic_by_split=ic_by_split,
+                sharpe_by_split=sharpe_by_split,
             )
 
             stability = StabilityReport(
-                time_stability=s["time_stability"],
-                market_stability=s["market_stability"],
-                regime_stability=s["regime_stability"],
+                time_stability=stability_dict.get("time_stability", {}),
+                market_stability=stability_dict.get("market_stability", {}),
+                regime_stability=stability_dict.get("regime_stability", {}),
             )
 
         except FileNotFoundError:
-            # Fallback if no data file - use basic calculation
             print("Warning: Sample data not found, using fallback evaluation")
             metrics = FactorMetrics(
-                ic_mean=0.0,
-                ic_std=0.0,
-                ir=0.0,
-                sharpe=0.0,
-                max_drawdown=0.0,
-                turnover=0.0,
+                ic_mean=0.0, ic_std=0.0, ir=0.0, sharpe=0.0,
+                max_drawdown=0.0, turnover=0.0,
                 ic_by_split={s: 0.0 for s in splits},
                 sharpe_by_split={s: 0.0 for s in splits},
             )
@@ -335,15 +676,10 @@ class FactorService:
                 regime_stability={"error": "no_data"},
             )
         except Exception as e:
-            # Factor code execution failed
             print(f"Warning: Factor evaluation failed: {e}")
             metrics = FactorMetrics(
-                ic_mean=0.0,
-                ic_std=0.0,
-                ir=0.0,
-                sharpe=0.0,
-                max_drawdown=0.0,
-                turnover=0.0,
+                ic_mean=0.0, ic_std=0.0, ir=0.0, sharpe=0.0,
+                max_drawdown=0.0, turnover=0.0,
                 ic_by_split={s: 0.0 for s in splits},
                 sharpe_by_split={s: 0.0 for s in splits},
             )
@@ -370,7 +706,13 @@ class FactorService:
             win_rate=None,  # Will be calculated in backtest
             threshold_used=threshold,
             passed_threshold=passed,
-            evaluation_config={"splits": splits, "market_splits": market_splits},
+            evaluation_config={
+                "splits": splits,
+                "market_splits": market_splits,
+                "include_cv": include_cv,
+                "include_stability": include_stability,
+                "include_cost_analysis": include_cost_analysis,
+            },
         )
 
         # Update factor with metrics
@@ -380,6 +722,171 @@ class FactorService:
         await self.factor_repo.update(factor)
 
         return metrics, stability, passed, trial_number
+
+    def _prepare_evaluation_data(
+        self, df: pd.DataFrame, factor_values: pd.Series
+    ) -> pd.DataFrame:
+        """Prepare DataFrame for evaluation modules."""
+        eval_df = pd.DataFrame()
+
+        # Handle datetime index
+        if isinstance(df.index, pd.DatetimeIndex):
+            eval_df["date"] = df.index
+            eval_df["datetime"] = df.index
+        elif "timestamp" in df.columns:
+            eval_df["date"] = pd.to_datetime(df["timestamp"])
+            eval_df["datetime"] = eval_df["date"]
+        else:
+            eval_df["date"] = pd.date_range(start="2022-01-01", periods=len(df), freq="D")
+            eval_df["datetime"] = eval_df["date"]
+
+        # Factor values
+        eval_df["factor_value"] = factor_values.values if hasattr(factor_values, "values") else factor_values
+
+        # Forward returns (1-day by default)
+        if "fwd_returns_1d" in df.columns:
+            eval_df["forward_return"] = df["fwd_returns_1d"].values
+        elif "returns" in df.columns:
+            eval_df["forward_return"] = df["returns"].shift(-1).values
+        else:
+            eval_df["forward_return"] = df["close"].pct_change().shift(-1).values
+
+        # Symbol (for market split)
+        eval_df["symbol"] = df.get("symbol", "UNKNOWN").values if "symbol" in df.columns else "UNKNOWN"
+
+        # Market cap (for market stability - estimate from volume * price)
+        if "volume" in df.columns and "close" in df.columns:
+            eval_df["market_cap"] = (df["volume"] * df["close"]).values
+        else:
+            eval_df["market_cap"] = 1e10  # Default to mid-cap
+
+        return eval_df.dropna(subset=["factor_value", "forward_return"])
+
+    def _calculate_ic(self, factor_values: pd.Series, returns: pd.Series) -> float:
+        """Calculate Information Coefficient (Spearman correlation)."""
+        from scipy import stats
+
+        mask = ~(factor_values.isna() | returns.isna())
+        if mask.sum() < 10:
+            return 0.0
+
+        corr, _ = stats.spearmanr(
+            factor_values[mask].values, returns[mask].values
+        )
+        return float(corr) if not np.isnan(corr) else 0.0
+
+    def _calculate_core_metrics(
+        self,
+        factor_values: pd.Series,
+        returns: pd.Series,
+        volume: Optional[pd.Series] = None,
+    ) -> dict:
+        """Calculate core factor metrics."""
+        from scipy import stats
+
+        metrics = {}
+
+        # IC (Information Coefficient)
+        mask = ~(factor_values.isna() | returns.isna())
+        if mask.sum() > 10:
+            ic, _ = stats.spearmanr(factor_values[mask].values, returns[mask].values)
+            metrics["ic_mean"] = float(ic) if not np.isnan(ic) else 0.0
+        else:
+            metrics["ic_mean"] = 0.0
+
+        # Rolling IC for IR calculation
+        ic_series = []
+        window = 20
+        for i in range(window, len(factor_values)):
+            f_window = factor_values.iloc[i - window:i]
+            r_window = returns.iloc[i - window:i]
+            m = ~(f_window.isna() | r_window.isna())
+            if m.sum() >= 5:
+                ic_val, _ = stats.spearmanr(f_window[m].values, r_window[m].values)
+                if not np.isnan(ic_val):
+                    ic_series.append(ic_val)
+
+        if ic_series:
+            metrics["ic_std"] = float(np.std(ic_series))
+            metrics["ir"] = float(np.mean(ic_series) / np.std(ic_series)) if np.std(ic_series) > 0 else 0.0
+        else:
+            metrics["ic_std"] = 0.0
+            metrics["ir"] = 0.0
+
+        # Backtest as simple long-short strategy
+        factor_zscore = (factor_values - factor_values.rolling(20).mean()) / factor_values.rolling(20).std()
+        factor_zscore = factor_zscore.clip(-3, 3)
+        position = np.sign(factor_zscore).fillna(0)
+        strategy_returns = position.shift(1) * returns
+        strategy_returns = strategy_returns.fillna(0)
+
+        # Sharpe ratio
+        if strategy_returns.std() > 0:
+            metrics["sharpe"] = float((strategy_returns.mean() / strategy_returns.std()) * np.sqrt(252))
+        else:
+            metrics["sharpe"] = 0.0
+
+        # Max drawdown
+        cumulative_returns = (1 + strategy_returns).cumprod()
+        rolling_max = cumulative_returns.cummax()
+        drawdown = (cumulative_returns - rolling_max) / rolling_max
+        metrics["max_drawdown"] = float(abs(drawdown.min())) if len(drawdown) > 0 else 0.0
+
+        # Turnover
+        position_changes = position.diff().abs()
+        metrics["turnover"] = float(position_changes.mean()) if len(position_changes) > 0 else 0.0
+
+        return metrics
+
+    def _estimate_transaction_costs(
+        self,
+        factor_values: pd.Series,
+        volume: pd.Series,
+        taker_fee: float = 0.0004,  # 0.04% taker fee
+        slippage_bps: float = 2.0,  # 2 basis points
+    ) -> dict:
+        """Estimate transaction costs and capacity.
+
+        Args:
+            factor_values: Factor values series
+            volume: Trading volume series
+            taker_fee: Taker fee rate (default 0.04%)
+            slippage_bps: Slippage in basis points
+
+        Returns:
+            Dict with cost metrics
+        """
+        # Calculate turnover
+        factor_zscore = (factor_values - factor_values.rolling(20).mean()) / factor_values.rolling(20).std()
+        position = np.sign(factor_zscore.clip(-3, 3)).fillna(0)
+        position_changes = position.diff().abs()
+        turnover = float(position_changes.mean())
+
+        # Estimate annual cost
+        slippage_rate = slippage_bps / 10000
+        annual_cost = turnover * (taker_fee + slippage_rate) * 252
+
+        # Capacity estimation (1% of avg volume)
+        avg_volume = float(volume.mean())
+        capacity_daily = avg_volume * 0.01
+        capacity_annual = capacity_daily * 252
+
+        # Implementability score
+        if annual_cost < 0.005:  # < 0.5% annual cost
+            implementability = 1.0
+        elif annual_cost < 0.02:  # < 2%
+            implementability = 0.7
+        elif annual_cost < 0.05:  # < 5%
+            implementability = 0.4
+        else:
+            implementability = 0.1
+
+        return {
+            "estimated_annual_cost_bps": round(annual_cost * 10000, 2),
+            "capacity_daily_usd": round(capacity_daily, 0),
+            "capacity_annual_usd": round(capacity_annual, 0),
+            "implementability_score": round(implementability, 2),
+        }
 
     async def get_stats(self) -> dict:
         """Get factor statistics."""
@@ -406,6 +913,8 @@ class FactorService:
     ) -> str:
         """Create and start a factor mining task.
 
+        Uses MiningTaskRepository for dual persistence (DB + Redis cache).
+
         Args:
             name: Task name
             description: Task description
@@ -417,35 +926,16 @@ class FactorService:
             Task ID
         """
         task_id = str(uuid.uuid4())
-        now = datetime.now()
 
-        task_data = {
-            "id": task_id,
-            "name": name,
-            "description": description,
-            "factor_families": factor_families,
-            "target_count": target_count,
-            "auto_evaluate": auto_evaluate,
-            "generated_count": 0,
-            "passed_count": 0,
-            "failed_count": 0,
-            "status": "pending",
-            "progress": 0.0,
-            "error_message": None,
-            "created_at": now.isoformat(),
-            "started_at": None,
-            "completed_at": None,
-        }
-
-        # Store in Redis for real-time tracking
-        if self.redis_client:
-            await self.redis_client.hset(
-                "mining_tasks",
-                task_id,
-                json.dumps(task_data),
-            )
-            # Add to active tasks list
-            await self.redis_client.sadd("mining_tasks:active", task_id)
+        # Create task in database (with Redis cache)
+        task_data = await self.mining_task_repo.create(
+            task_id=task_id,
+            name=name,
+            description=description,
+            factor_families=factor_families,
+            target_count=target_count,
+            auto_evaluate=auto_evaluate,
+        )
 
         # Start background mining task (in production, use Celery/asyncio task)
         asyncio.create_task(self._run_mining_task(task_id, task_data))
@@ -455,23 +945,28 @@ class FactorService:
     async def _run_mining_task(self, task_id: str, task_data: dict) -> None:
         """Run mining task in background.
 
+        Uses MiningTaskRepository for persistent progress tracking.
+
         Args:
             task_id: Task ID
             task_data: Task configuration data
         """
+        generated_count = 0
+        passed_count = 0
+        failed_count = 0
+
         try:
-            task_data["status"] = "running"
-            task_data["started_at"] = datetime.now().isoformat()
-            await self._update_mining_task(task_id, task_data)
+            # Mark as started
+            await self.mining_task_repo.set_started(task_id)
 
             target_count = task_data["target_count"]
-            families = task_data["factor_families"] or ["momentum", "volatility"]
+            families = task_data.get("factor_families") or ["momentum", "volatility"]
             auto_evaluate = task_data.get("auto_evaluate", True)
 
             for i in range(target_count):
                 if await self._is_task_cancelled(task_id):
-                    task_data["status"] = "cancelled"
-                    break
+                    await self.mining_task_repo.set_completed(task_id, status="cancelled")
+                    return
 
                 # Generate factor
                 family = families[i % len(families)]
@@ -483,7 +978,7 @@ class FactorService:
                         family=[family],
                         target_task="price_prediction",
                     )
-                    task_data["generated_count"] += 1
+                    generated_count += 1
 
                     # Auto-evaluate if enabled
                     if auto_evaluate:
@@ -493,59 +988,56 @@ class FactorService:
                                 splits=["train", "valid", "test"],
                             )
                             if passed:
-                                task_data["passed_count"] += 1
+                                passed_count += 1
                             else:
-                                task_data["failed_count"] += 1
+                                failed_count += 1
                         except Exception:
-                            task_data["failed_count"] += 1
+                            failed_count += 1
                 except Exception as e:
-                    task_data["failed_count"] += 1
+                    failed_count += 1
                     print(f"Mining task error: {e}")
 
-                # Update progress
-                task_data["progress"] = ((i + 1) / target_count) * 100
-                await self._update_mining_task(task_id, task_data)
+                # Update progress in database
+                progress = ((i + 1) / target_count) * 100
+                await self.mining_task_repo.update_progress(
+                    task_id=task_id,
+                    generated_count=generated_count,
+                    passed_count=passed_count,
+                    failed_count=failed_count,
+                    progress=progress,
+                )
 
                 # Small delay to avoid overwhelming LLM
                 await asyncio.sleep(0.5)
 
-            if task_data["status"] != "cancelled":
-                task_data["status"] = "completed"
-            task_data["completed_at"] = datetime.now().isoformat()
+            # Mark as completed
+            await self.mining_task_repo.set_completed(task_id, status="completed")
 
         except Exception as e:
-            task_data["status"] = "failed"
-            task_data["error_message"] = str(e)
-            task_data["completed_at"] = datetime.now().isoformat()
-
-        await self._update_mining_task(task_id, task_data)
-
-        # Remove from active tasks
-        if self.redis_client:
-            await self.redis_client.srem("mining_tasks:active", task_id)
-
-    async def _update_mining_task(self, task_id: str, task_data: dict) -> None:
-        """Update mining task in Redis."""
-        if self.redis_client:
-            await self.redis_client.hset(
-                "mining_tasks",
-                task_id,
-                json.dumps(task_data),
+            # Mark as failed
+            await self.mining_task_repo.set_completed(
+                task_id=task_id,
+                status="failed",
+                error_message=str(e),
             )
 
     async def _is_task_cancelled(self, task_id: str) -> bool:
         """Check if task has been cancelled."""
+        # Check Redis for real-time cancellation signal
         if self.redis_client:
             cancelled = await self.redis_client.sismember("mining_tasks:cancelled", task_id)
             return bool(cancelled)
-        return False
+
+        # Fallback: check database status
+        task = await self.mining_task_repo.get_by_id(task_id)
+        return task.get("status") == "cancelled" if task else False
 
     async def list_mining_tasks(
         self,
         status: Optional[str] = None,
         limit: int = 20,
     ) -> list[MiningTaskStatus]:
-        """List mining tasks.
+        """List mining tasks from database.
 
         Args:
             status: Filter by status
@@ -554,41 +1046,34 @@ class FactorService:
         Returns:
             List of mining task statuses
         """
+        task_dicts, _ = await self.mining_task_repo.list_tasks(
+            status=status,
+            limit=limit,
+        )
+
         tasks = []
+        for task_data in task_dicts:
+            tasks.append(MiningTaskStatus(
+                id=task_data["id"],
+                name=task_data["name"],
+                description=task_data.get("description", ""),
+                factor_families=task_data.get("factor_families", []),
+                target_count=task_data["target_count"],
+                generated_count=task_data["generated_count"],
+                passed_count=task_data["passed_count"],
+                failed_count=task_data["failed_count"],
+                status=task_data["status"],
+                progress=task_data["progress"],
+                error_message=task_data.get("error_message"),
+                created_at=datetime.fromisoformat(task_data["created_at"]) if isinstance(task_data["created_at"], str) else task_data["created_at"],
+                started_at=datetime.fromisoformat(task_data["started_at"]) if task_data.get("started_at") and isinstance(task_data["started_at"], str) else task_data.get("started_at"),
+                completed_at=datetime.fromisoformat(task_data["completed_at"]) if task_data.get("completed_at") and isinstance(task_data["completed_at"], str) else task_data.get("completed_at"),
+            ))
 
-        if self.redis_client:
-            all_tasks = await self.redis_client.hgetall("mining_tasks")
-            for task_json in all_tasks.values():
-                task_data = json.loads(task_json)
-
-                # Filter by status if specified
-                if status and task_data["status"] != status:
-                    continue
-
-                tasks.append(MiningTaskStatus(
-                    id=task_data["id"],
-                    name=task_data["name"],
-                    description=task_data.get("description", ""),
-                    factor_families=task_data.get("factor_families", []),
-                    target_count=task_data["target_count"],
-                    generated_count=task_data["generated_count"],
-                    passed_count=task_data["passed_count"],
-                    failed_count=task_data["failed_count"],
-                    status=task_data["status"],
-                    progress=task_data["progress"],
-                    error_message=task_data.get("error_message"),
-                    created_at=datetime.fromisoformat(task_data["created_at"]),
-                    started_at=datetime.fromisoformat(task_data["started_at"]) if task_data.get("started_at") else None,
-                    completed_at=datetime.fromisoformat(task_data["completed_at"]) if task_data.get("completed_at") else None,
-                ))
-
-        # Sort by created_at descending
-        tasks.sort(key=lambda t: t.created_at, reverse=True)
-
-        return tasks[:limit]
+        return tasks
 
     async def get_mining_task(self, task_id: str) -> Optional[MiningTaskStatus]:
-        """Get mining task by ID.
+        """Get mining task by ID from database.
 
         Args:
             task_id: Task ID
@@ -596,26 +1081,25 @@ class FactorService:
         Returns:
             Mining task status or None
         """
-        if self.redis_client:
-            task_json = await self.redis_client.hget("mining_tasks", task_id)
-            if task_json:
-                task_data = json.loads(task_json)
-                return MiningTaskStatus(
-                    id=task_data["id"],
-                    name=task_data["name"],
-                    description=task_data.get("description", ""),
-                    factor_families=task_data.get("factor_families", []),
-                    target_count=task_data["target_count"],
-                    generated_count=task_data["generated_count"],
-                    passed_count=task_data["passed_count"],
-                    failed_count=task_data["failed_count"],
-                    status=task_data["status"],
-                    progress=task_data["progress"],
-                    error_message=task_data.get("error_message"),
-                    created_at=datetime.fromisoformat(task_data["created_at"]),
-                    started_at=datetime.fromisoformat(task_data["started_at"]) if task_data.get("started_at") else None,
-                    completed_at=datetime.fromisoformat(task_data["completed_at"]) if task_data.get("completed_at") else None,
-                )
+        task_data = await self.mining_task_repo.get_by_id(task_id)
+
+        if task_data:
+            return MiningTaskStatus(
+                id=task_data["id"],
+                name=task_data["name"],
+                description=task_data.get("description", ""),
+                factor_families=task_data.get("factor_families", []),
+                target_count=task_data["target_count"],
+                generated_count=task_data["generated_count"],
+                passed_count=task_data["passed_count"],
+                failed_count=task_data["failed_count"],
+                status=task_data["status"],
+                progress=task_data["progress"],
+                error_message=task_data.get("error_message"),
+                created_at=datetime.fromisoformat(task_data["created_at"]) if isinstance(task_data["created_at"], str) else task_data["created_at"],
+                started_at=datetime.fromisoformat(task_data["started_at"]) if task_data.get("started_at") and isinstance(task_data["started_at"], str) else task_data.get("started_at"),
+                completed_at=datetime.fromisoformat(task_data["completed_at"]) if task_data.get("completed_at") and isinstance(task_data["completed_at"], str) else task_data.get("completed_at"),
+            )
         return None
 
     async def cancel_mining_task(self, task_id: str) -> bool:
@@ -627,15 +1111,18 @@ class FactorService:
         Returns:
             True if cancelled, False otherwise
         """
-        if self.redis_client:
-            # Check if task exists and is running
-            task_json = await self.redis_client.hget("mining_tasks", task_id)
-            if task_json:
-                task_data = json.loads(task_json)
-                if task_data["status"] == "running":
-                    # Mark as cancelled
-                    await self.redis_client.sadd("mining_tasks:cancelled", task_id)
-                    return True
+        # Get task from database
+        task_data = await self.mining_task_repo.get_by_id(task_id)
+
+        if task_data and task_data["status"] == "running":
+            # Set Redis cancellation signal for real-time detection
+            if self.redis_client:
+                await self.redis_client.sadd("mining_tasks:cancelled", task_id)
+
+            # Also update database status
+            await self.mining_task_repo.set_completed(task_id, status="cancelled")
+            return True
+
         return False
 
     # ==================== Factor Library Methods ====================

@@ -17,10 +17,12 @@ import {
   Pickaxe,
   Wrench,
   FlaskConical,
+  Gauge,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+  { name: 'Monitoring', href: '/monitoring', icon: Gauge },
   { name: 'Data Center', href: '/data', icon: Database },
   { name: 'Agents', href: '/agents', icon: Bot },
   { name: 'Factor Mining', href: '/mining', icon: Pickaxe },

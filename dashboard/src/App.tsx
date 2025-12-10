@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { DashboardLayout } from '@/layouts/DashboardLayout'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { AgentMonitorPage } from '@/pages/AgentMonitorPage'
+import { MonitoringPage } from '@/pages/MonitoringPage'
 import { FactorExplorerPage } from '@/pages/FactorExplorerPage'
 import { FactorMiningPage } from '@/pages/FactorMiningPage'
 import { StrategyWorkshopPage } from '@/pages/StrategyWorkshopPage'
@@ -18,6 +19,7 @@ function App() {
       <Routes>
         <Route path="/" element={<DashboardLayout />}>
           <Route index element={<DashboardPage />} />
+          <Route path="monitoring" element={<MonitoringPage />} />
           <Route path="agents" element={<AgentMonitorPage />} />
           <Route path="factors" element={<FactorExplorerPage />} />
           <Route path="mining" element={<FactorMiningPage />} />

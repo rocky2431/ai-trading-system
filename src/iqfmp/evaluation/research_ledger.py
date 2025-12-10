@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+
+import numpy as np
 from scipy import stats
 
 
@@ -42,6 +44,8 @@ class ThresholdConfig:
     base_sharpe_threshold: float = 2.0
     confidence_level: float = 0.95
     min_trials_for_adjustment: int = 1
+    min_threshold: float = 1.5  # Minimum acceptable threshold
+    default_n_observations: int = 252  # Default trading days per year
 
 
 @dataclass
@@ -52,6 +56,8 @@ class ThresholdResult:
     threshold: float
     sharpe: float
     n_trials: int
+    deflated_sharpe: Optional[float] = None
+    p_value: Optional[float] = None
 
 
 @dataclass
@@ -135,12 +141,13 @@ class TrialRecord:
 class DynamicThreshold:
     """Calculator for dynamic significance thresholds.
 
-    Uses a simplified Deflated Sharpe Ratio approach to adjust
-    thresholds based on the number of trials conducted.
+    Uses the Deflated Sharpe Ratio approach from Bailey & López de Prado (2014)
+    "The Deflated Sharpe Ratio: Correcting for Selection Bias,
+    Backtest Overfitting and Non-Normality"
 
     The key insight is that with more trials, the probability of
     finding a spuriously significant factor increases, so we need
-    higher thresholds.
+    higher thresholds adjusted for multiple hypothesis testing.
     """
 
     def __init__(self, config: Optional[ThresholdConfig] = None) -> None:
@@ -185,6 +192,168 @@ class DynamicThreshold:
 
         return float(self.config.base_sharpe_threshold * adjustment)
 
+    def calculate_deflated(
+        self,
+        n_trials: int,
+        n_observations: Optional[int] = None,
+        expected_sharpe: float = 0.0,
+        variance_of_sharpe: float = 1.0,
+        skewness: float = 0.0,
+        kurtosis: float = 3.0,
+    ) -> tuple[float, float, float]:
+        """Calculate Deflated Sharpe Ratio threshold with full academic rigor.
+
+        Based on Bailey & López de Prado (2014) methodology for correcting
+        selection bias, backtest overfitting, and non-normality in Sharpe ratios.
+
+        Args:
+            n_trials: Number of trials/strategies tested
+            n_observations: Number of return observations (default: 252 trading days)
+            expected_sharpe: Expected Sharpe under null hypothesis (usually 0)
+            variance_of_sharpe: Variance of Sharpe distribution
+            skewness: Skewness of return distribution (γ₃)
+            kurtosis: Kurtosis of return distribution (γ₄, normal = 3)
+
+        Returns:
+            Tuple of (threshold, expected_max_sharpe, sharpe_std_error)
+        """
+        if n_trials <= 0:
+            n_trials = 1
+        if n_observations is None:
+            n_observations = self.config.default_n_observations
+
+        # 1. Calculate Expected Maximum Sharpe (Order Statistics)
+        e_max_sharpe = self._expected_max_sharpe(n_trials, variance_of_sharpe)
+
+        # 2. Calculate Sharpe standard error (Lo, 2002 adjustment for non-normality)
+        se_sharpe = self._sharpe_standard_error(
+            n_observations=n_observations,
+            sharpe_estimate=1.0,  # Conservative estimate
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )
+
+        # 3. Get z-score for confidence level
+        z_alpha = stats.norm.ppf(self.config.confidence_level)
+
+        # 4. Deflated Sharpe Ratio threshold
+        # Requirement: SR_observed > E[max(SR)] + z_alpha * SE(SR)
+        threshold = e_max_sharpe + z_alpha * se_sharpe
+
+        # Ensure threshold doesn't fall below minimum
+        threshold = max(threshold, self.config.min_threshold)
+
+        return float(threshold), float(e_max_sharpe), float(se_sharpe)
+
+    def _expected_max_sharpe(self, n: int, variance: float = 1.0) -> float:
+        """Calculate expected maximum Sharpe based on order statistics.
+
+        For n independent trials, the expected maximum of n standard normal
+        variables is approximately: E[max] ≈ Φ^(-1)(1 - 1/n) * sqrt(variance)
+
+        Args:
+            n: Number of trials
+            variance: Variance of Sharpe ratio distribution
+
+        Returns:
+            Expected maximum Sharpe ratio
+        """
+        if n <= 1:
+            return 0.0
+
+        # Use the quantile function for expected max of n normals
+        # This is more accurate than the sqrt(2*ln(n)) approximation
+        quantile = stats.norm.ppf(1 - 1 / n)
+        return float(quantile * np.sqrt(variance))
+
+    def _sharpe_standard_error(
+        self,
+        n_observations: int,
+        sharpe_estimate: float = 1.0,
+        skewness: float = 0.0,
+        kurtosis: float = 3.0,
+    ) -> float:
+        """Calculate Sharpe Ratio standard error with non-normality adjustment.
+
+        Based on Lo (2002) "The Statistics of Sharpe Ratios":
+        SE(SR) = sqrt((1 + 0.5*SR² - γ₃*SR + (γ₄-3)/4*SR²) / n)
+
+        Where:
+        - SR: Sharpe ratio estimate
+        - γ₃: Skewness of returns
+        - γ₄: Kurtosis of returns (3 for normal)
+        - n: Number of observations
+
+        Args:
+            n_observations: Number of return observations
+            sharpe_estimate: Estimated Sharpe ratio (for SE calculation)
+            skewness: Return distribution skewness
+            kurtosis: Return distribution kurtosis (excess kurtosis = kurtosis - 3)
+
+        Returns:
+            Standard error of Sharpe ratio
+        """
+        if n_observations <= 0:
+            n_observations = 1
+
+        sr = sharpe_estimate
+
+        # Lo (2002) formula with non-normality adjustment
+        se_squared = (
+            1
+            + 0.5 * sr**2
+            - skewness * sr
+            + (kurtosis - 3) / 4 * sr**2
+        ) / n_observations
+
+        return float(np.sqrt(max(se_squared, 0)))
+
+    def calculate_deflated_sharpe_ratio(
+        self,
+        observed_sharpe: float,
+        n_trials: int,
+        n_observations: Optional[int] = None,
+        skewness: float = 0.0,
+        kurtosis: float = 3.0,
+    ) -> tuple[float, float]:
+        """Calculate the Deflated Sharpe Ratio and its p-value.
+
+        The DSR adjusts an observed Sharpe ratio for selection bias
+        from multiple testing.
+
+        Args:
+            observed_sharpe: The observed (unadjusted) Sharpe ratio
+            n_trials: Number of trials/strategies tested
+            n_observations: Number of return observations
+            skewness: Return distribution skewness
+            kurtosis: Return distribution kurtosis
+
+        Returns:
+            Tuple of (deflated_sharpe_ratio, p_value)
+        """
+        if n_observations is None:
+            n_observations = self.config.default_n_observations
+
+        # Calculate expected max and standard error
+        e_max = self._expected_max_sharpe(n_trials)
+        se = self._sharpe_standard_error(
+            n_observations=n_observations,
+            sharpe_estimate=observed_sharpe,
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )
+
+        # Deflated Sharpe Ratio = (SR_observed - E[max(SR)]) / SE(SR)
+        if se > 0:
+            deflated_sr = (observed_sharpe - e_max) / se
+        else:
+            deflated_sr = observed_sharpe - e_max
+
+        # P-value: probability of observing this DSR under null
+        p_value = 1.0 - stats.norm.cdf(deflated_sr)
+
+        return float(deflated_sr), float(p_value)
+
     def check(self, sharpe: float, n_trials: int) -> ThresholdResult:
         """Check if a Sharpe ratio passes the threshold.
 
@@ -203,6 +372,57 @@ class DynamicThreshold:
             threshold=float(threshold),
             sharpe=float(sharpe),
             n_trials=n_trials,
+        )
+
+    def check_deflated(
+        self,
+        sharpe: float,
+        n_trials: int,
+        n_observations: Optional[int] = None,
+        skewness: float = 0.0,
+        kurtosis: float = 3.0,
+    ) -> ThresholdResult:
+        """Check if a Sharpe ratio passes the deflated threshold.
+
+        Uses the full Deflated Sharpe Ratio methodology for rigorous
+        multiple hypothesis testing correction.
+
+        Args:
+            sharpe: Sharpe ratio to check
+            n_trials: Current number of trials
+            n_observations: Number of return observations
+            skewness: Return distribution skewness
+            kurtosis: Return distribution kurtosis
+
+        Returns:
+            ThresholdResult with pass/fail, threshold, DSR, and p-value
+        """
+        # Calculate deflated threshold
+        threshold, e_max, se = self.calculate_deflated(
+            n_trials=n_trials,
+            n_observations=n_observations,
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )
+
+        # Calculate deflated sharpe and p-value
+        deflated_sr, p_value = self.calculate_deflated_sharpe_ratio(
+            observed_sharpe=sharpe,
+            n_trials=n_trials,
+            n_observations=n_observations,
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )
+
+        passes = bool(sharpe >= threshold)
+
+        return ThresholdResult(
+            passes=passes,
+            threshold=float(threshold),
+            sharpe=float(sharpe),
+            n_trials=n_trials,
+            deflated_sharpe=float(deflated_sr),
+            p_value=float(p_value),
         )
 
 
@@ -590,6 +810,36 @@ class ResearchLedger:
         """
         n_trials = max(1, self.get_trial_count())
         return self._threshold.check(sharpe, n_trials)
+
+    def check_significance_deflated(
+        self,
+        sharpe: float,
+        n_observations: Optional[int] = None,
+        skewness: float = 0.0,
+        kurtosis: float = 3.0,
+    ) -> ThresholdResult:
+        """Check if a Sharpe ratio is significant using Deflated Sharpe Ratio.
+
+        Uses the full DSR methodology from Bailey & López de Prado (2014)
+        for rigorous multiple hypothesis testing correction.
+
+        Args:
+            sharpe: Sharpe ratio to check
+            n_observations: Number of return observations (default: 252)
+            skewness: Return distribution skewness
+            kurtosis: Return distribution kurtosis
+
+        Returns:
+            ThresholdResult with pass/fail, threshold, DSR, and p-value
+        """
+        n_trials = max(1, self.get_trial_count())
+        return self._threshold.check_deflated(
+            sharpe=sharpe,
+            n_trials=n_trials,
+            n_observations=n_observations,
+            skewness=skewness,
+            kurtosis=kurtosis,
+        )
 
     def get_statistics(self) -> LedgerStatistics:
         """Compute statistics for all trials.

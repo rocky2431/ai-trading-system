@@ -8,7 +8,14 @@ import redis.asyncio as redis
 from sqlalchemy import select, func, delete, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from iqfmp.db.models import FactorORM, ResearchTrialORM, StrategyORM, BacktestResultORM
+from iqfmp.db.models import (
+    FactorORM,
+    ResearchTrialORM,
+    StrategyORM,
+    BacktestResultORM,
+    FactorValueORM,
+    MiningTaskORM,
+)
 from iqfmp.models.factor import Factor, FactorMetrics, FactorStatus, StabilityReport
 
 
@@ -651,4 +658,447 @@ class BacktestResultRepository:
             "trade_count": orm.trade_count,
             "full_results": orm.full_results,
             "created_at": orm.created_at.isoformat() if orm.created_at else None,
+        }
+
+
+class FactorValueRepository:
+    """Repository for Factor Value time-series database operations.
+
+    Stores computed factor values in TimescaleDB hypertable for
+    efficient time-series queries and historical analysis.
+    """
+
+    BATCH_SIZE = 1000  # Insert in batches for performance
+
+    def __init__(self, session: AsyncSession):
+        """Initialize repository with database session."""
+        self.session = session
+
+    async def save_factor_values(
+        self,
+        factor_id: str,
+        values: "pd.DataFrame",
+        symbol: str = "MULTI",
+        timeframe: str = "1d",
+    ) -> int:
+        """Save computed factor values to database.
+
+        Args:
+            factor_id: Factor ID
+            values: DataFrame with 'timestamp' index and 'value' column,
+                   or Series with DatetimeIndex
+            symbol: Symbol identifier
+            timeframe: Timeframe (1m, 5m, 1h, 1d)
+
+        Returns:
+            Number of rows inserted
+        """
+        import pandas as pd
+
+        # Convert Series to DataFrame if needed
+        if isinstance(values, pd.Series):
+            df = pd.DataFrame({"value": values})
+            if isinstance(values.index, pd.DatetimeIndex):
+                df["timestamp"] = values.index
+            else:
+                df["timestamp"] = pd.to_datetime(values.index)
+        else:
+            df = values.copy()
+            if "timestamp" not in df.columns:
+                if isinstance(df.index, pd.DatetimeIndex):
+                    df["timestamp"] = df.index
+                else:
+                    df["timestamp"] = pd.to_datetime(df.index)
+
+        # Drop NaN values
+        df = df.dropna(subset=["value"])
+
+        if df.empty:
+            return 0
+
+        # Insert in batches
+        rows_inserted = 0
+        for i in range(0, len(df), self.BATCH_SIZE):
+            batch = df.iloc[i:i + self.BATCH_SIZE]
+            orm_objects = [
+                FactorValueORM(
+                    factor_id=factor_id,
+                    symbol=symbol,
+                    value=float(row["value"]),
+                    timeframe=timeframe,
+                    timestamp=row["timestamp"],
+                )
+                for _, row in batch.iterrows()
+            ]
+            self.session.add_all(orm_objects)
+            rows_inserted += len(orm_objects)
+
+        await self.session.flush()
+        return rows_inserted
+
+    async def get_factor_values(
+        self,
+        factor_id: str,
+        symbol: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        limit: int = 10000,
+    ) -> list[dict]:
+        """Get factor values from database.
+
+        Args:
+            factor_id: Factor ID
+            symbol: Optional symbol filter
+            start_time: Optional start time
+            end_time: Optional end time
+            limit: Maximum rows to return
+
+        Returns:
+            List of factor value records
+        """
+        query = select(FactorValueORM).where(FactorValueORM.factor_id == factor_id)
+
+        if symbol:
+            query = query.where(FactorValueORM.symbol == symbol)
+        if start_time:
+            query = query.where(FactorValueORM.timestamp >= start_time)
+        if end_time:
+            query = query.where(FactorValueORM.timestamp <= end_time)
+
+        query = query.order_by(FactorValueORM.timestamp.desc()).limit(limit)
+
+        result = await self.session.execute(query)
+        records = result.scalars().all()
+
+        return [
+            {
+                "factor_id": r.factor_id,
+                "symbol": r.symbol,
+                "value": r.value,
+                "timeframe": r.timeframe,
+                "timestamp": r.timestamp.isoformat(),
+            }
+            for r in records
+        ]
+
+    async def delete_factor_values(self, factor_id: str) -> int:
+        """Delete all values for a factor.
+
+        Args:
+            factor_id: Factor ID
+
+        Returns:
+            Number of rows deleted
+        """
+        result = await self.session.execute(
+            delete(FactorValueORM).where(FactorValueORM.factor_id == factor_id)
+        )
+        await self.session.flush()
+        return result.rowcount
+
+    async def get_latest_timestamp(self, factor_id: str) -> Optional[datetime]:
+        """Get the latest timestamp for a factor.
+
+        Args:
+            factor_id: Factor ID
+
+        Returns:
+            Latest timestamp or None
+        """
+        result = await self.session.execute(
+            select(func.max(FactorValueORM.timestamp))
+            .where(FactorValueORM.factor_id == factor_id)
+        )
+        return result.scalar()
+
+
+class MiningTaskRepository:
+    """Repository for Mining Task database operations.
+
+    Provides dual storage: TimescaleDB for persistence, Redis for real-time updates.
+    """
+
+    CACHE_PREFIX = "mining_task:"
+    CACHE_TTL = 86400  # 24 hours
+
+    def __init__(self, session: AsyncSession, redis_client: Optional[redis.Redis] = None):
+        """Initialize repository with database session and optional Redis client."""
+        self.session = session
+        self.redis = redis_client
+
+    async def create(
+        self,
+        task_id: str,
+        name: str,
+        description: Optional[str],
+        factor_families: list[str],
+        target_count: int,
+        auto_evaluate: bool = True,
+        celery_task_id: Optional[str] = None,
+    ) -> dict:
+        """Create a new mining task.
+
+        Args:
+            task_id: Task ID
+            name: Task name
+            description: Task description
+            factor_families: Factor families to mine
+            target_count: Target number of factors
+            auto_evaluate: Whether to auto-evaluate
+            celery_task_id: Optional Celery task ID
+
+        Returns:
+            Created task as dict
+        """
+        task = MiningTaskORM(
+            id=task_id,
+            name=name,
+            description=description,
+            factor_families=factor_families,
+            target_count=target_count,
+            auto_evaluate=auto_evaluate,
+            celery_task_id=celery_task_id,
+            status="pending",
+        )
+        self.session.add(task)
+        await self.session.flush()
+
+        result = task.to_dict()
+
+        # Also cache in Redis for real-time access
+        if self.redis:
+            await self.redis.setex(
+                f"{self.CACHE_PREFIX}{task_id}",
+                self.CACHE_TTL,
+                json.dumps(result, default=str),
+            )
+
+        return result
+
+    async def get_by_id(self, task_id: str) -> Optional[dict]:
+        """Get mining task by ID.
+
+        Args:
+            task_id: Task ID
+
+        Returns:
+            Task dict or None
+        """
+        # Try cache first for running tasks
+        if self.redis:
+            try:
+                cached = await self.redis.get(f"{self.CACHE_PREFIX}{task_id}")
+                if cached:
+                    return json.loads(cached)
+            except Exception:
+                pass
+
+        # Query database
+        result = await self.session.execute(
+            select(MiningTaskORM).where(MiningTaskORM.id == task_id)
+        )
+        task = result.scalar_one_or_none()
+
+        if task:
+            return task.to_dict()
+        return None
+
+    async def update_progress(
+        self,
+        task_id: str,
+        generated_count: int,
+        passed_count: int,
+        failed_count: int,
+        progress: float,
+        status: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Update mining task progress.
+
+        Args:
+            task_id: Task ID
+            generated_count: Number of factors generated
+            passed_count: Number passed evaluation
+            failed_count: Number failed evaluation
+            progress: Progress percentage (0-100)
+            status: Optional new status
+            error_message: Optional error message
+
+        Returns:
+            Updated task dict
+        """
+        updates = {
+            "generated_count": generated_count,
+            "passed_count": passed_count,
+            "failed_count": failed_count,
+            "progress": progress,
+        }
+        if status:
+            updates["status"] = status
+        if error_message:
+            updates["error_message"] = error_message
+
+        await self.session.execute(
+            update(MiningTaskORM)
+            .where(MiningTaskORM.id == task_id)
+            .values(**updates)
+        )
+        await self.session.flush()
+
+        # Update cache
+        task = await self.get_by_id(task_id)
+        if task and self.redis:
+            await self.redis.setex(
+                f"{self.CACHE_PREFIX}{task_id}",
+                self.CACHE_TTL,
+                json.dumps(task, default=str),
+            )
+
+        return task
+
+    async def set_started(self, task_id: str) -> Optional[dict]:
+        """Mark task as started.
+
+        Args:
+            task_id: Task ID
+
+        Returns:
+            Updated task dict
+        """
+        now = datetime.now()
+        await self.session.execute(
+            update(MiningTaskORM)
+            .where(MiningTaskORM.id == task_id)
+            .values(status="running", started_at=now)
+        )
+        await self.session.flush()
+        return await self.get_by_id(task_id)
+
+    async def set_completed(
+        self,
+        task_id: str,
+        status: str = "completed",
+        error_message: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Mark task as completed or failed.
+
+        Args:
+            task_id: Task ID
+            status: Final status (completed, failed, cancelled)
+            error_message: Optional error message
+
+        Returns:
+            Updated task dict
+        """
+        now = datetime.now()
+        updates = {
+            "status": status,
+            "completed_at": now,
+        }
+        if error_message:
+            updates["error_message"] = error_message
+
+        await self.session.execute(
+            update(MiningTaskORM)
+            .where(MiningTaskORM.id == task_id)
+            .values(**updates)
+        )
+        await self.session.flush()
+
+        # Update cache
+        task = await self.get_by_id(task_id)
+        if task and self.redis:
+            await self.redis.setex(
+                f"{self.CACHE_PREFIX}{task_id}",
+                self.CACHE_TTL,
+                json.dumps(task, default=str),
+            )
+
+        return task
+
+    async def list_tasks(
+        self,
+        status: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> tuple[list[dict], int]:
+        """List mining tasks with pagination.
+
+        Args:
+            status: Optional status filter
+            limit: Maximum tasks to return
+            offset: Offset for pagination
+
+        Returns:
+            Tuple of (tasks, total_count)
+        """
+        query = select(MiningTaskORM)
+
+        if status:
+            query = query.where(MiningTaskORM.status == status)
+
+        # Get total count
+        count_query = select(func.count()).select_from(query.subquery())
+        total_result = await self.session.execute(count_query)
+        total = total_result.scalar() or 0
+
+        # Apply pagination
+        query = query.order_by(MiningTaskORM.created_at.desc()).offset(offset).limit(limit)
+
+        result = await self.session.execute(query)
+        tasks = result.scalars().all()
+
+        return [t.to_dict() for t in tasks], total
+
+    async def get_active_tasks(self) -> list[dict]:
+        """Get all active (running) tasks.
+
+        Returns:
+            List of active task dicts
+        """
+        result = await self.session.execute(
+            select(MiningTaskORM)
+            .where(MiningTaskORM.status.in_(["pending", "running"]))
+            .order_by(MiningTaskORM.created_at.desc())
+        )
+        tasks = result.scalars().all()
+        return [t.to_dict() for t in tasks]
+
+    async def get_statistics(self) -> dict:
+        """Get mining task statistics.
+
+        Returns:
+            Statistics dict
+        """
+        # Total tasks
+        total_result = await self.session.execute(
+            select(func.count()).select_from(MiningTaskORM)
+        )
+        total = total_result.scalar() or 0
+
+        # By status
+        status_result = await self.session.execute(
+            select(MiningTaskORM.status, func.count())
+            .group_by(MiningTaskORM.status)
+        )
+        by_status = {row[0]: row[1] for row in status_result.all()}
+
+        # Total factors generated
+        gen_result = await self.session.execute(
+            select(func.sum(MiningTaskORM.generated_count))
+        )
+        total_generated = gen_result.scalar() or 0
+
+        # Total passed
+        passed_result = await self.session.execute(
+            select(func.sum(MiningTaskORM.passed_count))
+        )
+        total_passed = passed_result.scalar() or 0
+
+        return {
+            "total_tasks": total,
+            "by_status": by_status,
+            "total_generated": total_generated,
+            "total_passed": total_passed,
+            "pass_rate": total_passed / total_generated if total_generated > 0 else 0,
         }

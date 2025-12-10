@@ -160,12 +160,20 @@
       "merged_at": "2025-12-10T13:30:00",
       "tests_passed": true,
       "coverage": "88%"
+    },
+    {
+      "id": "20",
+      "title": "实现持仓与 PnL 监控",
+      "branch": "feat/task-20-position-monitoring",
+      "merged_at": "2025-12-10T14:15:00",
+      "tests_passed": true,
+      "coverage": "91%"
     }
   ],
   "summary": {
-    "total_completed": 20,
-    "total_pending": 18,
-    "last_completed_task": "19",
-    "next_task": "20"
+    "total_completed": 21,
+    "total_pending": 17,
+    "last_completed_task": "20",
+    "next_task": "21"
   }
 }

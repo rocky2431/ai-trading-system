@@ -287,10 +287,11 @@
       "priority": "P0",
       "dependencies": ["19"],
       "estimated_days": 2,
-      "status": "in_progress",
+      "status": "completed",
       "type": "feature",
       "trace_to": "specs/product.md#user-story-43-t-003",
-      "started_at": "2025-12-10T13:45:00"
+      "started_at": "2025-12-10T13:45:00",
+      "completed_at": "2025-12-10T14:15:00"
     },
     {
       "id": "21",
@@ -500,7 +501,7 @@
   "metadata": {
     "last_updated": "2025-12-10",
     "total_tasks": 38,
-    "completed_tasks": 20,
+    "completed_tasks": 21,
     "in_progress_tasks": 0,
     "priority_distribution": {
       "P0": 27,
@@ -518,9 +519,9 @@
   },
   "stats": {
     "total": 38,
-    "completed": 20,
+    "completed": 21,
     "in_progress": 0,
-    "pending": 18,
+    "pending": 17,
     "blocked": 0
   }
 }

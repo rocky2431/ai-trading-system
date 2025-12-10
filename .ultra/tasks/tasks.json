@@ -329,10 +329,11 @@
       "priority": "P0",
       "dependencies": ["0"],
       "estimated_days": 2,
-      "status": "in_progress",
+      "status": "completed",
       "type": "architecture",
       "trace_to": "specs/architecture.md#api-design",
-      "started_at": "2025-12-10T16:00:00"
+      "started_at": "2025-12-10T16:00:00",
+      "completed_at": "2025-12-10T16:30:00"
     },
     {
       "id": "24",
@@ -506,7 +507,7 @@
   "metadata": {
     "last_updated": "2025-12-10",
     "total_tasks": 38,
-    "completed_tasks": 23,
+    "completed_tasks": 24,
     "in_progress_tasks": 0,
     "priority_distribution": {
       "P0": 27,
@@ -524,8 +525,8 @@
   },
   "stats": {
     "total": 38,
-    "completed": 23,
-    "in_progress": 1,
+    "completed": 24,
+    "in_progress": 0,
     "pending": 14,
     "blocked": 0
   }

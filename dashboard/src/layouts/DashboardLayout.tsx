@@ -12,6 +12,7 @@ import {
   Sun,
   Bot,
   Beaker,
+  Zap,
 } from 'lucide-react'
 
 const navigation = [
@@ -19,6 +20,7 @@ const navigation = [
   { name: 'Agents', href: '/agents', icon: Bot },
   { name: 'Factors', href: '/factors', icon: LineChart },
   { name: 'Research', href: '/research', icon: Beaker },
+  { name: 'Trading', href: '/trading', icon: Zap },
   { name: 'Pipeline', href: '/pipeline', icon: Activity },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]

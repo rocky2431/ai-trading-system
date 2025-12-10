@@ -5,6 +5,8 @@ Provides tools for cryptocurrency exchange connections:
 - BinanceAdapter: Binance Futures connection
 - OKXAdapter: OKX Swap connection
 - ConnectionManager: Connection management
+- OrderExecutor: Order execution engine
+- OrderManager: Order lifecycle management
 """
 
 from iqfmp.exchange.adapter import (
@@ -35,6 +37,23 @@ from iqfmp.exchange.adapter import (
     InsufficientFundsError,
     OrderNotFoundError,
 )
+from iqfmp.exchange.execution import (
+    # Enums
+    OrderAction,
+    OrderDirection,
+    # Exceptions
+    OrderExecutionError,
+    # Models
+    ExecutionResult,
+    OrderRequest,
+    OrderTimeout,
+    PartialFill,
+    # Classes
+    OrderExecutor,
+    OrderManager,
+    PartialFillHandler,
+    TimeoutHandler,
+)
 
 __all__ = [
     # Adapters
@@ -63,4 +82,19 @@ __all__ = [
     "ExchangeError",
     "InsufficientFundsError",
     "OrderNotFoundError",
+    # Execution - Enums
+    "OrderAction",
+    "OrderDirection",
+    # Execution - Exceptions
+    "OrderExecutionError",
+    # Execution - Models
+    "ExecutionResult",
+    "OrderRequest",
+    "OrderTimeout",
+    "PartialFill",
+    # Execution - Classes
+    "OrderExecutor",
+    "OrderManager",
+    "PartialFillHandler",
+    "TimeoutHandler",
 ]

@@ -1,0 +1,793 @@
+"""Exchange Adapter for cryptocurrency trading.
+
+This module provides:
+- ExchangeAdapter: Abstract base class for exchange connections
+- BinanceAdapter: Binance Futures (USDT-M) implementation
+- OKXAdapter: OKX Swap implementation
+- ConnectionManager: Connection management with auto-reconnect
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from typing import Any, Optional
+
+try:
+    import ccxt
+    import ccxt.async_support as ccxt_async
+except ImportError:
+    ccxt = None  # type: ignore
+    ccxt_async = None  # type: ignore
+
+
+# ============ Exceptions ============
+
+
+class ExchangeError(Exception):
+    """Base exception for exchange errors."""
+
+    pass
+
+
+class ConnectionError(ExchangeError):
+    """Connection error."""
+
+    pass
+
+
+class AuthenticationError(ExchangeError):
+    """Authentication error."""
+
+    pass
+
+
+class InsufficientFundsError(ExchangeError):
+    """Insufficient funds error."""
+
+    pass
+
+
+class OrderNotFoundError(ExchangeError):
+    """Order not found error."""
+
+    pass
+
+
+# ============ Enums ============
+
+
+class ExchangeType(Enum):
+    """Supported exchange types."""
+
+    BINANCE = "binance"
+    OKX = "okx"
+
+
+class OrderSide(Enum):
+    """Order side."""
+
+    BUY = "buy"
+    SELL = "sell"
+
+
+class OrderType(Enum):
+    """Order type."""
+
+    LIMIT = "limit"
+    MARKET = "market"
+    STOP_LIMIT = "stop_limit"
+    STOP_MARKET = "stop_market"
+
+
+class OrderStatus(Enum):
+    """Order status."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+    CANCELED = "canceled"
+    EXPIRED = "expired"
+    REJECTED = "rejected"
+
+
+class ConnectionStatus(Enum):
+    """Connection status."""
+
+    DISCONNECTED = "disconnected"
+    CONNECTING = "connecting"
+    CONNECTED = "connected"
+    RECONNECTING = "reconnecting"
+
+
+# ============ Data Models ============
+
+
+@dataclass
+class Ticker:
+    """Market ticker data."""
+
+    symbol: str
+    bid: float
+    ask: float
+    last: float
+    volume: float = 0.0
+    timestamp: Optional[datetime] = None
+
+    @property
+    def spread(self) -> float:
+        """Calculate bid-ask spread."""
+        return self.ask - self.bid
+
+    @property
+    def spread_pct(self) -> float:
+        """Calculate spread as percentage of mid price."""
+        mid = (self.bid + self.ask) / 2
+        if mid == 0:
+            return 0.0
+        return self.spread / mid
+
+
+@dataclass
+class OrderBook:
+    """Order book data."""
+
+    symbol: str
+    bids: list[list[float]]  # [[price, amount], ...]
+    asks: list[list[float]]
+    timestamp: Optional[datetime] = None
+
+    @property
+    def best_bid(self) -> Optional[float]:
+        """Get best bid price."""
+        if not self.bids:
+            return None
+        return self.bids[0][0]
+
+    @property
+    def best_ask(self) -> Optional[float]:
+        """Get best ask price."""
+        if not self.asks:
+            return None
+        return self.asks[0][0]
+
+    @property
+    def mid_price(self) -> Optional[float]:
+        """Calculate mid price."""
+        if self.best_bid is None or self.best_ask is None:
+            return None
+        return (self.best_bid + self.best_ask) / 2
+
+
+@dataclass
+class OHLCV:
+    """OHLCV candle data."""
+
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+
+
+@dataclass
+class Balance:
+    """Account balance."""
+
+    currency: str
+    free: float
+    used: float
+    total: float
+
+
+@dataclass
+class Order:
+    """Order data."""
+
+    id: str
+    symbol: str
+    side: OrderSide
+    type: OrderType
+    amount: float
+    status: OrderStatus
+    price: Optional[float] = None
+    filled: float = 0.0
+    remaining: float = 0.0
+    cost: float = 0.0
+    fee: float = 0.0
+    timestamp: Optional[datetime] = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Calculate derived fields."""
+        if self.remaining == 0.0:
+            self.remaining = self.amount - self.filled
+        if self.cost == 0.0 and self.price and self.filled:
+            self.cost = self.price * self.filled
+
+    @property
+    def is_filled(self) -> bool:
+        """Check if order is fully filled."""
+        return self.status == OrderStatus.CLOSED or self.filled >= self.amount
+
+
+# ============ Configuration ============
+
+
+@dataclass
+class ExchangeConfig:
+    """Exchange configuration."""
+
+    exchange_type: ExchangeType
+    api_key: str
+    api_secret: str
+    passphrase: Optional[str] = None  # For OKX
+    sandbox: bool = False
+    timeout: int = 30000
+    rate_limit: bool = True
+    options: dict[str, Any] = field(default_factory=dict)
+
+
+# ============ Abstract Adapter ============
+
+
+class ExchangeAdapter(ABC):
+    """Abstract base class for exchange adapters."""
+
+    def __init__(self, config: ExchangeConfig) -> None:
+        """Initialize adapter.
+
+        Args:
+            config: Exchange configuration
+        """
+        self.config = config
+        self._exchange: Any = None
+
+    @abstractmethod
+    async def connect(self) -> None:
+        """Connect to exchange."""
+        pass
+
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """Disconnect from exchange."""
+        pass
+
+    @abstractmethod
+    async def fetch_ticker(self, symbol: str) -> Ticker:
+        """Fetch ticker for symbol."""
+        pass
+
+    @abstractmethod
+    async def fetch_orderbook(
+        self, symbol: str, limit: int = 20
+    ) -> OrderBook:
+        """Fetch order book for symbol."""
+        pass
+
+    @abstractmethod
+    async def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+    ) -> list[OHLCV]:
+        """Fetch OHLCV data."""
+        pass
+
+    @abstractmethod
+    async def fetch_balance(self) -> dict[str, Balance]:
+        """Fetch account balance."""
+        pass
+
+    @abstractmethod
+    async def create_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        amount: float,
+        price: Optional[float] = None,
+    ) -> Order:
+        """Create an order."""
+        pass
+
+    @abstractmethod
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """Cancel an order."""
+        pass
+
+    @abstractmethod
+    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+        """Fetch order status."""
+        pass
+
+
+# ============ Binance Adapter ============
+
+
+class BinanceAdapter(ExchangeAdapter):
+    """Binance Futures (USDT-M) adapter."""
+
+    def __init__(self, config: ExchangeConfig) -> None:
+        """Initialize Binance adapter.
+
+        Args:
+            config: Exchange configuration
+        """
+        super().__init__(config)
+        self._setup_exchange()
+
+    def _setup_exchange(self) -> None:
+        """Setup ccxt exchange instance."""
+        if ccxt is None:
+            raise ImportError("ccxt is required for exchange connections")
+
+        options = {
+            "defaultType": "future",
+            "adjustForTimeDifference": True,
+            **self.config.options,
+        }
+
+        self._exchange = ccxt.binanceusdm({
+            "apiKey": self.config.api_key,
+            "secret": self.config.api_secret,
+            "sandbox": self.config.sandbox,
+            "timeout": self.config.timeout,
+            "enableRateLimit": self.config.rate_limit,
+            "options": options,
+        })
+
+    async def connect(self) -> None:
+        """Connect to Binance."""
+        try:
+            await self._exchange.load_markets()
+        except Exception as e:
+            raise ConnectionError(f"Failed to connect to Binance: {e}")
+
+    async def disconnect(self) -> None:
+        """Disconnect from Binance."""
+        if hasattr(self._exchange, "close"):
+            await self._exchange.close()
+
+    async def fetch_ticker(self, symbol: str) -> Ticker:
+        """Fetch ticker from Binance.
+
+        Args:
+            symbol: Trading pair symbol
+
+        Returns:
+            Ticker data
+        """
+        try:
+            data = await self._exchange.fetch_ticker(symbol)
+            return Ticker(
+                symbol=data["symbol"],
+                bid=float(data.get("bid", 0)),
+                ask=float(data.get("ask", 0)),
+                last=float(data.get("last", 0)),
+                volume=float(data.get("baseVolume", 0)),
+                timestamp=datetime.fromtimestamp(
+                    data["timestamp"] / 1000
+                ) if data.get("timestamp") else None,
+            )
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch ticker: {e}")
+
+    async def fetch_orderbook(
+        self, symbol: str, limit: int = 20
+    ) -> OrderBook:
+        """Fetch order book from Binance.
+
+        Args:
+            symbol: Trading pair symbol
+            limit: Number of levels
+
+        Returns:
+            Order book data
+        """
+        try:
+            data = await self._exchange.fetch_order_book(symbol, limit)
+            return OrderBook(
+                symbol=data.get("symbol", symbol),
+                bids=data.get("bids", []),
+                asks=data.get("asks", []),
+            )
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch orderbook: {e}")
+
+    async def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+    ) -> list[OHLCV]:
+        """Fetch OHLCV from Binance.
+
+        Args:
+            symbol: Trading pair symbol
+            timeframe: Candle timeframe
+            limit: Number of candles
+
+        Returns:
+            List of OHLCV data
+        """
+        try:
+            data = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            return [
+                OHLCV(
+                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
+                    open=float(candle[1]),
+                    high=float(candle[2]),
+                    low=float(candle[3]),
+                    close=float(candle[4]),
+                    volume=float(candle[5]),
+                )
+                for candle in data
+            ]
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch OHLCV: {e}")
+
+    async def fetch_balance(self) -> dict[str, Balance]:
+        """Fetch balance from Binance.
+
+        Returns:
+            Dictionary of balances by currency
+        """
+        try:
+            data = await self._exchange.fetch_balance()
+            result = {}
+            for currency, balance in data.items():
+                if isinstance(balance, dict) and "free" in balance:
+                    result[currency] = Balance(
+                        currency=currency,
+                        free=float(balance.get("free", 0)),
+                        used=float(balance.get("used", 0)),
+                        total=float(balance.get("total", 0)),
+                    )
+            return result
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch balance: {e}")
+
+    async def create_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        amount: float,
+        price: Optional[float] = None,
+    ) -> Order:
+        """Create order on Binance.
+
+        Args:
+            symbol: Trading pair
+            side: Buy or sell
+            order_type: Order type
+            amount: Order amount
+            price: Limit price (optional)
+
+        Returns:
+            Created order
+        """
+        try:
+            data = await self._exchange.create_order(
+                symbol=symbol,
+                type=order_type.value,
+                side=side.value,
+                amount=amount,
+                price=price,
+            )
+            return self._parse_order(data)
+        except Exception as e:
+            if "insufficient" in str(e).lower():
+                raise InsufficientFundsError(str(e))
+            raise ExchangeError(f"Failed to create order: {e}")
+
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """Cancel order on Binance.
+
+        Args:
+            order_id: Order ID
+            symbol: Trading pair
+
+        Returns:
+            True if canceled successfully
+        """
+        try:
+            await self._exchange.cancel_order(order_id, symbol)
+            return True
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise OrderNotFoundError(f"Order {order_id} not found")
+            raise ExchangeError(f"Failed to cancel order: {e}")
+
+    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+        """Fetch order from Binance.
+
+        Args:
+            order_id: Order ID
+            symbol: Trading pair
+
+        Returns:
+            Order data
+        """
+        try:
+            data = await self._exchange.fetch_order(order_id, symbol)
+            return self._parse_order(data)
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise OrderNotFoundError(f"Order {order_id} not found")
+            raise ExchangeError(f"Failed to fetch order: {e}")
+
+    def _parse_order(self, data: dict[str, Any]) -> Order:
+        """Parse order data from ccxt format.
+
+        Args:
+            data: Raw order data
+
+        Returns:
+            Parsed Order object
+        """
+        status_map = {
+            "open": OrderStatus.OPEN,
+            "closed": OrderStatus.CLOSED,
+            "canceled": OrderStatus.CANCELED,
+            "expired": OrderStatus.EXPIRED,
+            "rejected": OrderStatus.REJECTED,
+        }
+
+        return Order(
+            id=str(data["id"]),
+            symbol=data["symbol"],
+            side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
+            type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
+            price=float(data["price"]) if data.get("price") else None,
+            amount=float(data["amount"]),
+            status=status_map.get(data["status"], OrderStatus.OPEN),
+            filled=float(data.get("filled", 0)),
+        )
+
+
+# ============ OKX Adapter ============
+
+
+class OKXAdapter(ExchangeAdapter):
+    """OKX Swap adapter."""
+
+    def __init__(self, config: ExchangeConfig) -> None:
+        """Initialize OKX adapter.
+
+        Args:
+            config: Exchange configuration
+        """
+        super().__init__(config)
+        self._setup_exchange()
+
+    def _setup_exchange(self) -> None:
+        """Setup ccxt exchange instance."""
+        if ccxt is None:
+            raise ImportError("ccxt is required for exchange connections")
+
+        options = {
+            "defaultType": "swap",
+            **self.config.options,
+        }
+
+        self._exchange = ccxt.okx({
+            "apiKey": self.config.api_key,
+            "secret": self.config.api_secret,
+            "password": self.config.passphrase,
+            "sandbox": self.config.sandbox,
+            "timeout": self.config.timeout,
+            "enableRateLimit": self.config.rate_limit,
+            "options": options,
+        })
+
+    async def connect(self) -> None:
+        """Connect to OKX."""
+        try:
+            await self._exchange.load_markets()
+        except Exception as e:
+            raise ConnectionError(f"Failed to connect to OKX: {e}")
+
+    async def disconnect(self) -> None:
+        """Disconnect from OKX."""
+        if hasattr(self._exchange, "close"):
+            await self._exchange.close()
+
+    async def fetch_ticker(self, symbol: str) -> Ticker:
+        """Fetch ticker from OKX."""
+        try:
+            data = await self._exchange.fetch_ticker(symbol)
+            return Ticker(
+                symbol=data["symbol"],
+                bid=float(data.get("bid", 0)),
+                ask=float(data.get("ask", 0)),
+                last=float(data.get("last", 0)),
+                volume=float(data.get("baseVolume", 0)),
+                timestamp=datetime.fromtimestamp(
+                    data["timestamp"] / 1000
+                ) if data.get("timestamp") else None,
+            )
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch ticker: {e}")
+
+    async def fetch_orderbook(
+        self, symbol: str, limit: int = 20
+    ) -> OrderBook:
+        """Fetch order book from OKX."""
+        try:
+            data = await self._exchange.fetch_order_book(symbol, limit)
+            return OrderBook(
+                symbol=data.get("symbol", symbol),
+                bids=data.get("bids", []),
+                asks=data.get("asks", []),
+            )
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch orderbook: {e}")
+
+    async def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1m",
+        limit: int = 100,
+    ) -> list[OHLCV]:
+        """Fetch OHLCV from OKX."""
+        try:
+            data = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            return [
+                OHLCV(
+                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
+                    open=float(candle[1]),
+                    high=float(candle[2]),
+                    low=float(candle[3]),
+                    close=float(candle[4]),
+                    volume=float(candle[5]),
+                )
+                for candle in data
+            ]
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch OHLCV: {e}")
+
+    async def fetch_balance(self) -> dict[str, Balance]:
+        """Fetch balance from OKX."""
+        try:
+            data = await self._exchange.fetch_balance()
+            result = {}
+            for currency, balance in data.items():
+                if isinstance(balance, dict) and "free" in balance:
+                    result[currency] = Balance(
+                        currency=currency,
+                        free=float(balance.get("free", 0)),
+                        used=float(balance.get("used", 0)),
+                        total=float(balance.get("total", 0)),
+                    )
+            return result
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch balance: {e}")
+
+    async def create_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        amount: float,
+        price: Optional[float] = None,
+    ) -> Order:
+        """Create order on OKX."""
+        try:
+            data = await self._exchange.create_order(
+                symbol=symbol,
+                type=order_type.value,
+                side=side.value,
+                amount=amount,
+                price=price,
+            )
+            return self._parse_order(data)
+        except Exception as e:
+            if "insufficient" in str(e).lower():
+                raise InsufficientFundsError(str(e))
+            raise ExchangeError(f"Failed to create order: {e}")
+
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """Cancel order on OKX."""
+        try:
+            await self._exchange.cancel_order(order_id, symbol)
+            return True
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise OrderNotFoundError(f"Order {order_id} not found")
+            raise ExchangeError(f"Failed to cancel order: {e}")
+
+    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+        """Fetch order from OKX."""
+        try:
+            data = await self._exchange.fetch_order(order_id, symbol)
+            return self._parse_order(data)
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise OrderNotFoundError(f"Order {order_id} not found")
+            raise ExchangeError(f"Failed to fetch order: {e}")
+
+    def _parse_order(self, data: dict[str, Any]) -> Order:
+        """Parse order data from ccxt format."""
+        status_map = {
+            "open": OrderStatus.OPEN,
+            "closed": OrderStatus.CLOSED,
+            "canceled": OrderStatus.CANCELED,
+            "expired": OrderStatus.EXPIRED,
+            "rejected": OrderStatus.REJECTED,
+        }
+
+        return Order(
+            id=str(data["id"]),
+            symbol=data["symbol"],
+            side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
+            type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
+            price=float(data["price"]) if data.get("price") else None,
+            amount=float(data["amount"]),
+            status=status_map.get(data["status"], OrderStatus.OPEN),
+            filled=float(data.get("filled", 0)),
+        )
+
+
+# ============ Connection Manager ============
+
+
+class ConnectionManager:
+    """Manages exchange connections with auto-reconnect."""
+
+    def __init__(
+        self,
+        max_retries: int = 5,
+        retry_delay: float = 1.0,
+        heartbeat_interval: float = 30.0,
+    ) -> None:
+        """Initialize connection manager.
+
+        Args:
+            max_retries: Maximum reconnection attempts
+            retry_delay: Delay between retries (seconds)
+            heartbeat_interval: Heartbeat check interval
+        """
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
+        self.heartbeat_interval = heartbeat_interval
+        self.status = ConnectionStatus.DISCONNECTED
+        self._adapter: Optional[ExchangeAdapter] = None
+
+    async def connect(self, adapter: ExchangeAdapter) -> None:
+        """Connect to exchange with retry logic.
+
+        Args:
+            adapter: Exchange adapter to connect
+
+        Raises:
+            ConnectionError: If connection fails after max retries
+        """
+        self._adapter = adapter
+        self.status = ConnectionStatus.CONNECTING
+
+        for attempt in range(self.max_retries):
+            try:
+                await adapter.connect()
+                self.status = ConnectionStatus.CONNECTED
+                return
+            except ConnectionError:
+                if attempt == self.max_retries - 1:
+                    self.status = ConnectionStatus.DISCONNECTED
+                    raise
+                self.status = ConnectionStatus.RECONNECTING
+                import asyncio
+                await asyncio.sleep(self.retry_delay)
+
+        self.status = ConnectionStatus.DISCONNECTED
+        raise ConnectionError("Max retries exceeded")
+
+    async def disconnect(self) -> None:
+        """Disconnect from exchange."""
+        if self._adapter:
+            await self._adapter.disconnect()
+        self.status = ConnectionStatus.DISCONNECTED

@@ -523,8 +523,68 @@ class ConcentrationChecker:
 # ==================== RiskController ====================
 
 
+@dataclass
+class Position:
+    """Position data for risk checking."""
+
+    symbol: str
+    value: Decimal
+    quantity: Decimal = Decimal("0")
+    entry_price: Decimal = Decimal("0")
+    current_price: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+
+
+@dataclass
+class Account:
+    """Account data for risk checking."""
+
+    equity: Decimal
+    total_position_value: Decimal = Decimal("0")
+    available_balance: Decimal = Decimal("0")
+    margin_used: Decimal = Decimal("0")
+    daily_pnl: Decimal = Decimal("0")
+    peak_equity: Decimal = Decimal("0")
+
+
+@dataclass
+class RiskCheckResult:
+    """Result of risk check."""
+
+    is_safe: bool
+    violations: list["HardRiskViolation"]
+    recommended_action: str
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class HardRiskViolation:
+    """Hard threshold risk violation (cannot be ignored)."""
+
+    type: str
+    severity: str  # "critical" | "high" | "medium"
+    action: str  # "emergency_close_all" | "reduce_position" | "reduce_leverage" | "block_new_orders"
+    message: str
+    current_value: Decimal
+    threshold: Decimal
+    timestamp: datetime = field(default_factory=datetime.now)
+
+
 class RiskController:
-    """Main risk management controller."""
+    """Main risk management controller with hard thresholds (Task 8.2).
+
+    Hard thresholds are immutable and cannot be adjusted:
+    - MAX_DRAWDOWN_THRESHOLD: 15% maximum drawdown triggers emergency close
+    - MAX_POSITION_RATIO: 30% single position concentration limit
+    - MAX_LEVERAGE: 3x maximum leverage
+    - EMERGENCY_LOSS_THRESHOLD: 5% single-day loss triggers emergency close
+    """
+
+    # ==================== HARD THRESHOLDS (不可调整) ====================
+    MAX_DRAWDOWN_THRESHOLD: Decimal = Decimal("0.15")  # 15% 最大回撤触发平仓
+    MAX_POSITION_RATIO: Decimal = Decimal("0.30")  # 单一持仓不超过 30%
+    MAX_LEVERAGE: Decimal = Decimal("3.0")  # 最大杠杆 3x
+    EMERGENCY_LOSS_THRESHOLD: Decimal = Decimal("0.05")  # 5% 单日亏损触发紧急平仓
 
     def __init__(
         self,
@@ -797,6 +857,207 @@ class RiskController:
         if rule_type == RiskRuleType.MAX_DRAWDOWN:
             self._drawdown_monitor._max_drawdown = threshold
 
+    # ==================== HARD THRESHOLD METHODS (Task 8.2) ====================
+
+    def _calculate_drawdown(self, account: Account) -> Decimal:
+        """Calculate current drawdown from peak.
+
+        Args:
+            account: Account data
+
+        Returns:
+            Drawdown as decimal (0.15 = 15%)
+        """
+        if account.peak_equity == Decimal("0"):
+            return Decimal("0")
+        return (account.peak_equity - account.equity) / account.peak_equity
+
+    def _get_daily_pnl(self, account: Account) -> Decimal:
+        """Get daily PnL from account.
+
+        Args:
+            account: Account data
+
+        Returns:
+            Daily PnL amount
+        """
+        return account.daily_pnl
+
+    def _get_recommended_action(self, violations: list[HardRiskViolation]) -> str:
+        """Determine recommended action from violations.
+
+        Args:
+            violations: List of violations
+
+        Returns:
+            Recommended action string
+        """
+        if not violations:
+            return "none"
+
+        # Find the most severe action
+        action_priority = {
+            "emergency_close_all": 4,
+            "reduce_leverage": 3,
+            "reduce_position": 2,
+            "block_new_orders": 1,
+        }
+
+        max_priority = 0
+        recommended = "block_new_orders"
+
+        for v in violations:
+            priority = action_priority.get(v.action, 0)
+            if priority > max_priority:
+                max_priority = priority
+                recommended = v.action
+
+        return recommended
+
+    async def check_risk(
+        self, position: Position, account: Account
+    ) -> RiskCheckResult:
+        """检查风险并返回建议动作 (Task 8.2).
+
+        执行四层风险检查，使用硬性阈值：
+        1. 回撤检查 - MAX_DRAWDOWN_THRESHOLD (15%)
+        2. 持仓集中度检查 - MAX_POSITION_RATIO (30%)
+        3. 杠杆检查 - MAX_LEVERAGE (3x)
+        4. 单日亏损检查 - EMERGENCY_LOSS_THRESHOLD (5%)
+
+        Args:
+            position: Position to check
+            account: Account data
+
+        Returns:
+            RiskCheckResult with violations and recommended action
+        """
+        violations: list[HardRiskViolation] = []
+
+        # 1. 回撤检查 (CRITICAL - 触发紧急平仓)
+        drawdown = self._calculate_drawdown(account)
+        if drawdown > self.MAX_DRAWDOWN_THRESHOLD:
+            violations.append(
+                HardRiskViolation(
+                    type="max_drawdown",
+                    severity="critical",
+                    action="emergency_close_all",
+                    message=f"最大回撤 {drawdown * 100:.2f}% 超过阈值 {self.MAX_DRAWDOWN_THRESHOLD * 100:.0f}%",
+                    current_value=drawdown,
+                    threshold=self.MAX_DRAWDOWN_THRESHOLD,
+                )
+            )
+
+        # 2. 持仓集中度检查 (HIGH - 需要减仓)
+        if account.equity > Decimal("0"):
+            position_ratio = position.value / account.equity
+            if position_ratio > self.MAX_POSITION_RATIO:
+                violations.append(
+                    HardRiskViolation(
+                        type="position_concentration",
+                        severity="high",
+                        action="reduce_position",
+                        message=f"持仓比例 {position_ratio * 100:.2f}% 超过阈值 {self.MAX_POSITION_RATIO * 100:.0f}%",
+                        current_value=position_ratio,
+                        threshold=self.MAX_POSITION_RATIO,
+                    )
+                )
+
+        # 3. 杠杆检查 (HIGH - 需要降杠杆)
+        if account.equity > Decimal("0"):
+            leverage = account.total_position_value / account.equity
+            if leverage > self.MAX_LEVERAGE:
+                violations.append(
+                    HardRiskViolation(
+                        type="leverage",
+                        severity="high",
+                        action="reduce_leverage",
+                        message=f"杠杆 {leverage:.2f}x 超过阈值 {self.MAX_LEVERAGE}x",
+                        current_value=leverage,
+                        threshold=self.MAX_LEVERAGE,
+                    )
+                )
+
+        # 4. 单日亏损检查 (CRITICAL - 触发紧急平仓)
+        daily_pnl = self._get_daily_pnl(account)
+        if daily_pnl < Decimal("0") and account.equity > Decimal("0"):
+            daily_loss_ratio = -daily_pnl / account.equity
+            if daily_loss_ratio > self.EMERGENCY_LOSS_THRESHOLD:
+                violations.append(
+                    HardRiskViolation(
+                        type="daily_loss",
+                        severity="critical",
+                        action="emergency_close_all",
+                        message=f"单日亏损 {daily_loss_ratio * 100:.2f}% 超过阈值 {self.EMERGENCY_LOSS_THRESHOLD * 100:.0f}%",
+                        current_value=daily_loss_ratio,
+                        threshold=self.EMERGENCY_LOSS_THRESHOLD,
+                    )
+                )
+
+        return RiskCheckResult(
+            is_safe=len(violations) == 0,
+            violations=violations,
+            recommended_action=self._get_recommended_action(violations),
+        )
+
+    def check_risk_sync(
+        self, position: Position, account: Account
+    ) -> RiskCheckResult:
+        """同步版本的风险检查."""
+        import asyncio
+        return asyncio.get_event_loop().run_until_complete(
+            self.check_risk(position, account)
+        )
+
+    def check_position_allowed(
+        self,
+        new_position_value: Decimal,
+        account: Account,
+    ) -> tuple[bool, str]:
+        """检查是否允许新建仓位.
+
+        Args:
+            new_position_value: New position value
+            account: Account data
+
+        Returns:
+            (is_allowed, reason)
+        """
+        if account.equity <= Decimal("0"):
+            return False, "账户权益为零"
+
+        # 检查仓位比例
+        position_ratio = new_position_value / account.equity
+        if position_ratio > self.MAX_POSITION_RATIO:
+            return False, f"仓位比例 {position_ratio * 100:.1f}% 超过限制 {self.MAX_POSITION_RATIO * 100:.0f}%"
+
+        # 检查杠杆
+        new_total = account.total_position_value + new_position_value
+        leverage = new_total / account.equity
+        if leverage > self.MAX_LEVERAGE:
+            return False, f"杠杆 {leverage:.2f}x 超过限制 {self.MAX_LEVERAGE}x"
+
+        # 检查回撤
+        drawdown = self._calculate_drawdown(account)
+        if drawdown > self.MAX_DRAWDOWN_THRESHOLD:
+            return False, f"回撤 {drawdown * 100:.1f}% 超过限制，禁止新建仓位"
+
+        return True, "允许"
+
+    @classmethod
+    def get_hard_thresholds(cls) -> dict[str, Decimal]:
+        """获取所有硬性阈值.
+
+        Returns:
+            Dict of threshold name to value
+        """
+        return {
+            "max_drawdown": cls.MAX_DRAWDOWN_THRESHOLD,
+            "max_position_ratio": cls.MAX_POSITION_RATIO,
+            "max_leverage": cls.MAX_LEVERAGE,
+            "emergency_loss": cls.EMERGENCY_LOSS_THRESHOLD,
+        }
+
 
 # ==================== Module Exports ====================
 
@@ -807,12 +1068,16 @@ __all__ = [
     "RiskLevel",
     "RiskRuleType",
     # Models
+    "Account",
     "ConcentrationAlert",
     "ConcentrationBreach",
     "DrawdownAlert",
+    "HardRiskViolation",
     "LossAlert",
     "LossRecord",
+    "Position",
     "RiskAction",
+    "RiskCheckResult",
     "RiskConfig",
     "RiskRule",
     "RiskStatus",

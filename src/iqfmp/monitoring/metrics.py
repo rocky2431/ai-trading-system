@@ -288,6 +288,108 @@ class MetricsCollector:
             ["type"],
         )
 
+        # ==================== Task 9.1: IQFMP 专用指标 ====================
+
+        # LLM 指标
+        self.llm_request_total = self.prometheus.counter(
+            "llm_requests_total",
+            "Total LLM API requests",
+            ["model", "status"],
+        )
+
+        self.llm_request_latency = self.prometheus.histogram(
+            "llm_request_latency_seconds",
+            "LLM request latency",
+            ["model"],
+            buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60),
+        )
+
+        self.llm_token_usage = self.prometheus.counter(
+            "llm_tokens_total",
+            "Total tokens used",
+            ["model", "type"],  # type: prompt, completion
+        )
+
+        # 因子指标
+        self.factor_generation_total = self.prometheus.counter(
+            "factors_generated_total",
+            "Total factors generated",
+            ["family", "status"],
+        )
+
+        self.factor_evaluation_latency = self.prometheus.histogram(
+            "factor_evaluation_latency_seconds",
+            "Factor evaluation latency",
+            ["family"],
+            buckets=(1, 5, 10, 30, 60, 120),
+        )
+
+        self.factor_pass_rate = self.prometheus.gauge(
+            "factor_pass_rate",
+            "Factor pass rate",
+            ["family"],
+        )
+
+        self.factor_ic_distribution = self.prometheus.histogram(
+            "factor_ic_distribution",
+            "Distribution of factor IC values",
+            ["family"],
+            buckets=(-0.1, -0.05, -0.02, 0, 0.02, 0.05, 0.1, 0.2),
+        )
+
+        # RD Loop 指标
+        self.rdloop_iteration_total = self.prometheus.counter(
+            "rdloop_iterations_total",
+            "Total RD Loop iterations",
+            ["status"],
+        )
+
+        self.rdloop_core_factors = self.prometheus.gauge(
+            "rdloop_core_factors",
+            "Number of core factors discovered",
+        )
+
+        self.rdloop_hypotheses_tested = self.prometheus.counter(
+            "rdloop_hypotheses_tested_total",
+            "Total hypotheses tested in RD Loop",
+            ["family"],
+        )
+
+        # 向量存储指标
+        self.vector_store_size = self.prometheus.gauge(
+            "vector_store_size",
+            "Number of vectors in store",
+        )
+
+        self.vector_search_latency = self.prometheus.histogram(
+            "vector_search_latency_seconds",
+            "Vector similarity search latency",
+            buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0),
+        )
+
+        self.factor_similarity_checks = self.prometheus.counter(
+            "factor_similarity_checks_total",
+            "Total factor similarity checks",
+            ["result"],  # result: unique, duplicate, similar
+        )
+
+        # 风险控制指标
+        self.risk_violations = self.prometheus.counter(
+            "risk_violations_total",
+            "Total risk violations detected",
+            ["type", "severity"],
+        )
+
+        self.current_drawdown = self.prometheus.gauge(
+            "current_drawdown",
+            "Current portfolio drawdown",
+        )
+
+        self.current_leverage = self.prometheus.gauge(
+            "current_leverage",
+            "Current portfolio leverage",
+        )
+
     def record_request(
         self,
         method: str,
@@ -362,6 +464,142 @@ class MetricsCollector:
     def update_pnl(self, pnl_type: str, value: float):
         """更新 PnL"""
         self.pnl_total.labels(type=pnl_type).set(value)
+
+    # ==================== Task 9.1: IQFMP 专用指标方法 ====================
+
+    def record_llm_request(
+        self,
+        model: str,
+        status: str,
+        latency: float,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+    ):
+        """记录 LLM 请求指标.
+
+        Args:
+            model: Model name (e.g., "gpt-4", "claude-3")
+            status: Request status ("success", "error")
+            latency: Request latency in seconds
+            prompt_tokens: Number of prompt tokens used
+            completion_tokens: Number of completion tokens generated
+        """
+        self.llm_request_total.labels(model=model, status=status).inc()
+        self.llm_request_latency.labels(model=model).observe(latency)
+
+        if prompt_tokens > 0:
+            self.llm_token_usage.labels(model=model, type="prompt").inc(prompt_tokens)
+        if completion_tokens > 0:
+            self.llm_token_usage.labels(model=model, type="completion").inc(completion_tokens)
+
+    def record_factor_generation(
+        self,
+        family: str,
+        status: str,
+        ic_value: Optional[float] = None,
+    ):
+        """记录因子生成指标.
+
+        Args:
+            family: Factor family (e.g., "momentum", "volatility")
+            status: Generation status ("success", "failed", "rejected")
+            ic_value: Optional IC value for successful factors
+        """
+        self.factor_generation_total.labels(family=family, status=status).inc()
+
+        if ic_value is not None:
+            self.factor_ic_distribution.labels(family=family).observe(ic_value)
+
+    def record_factor_evaluation(
+        self,
+        family: str,
+        latency: float,
+        passed: bool,
+    ):
+        """记录因子评估指标.
+
+        Args:
+            family: Factor family
+            latency: Evaluation latency in seconds
+            passed: Whether the factor passed evaluation
+        """
+        self.factor_evaluation_latency.labels(family=family).observe(latency)
+
+    def update_factor_pass_rate(self, family: str, pass_rate: float):
+        """更新因子通过率.
+
+        Args:
+            family: Factor family
+            pass_rate: Pass rate (0-1)
+        """
+        self.factor_pass_rate.labels(family=family).set(pass_rate)
+
+    def record_rdloop_iteration(self, status: str):
+        """记录 RD Loop 迭代.
+
+        Args:
+            status: Iteration status ("completed", "failed")
+        """
+        self.rdloop_iteration_total.labels(status=status).inc()
+
+    def update_rdloop_core_factors(self, count: int):
+        """更新核心因子数量.
+
+        Args:
+            count: Number of core factors
+        """
+        self.rdloop_core_factors.set(count)
+
+    def record_hypothesis_tested(self, family: str):
+        """记录假设测试.
+
+        Args:
+            family: Factor family
+        """
+        self.rdloop_hypotheses_tested.labels(family=family).inc()
+
+    def update_vector_store_size(self, size: int):
+        """更新向量存储大小.
+
+        Args:
+            size: Number of vectors in store
+        """
+        self.vector_store_size.set(size)
+
+    def record_vector_search(self, latency: float):
+        """记录向量搜索延迟.
+
+        Args:
+            latency: Search latency in seconds
+        """
+        self.vector_search_latency.observe(latency)
+
+    def record_similarity_check(self, result: str):
+        """记录相似度检查结果.
+
+        Args:
+            result: Check result ("unique", "duplicate", "similar")
+        """
+        self.factor_similarity_checks.labels(result=result).inc()
+
+    def record_risk_violation(self, violation_type: str, severity: str):
+        """记录风险违规.
+
+        Args:
+            violation_type: Type of violation (e.g., "max_drawdown", "leverage")
+            severity: Severity level ("critical", "high", "medium")
+        """
+        self.risk_violations.labels(type=violation_type, severity=severity).inc()
+
+    def update_risk_metrics(self, drawdown: float, leverage: float):
+        """更新风险指标.
+
+        Args:
+            drawdown: Current drawdown (0-1)
+            leverage: Current leverage
+        """
+        self.current_drawdown.set(drawdown)
+        self.current_leverage.set(leverage)
 
     def start_server(self, port: Optional[int] = None):
         """启动指标服务器"""

@@ -11,16 +11,37 @@ from __future__ import annotations
 
 import ast
 import re
+import warnings
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
+from uuid import uuid4
+
+import numpy as np
+from scipy import optimize
 
 
 class InvalidStrategyError(Exception):
     """Raised when strategy configuration is invalid."""
 
     pass
+
+
+class InsufficientFactorsError(Exception):
+    """Raised when not enough factors are provided for strategy generation."""
+
+    pass
+
+
+class CombinationMethod(str, Enum):
+    """Factor combination methods for multi-factor strategies."""
+
+    EQUAL_WEIGHT = "equal_weight"
+    IC_WEIGHT = "ic_weight"
+    OPTIMIZATION = "optimization"
+    RANK_IC_WEIGHT = "rank_ic_weight"
 
 
 class WeightingScheme(Enum):
@@ -481,3 +502,360 @@ class {self._to_class_name(name)}Strategy(BaseStrategy):
         """Convert name to PascalCase class name."""
         words = re.split(r"[_\-\s]+", name)
         return "".join(word.capitalize() for word in words)
+
+    def generate_from_factors(
+        self,
+        factors: list[dict[str, Any]],
+        combination_method: str | CombinationMethod = CombinationMethod.EQUAL_WEIGHT,
+        min_diversity_ratio: float = 0.5,
+        target_volatility: float = 0.15,
+    ) -> "Strategy":
+        """从验证通过的因子生成策略 (Task 8.1).
+
+        Args:
+            factors: Factor dictionaries with id, name, family, code, cluster_id, metrics
+            combination_method: 组合方法 (equal_weight, ic_weight, optimization)
+            min_diversity_ratio: 最小多样性比率 (不同 cluster 占比)
+            target_volatility: 目标波动率 (用于优化方法)
+
+        Returns:
+            Strategy object with weights and Qlib config
+
+        Raises:
+            InsufficientFactorsError: If fewer than 2 factors provided
+        """
+        if len(factors) < 2:
+            raise InsufficientFactorsError(
+                f"At least 2 factors required for multi-factor strategy, got {len(factors)}"
+            )
+
+        # 1. 检查因子多样性 (不同 cluster)
+        diversity_info = self._check_factor_diversity(factors, min_diversity_ratio)
+        if not diversity_info["is_diverse"]:
+            warnings.warn(
+                f"因子多样性不足 (cluster 覆盖率 {diversity_info['cluster_ratio']:.2%})，"
+                f"建议选择不同聚类的因子以降低相关性"
+            )
+
+        # 2. 根据组合方法计算权重
+        if isinstance(combination_method, str):
+            combination_method = CombinationMethod(combination_method)
+
+        if combination_method == CombinationMethod.EQUAL_WEIGHT:
+            weights = self._equal_weights(factors)
+        elif combination_method == CombinationMethod.IC_WEIGHT:
+            weights = self._ic_weighted(factors)
+        elif combination_method == CombinationMethod.RANK_IC_WEIGHT:
+            weights = self._rank_ic_weighted(factors)
+        elif combination_method == CombinationMethod.OPTIMIZATION:
+            weights = self._optimize_weights(factors, target_volatility)
+        else:
+            weights = self._equal_weights(factors)
+
+        # 3. 生成 Qlib 策略配置
+        qlib_config = self._generate_qlib_strategy_config(factors, weights)
+
+        # 4. 生成策略代码
+        factor_dicts = [
+            {"name": f.get("name", f"factor_{i}"), "weight": weights[f.get("id", str(i))]}
+            for i, f in enumerate(factors)
+        ]
+        generated = self.generate(
+            name=f"combined_{len(factors)}factors",
+            factors=factor_dicts,
+            qlib_compatible=True,
+            normalize_weights=True,
+        )
+
+        # 5. 创建策略记录
+        return Strategy(
+            id=str(uuid4()),
+            name=f"combined_{len(factors)}factors",
+            description=f"Multi-factor strategy combining {len(factors)} factors using {combination_method.value}",
+            factor_weights=weights,
+            qlib_config=qlib_config,
+            code=generated.code,
+            factors=[f.get("id", str(i)) for i, f in enumerate(factors)],
+            combination_method=combination_method.value,
+            diversity_info=diversity_info,
+            created_at=datetime.now(),
+        )
+
+    def _check_factor_diversity(
+        self, factors: list[dict[str, Any]], min_ratio: float = 0.5
+    ) -> dict[str, Any]:
+        """检查因子多样性 (不同 cluster 占比).
+
+        Args:
+            factors: Factor dictionaries
+            min_ratio: Minimum ratio of unique clusters
+
+        Returns:
+            Diversity info dict with is_diverse, cluster_ratio, unique_clusters
+        """
+        cluster_ids = [f.get("cluster_id") for f in factors if f.get("cluster_id")]
+        unique_clusters = set(cluster_ids)
+
+        # 如果没有 cluster 信息，假设多样性足够
+        if not cluster_ids:
+            return {
+                "is_diverse": True,
+                "cluster_ratio": 1.0,
+                "unique_clusters": 0,
+                "total_with_cluster": 0,
+                "message": "No cluster information available",
+            }
+
+        cluster_ratio = len(unique_clusters) / len(cluster_ids)
+        return {
+            "is_diverse": cluster_ratio >= min_ratio,
+            "cluster_ratio": cluster_ratio,
+            "unique_clusters": len(unique_clusters),
+            "total_with_cluster": len(cluster_ids),
+            "message": (
+                f"Good diversity: {len(unique_clusters)} unique clusters"
+                if cluster_ratio >= min_ratio
+                else f"Low diversity: only {len(unique_clusters)} unique clusters"
+            ),
+        }
+
+    def _equal_weights(self, factors: list[dict[str, Any]]) -> dict[str, float]:
+        """计算等权重."""
+        weight = 1.0 / len(factors)
+        return {f.get("id", str(i)): weight for i, f in enumerate(factors)}
+
+    def _ic_weighted(self, factors: list[dict[str, Any]]) -> dict[str, float]:
+        """基于 IC 值的权重计算.
+
+        权重与 |IC| 成正比，确保高 IC 因子获得更高权重。
+        """
+        ic_values = {}
+        for i, f in enumerate(factors):
+            factor_id = f.get("id", str(i))
+            metrics = f.get("metrics") or {}
+            # 支持多种 IC 字段名
+            ic = metrics.get("ic_mean") or metrics.get("ic") or metrics.get("mean_ic") or 0.0
+            ic_values[factor_id] = abs(float(ic))
+
+        total_ic = sum(ic_values.values())
+
+        # 如果所有 IC 都是 0，回退到等权重
+        if total_ic == 0:
+            return self._equal_weights(factors)
+
+        return {fid: ic / total_ic for fid, ic in ic_values.items()}
+
+    def _rank_ic_weighted(self, factors: list[dict[str, Any]]) -> dict[str, float]:
+        """基于 Rank IC 的权重计算.
+
+        适用于截面策略，使用 Rank IC 而非 IC。
+        """
+        ic_values = {}
+        for i, f in enumerate(factors):
+            factor_id = f.get("id", str(i))
+            metrics = f.get("metrics") or {}
+            # 优先使用 rank_ic，否则回退到 ic
+            ic = metrics.get("rank_ic") or metrics.get("ic_mean") or 0.0
+            ic_values[factor_id] = abs(float(ic))
+
+        total_ic = sum(ic_values.values())
+
+        if total_ic == 0:
+            return self._equal_weights(factors)
+
+        return {fid: ic / total_ic for fid, ic in ic_values.items()}
+
+    def _optimize_weights(
+        self,
+        factors: list[dict[str, Any]],
+        target_volatility: float = 0.15,
+    ) -> dict[str, float]:
+        """使用均值-方差优化计算权重.
+
+        最大化夏普比率，目标波动率约束。
+
+        Args:
+            factors: Factor dictionaries with metrics
+            target_volatility: Target portfolio volatility
+
+        Returns:
+            Optimized weights dict
+        """
+        n = len(factors)
+
+        # 提取收益和波动率估计
+        returns = []
+        volatilities = []
+        for f in factors:
+            metrics = f.get("metrics") or {}
+            # 使用 IC 作为预期收益的代理
+            ic = metrics.get("ic_mean") or metrics.get("ic") or 0.02
+            sharpe = metrics.get("sharpe") or 1.0
+            vol = abs(ic / sharpe) if sharpe != 0 else 0.1
+            returns.append(float(ic))
+            volatilities.append(float(vol))
+
+        returns = np.array(returns)
+        volatilities = np.array(volatilities)
+
+        # 简化假设：因子之间的相关性为 0.3 (保守估计)
+        correlation = 0.3
+        cov_matrix = np.outer(volatilities, volatilities) * (
+            np.eye(n) + (1 - np.eye(n)) * correlation
+        )
+
+        def neg_sharpe(w):
+            """Negative Sharpe ratio (for minimization)."""
+            port_return = np.dot(w, returns)
+            port_vol = np.sqrt(np.dot(w, np.dot(cov_matrix, w)))
+            return -port_return / port_vol if port_vol > 0 else 0
+
+        # 约束条件
+        constraints = [
+            {"type": "eq", "fun": lambda w: np.sum(w) - 1},  # 权重和为 1
+        ]
+
+        # 边界条件：0 <= w <= 0.5 (单因子最大 50%)
+        bounds = [(0, 0.5) for _ in range(n)]
+
+        # 初始等权重
+        w0 = np.ones(n) / n
+
+        try:
+            result = optimize.minimize(
+                neg_sharpe,
+                w0,
+                method="SLSQP",
+                bounds=bounds,
+                constraints=constraints,
+                options={"maxiter": 100},
+            )
+
+            if result.success:
+                weights_arr = result.x
+                # 确保权重非负并归一化
+                weights_arr = np.maximum(weights_arr, 0)
+                weights_arr = weights_arr / np.sum(weights_arr)
+            else:
+                # 优化失败，回退到 IC 加权
+                return self._ic_weighted(factors)
+
+        except Exception:
+            # 任何错误都回退到 IC 加权
+            return self._ic_weighted(factors)
+
+        return {
+            factors[i].get("id", str(i)): float(weights_arr[i])
+            for i in range(n)
+        }
+
+    def _generate_qlib_strategy_config(
+        self, factors: list[dict[str, Any]], weights: dict[str, float]
+    ) -> dict[str, Any]:
+        """生成 Qlib 策略配置.
+
+        Args:
+            factors: Factor dictionaries
+            weights: Factor weights
+
+        Returns:
+            Qlib-compatible strategy configuration
+        """
+        factor_configs = []
+        for i, f in enumerate(factors):
+            factor_id = f.get("id", str(i))
+            factor_configs.append({
+                "name": f.get("name", factor_id),
+                "expression": f.get("code", ""),
+                "weight": weights.get(factor_id, 1.0 / len(factors)),
+                "family": f.get("family", []),
+            })
+
+        return {
+            "model": {
+                "class": "LinearModel",
+                "module_path": "qlib.contrib.model.linear",
+                "kwargs": {},
+            },
+            "dataset": {
+                "class": "DatasetH",
+                "module_path": "qlib.data.dataset",
+                "kwargs": {
+                    "handler": {
+                        "class": "Alpha158",
+                        "module_path": "qlib.contrib.data.handler",
+                    },
+                    "segments": {
+                        "train": ("2010-01-01", "2019-12-31"),
+                        "valid": ("2020-01-01", "2020-12-31"),
+                        "test": ("2021-01-01", "2022-12-31"),
+                    },
+                },
+            },
+            "strategy": {
+                "class": "TopkDropoutStrategy",
+                "module_path": "qlib.contrib.strategy",
+                "kwargs": {
+                    "topk": 30,
+                    "n_drop": 5,
+                },
+            },
+            "backtest": {
+                "start_time": "2021-01-01",
+                "end_time": "2022-12-31",
+                "account": 100000000,
+                "benchmark": "SH000300",
+                "exchange_kwargs": {
+                    "limit_threshold": 0.095,
+                    "deal_price": "close",
+                    "open_cost": 0.0005,
+                    "close_cost": 0.0015,
+                    "min_cost": 5,
+                },
+            },
+            "factors": factor_configs,
+        }
+
+
+@dataclass
+class Strategy:
+    """Strategy entity for multi-factor combination (Task 8.1)."""
+
+    id: str
+    name: str
+    factor_weights: dict[str, float]
+    qlib_config: dict[str, Any]
+    code: str
+    factors: list[str]
+    combination_method: str
+    created_at: datetime
+    description: str = ""
+    diversity_info: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert strategy to dictionary."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "factor_weights": self.factor_weights,
+            "qlib_config": self.qlib_config,
+            "code": self.code,
+            "factors": self.factors,
+            "combination_method": self.combination_method,
+            "diversity_info": self.diversity_info,
+            "created_at": self.created_at.isoformat(),
+            "metadata": self.metadata,
+        }
+
+    def get_weight(self, factor_id: str) -> float:
+        """Get weight for a specific factor."""
+        return self.factor_weights.get(factor_id, 0.0)
+
+    def get_top_factors(self, n: int = 5) -> list[tuple[str, float]]:
+        """Get top N factors by weight."""
+        sorted_weights = sorted(
+            self.factor_weights.items(), key=lambda x: x[1], reverse=True
+        )
+        return sorted_weights[:n]

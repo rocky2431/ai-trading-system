@@ -34,6 +34,17 @@ class MarketGroup(Enum):
     OTHER = "other"
 
 
+class MarketRegime(Enum):
+    """Market regime classification."""
+
+    LOW_VOL = "low_vol"
+    MEDIUM_VOL = "medium_vol"
+    HIGH_VOL = "high_vol"
+    TRENDING_UP = "trending_up"
+    TRENDING_DOWN = "trending_down"
+    RANGING = "ranging"
+
+
 class TimeFrequency(Enum):
     """Supported time frequencies."""
 
@@ -102,6 +113,7 @@ class CVSplitConfig:
     time_split: bool = True
     market_split: bool = False
     frequency_split: bool = False
+    regime_split: bool = False
 
     # Time split ratios
     train_ratio: float = 0.6
@@ -121,13 +133,21 @@ class CVSplitConfig:
         default_factory=lambda: [TimeFrequency.HOURLY, TimeFrequency.DAILY]
     )
 
+    # Regime split settings
+    volatility_window: int = 20
+    volatility_bins: list[float] = field(
+        default_factory=lambda: [0.0, 0.02, 0.05, float("inf")]
+    )
+    trend_window: int = 20
+    trend_threshold: float = 0.02
+
     # Data leakage prevention
     strict_temporal: bool = True
     gap_periods: int = 0
 
     def __post_init__(self) -> None:
         """Validate configuration."""
-        if not (self.time_split or self.market_split or self.frequency_split):
+        if not (self.time_split or self.market_split or self.frequency_split or self.regime_split):
             raise InvalidSplitError("At least one split dimension must be enabled")
 
         if abs(self.train_ratio + self.valid_ratio + self.test_ratio - 1.0) > 1e-6:
@@ -139,6 +159,7 @@ class CVSplitConfig:
             "time_split": self.time_split,
             "market_split": self.market_split,
             "frequency_split": self.frequency_split,
+            "regime_split": self.regime_split,
             "train_ratio": self.train_ratio,
             "valid_ratio": self.valid_ratio,
             "test_ratio": self.test_ratio,
@@ -147,6 +168,10 @@ class CVSplitConfig:
             "step_size": self.step_size,
             "min_train_size": self.min_train_size,
             "frequencies": [f.value for f in self.frequencies],
+            "volatility_window": self.volatility_window,
+            "volatility_bins": self.volatility_bins,
+            "trend_window": self.trend_window,
+            "trend_threshold": self.trend_threshold,
             "strict_temporal": self.strict_temporal,
             "gap_periods": self.gap_periods,
         }
@@ -435,8 +460,169 @@ class FrequencySplitter:
         return result
 
 
+class RegimeSplitter:
+    """Market regime-based data splitter.
+
+    Supports two types of regime detection:
+    1. Volatility-based: Low/Medium/High volatility regimes
+    2. Trend-based: Trending Up/Trending Down/Ranging regimes
+    """
+
+    def __init__(
+        self,
+        volatility_window: int = 20,
+        volatility_bins: Optional[list[float]] = None,
+        trend_window: int = 20,
+        trend_threshold: float = 0.02,
+    ) -> None:
+        """Initialize regime splitter.
+
+        Args:
+            volatility_window: Rolling window for volatility calculation
+            volatility_bins: Bin edges for volatility classification [low, med, high, inf]
+            trend_window: Rolling window for trend detection
+            trend_threshold: Threshold for trend classification (abs return)
+        """
+        self.volatility_window = volatility_window
+        self.volatility_bins = volatility_bins or [0.0, 0.02, 0.05, float("inf")]
+        self.trend_window = trend_window
+        self.trend_threshold = trend_threshold
+
+    def detect_volatility_regime(
+        self,
+        data: pd.DataFrame,
+        price_column: str = "close",
+    ) -> pd.Series:
+        """Detect volatility regime for each data point.
+
+        Args:
+            data: DataFrame with price data
+            price_column: Name of price column
+
+        Returns:
+            Series with regime labels
+        """
+        if price_column not in data.columns:
+            raise InvalidSplitError(f"Price column '{price_column}' not found")
+
+        # Calculate rolling volatility
+        returns = data[price_column].pct_change()
+        volatility = returns.rolling(self.volatility_window).std()
+
+        # Classify into regimes
+        regime_labels = ["low_vol", "medium_vol", "high_vol"]
+        regime = pd.cut(
+            volatility,
+            bins=self.volatility_bins,
+            labels=regime_labels,
+            include_lowest=True,
+        )
+
+        return regime
+
+    def detect_trend_regime(
+        self,
+        data: pd.DataFrame,
+        price_column: str = "close",
+    ) -> pd.Series:
+        """Detect trend regime for each data point.
+
+        Args:
+            data: DataFrame with price data
+            price_column: Name of price column
+
+        Returns:
+            Series with regime labels
+        """
+        if price_column not in data.columns:
+            raise InvalidSplitError(f"Price column '{price_column}' not found")
+
+        # Calculate rolling return
+        rolling_return = data[price_column].pct_change(self.trend_window)
+
+        # Classify into regimes
+        conditions = [
+            rolling_return > self.trend_threshold,
+            rolling_return < -self.trend_threshold,
+        ]
+        choices = [MarketRegime.TRENDING_UP.value, MarketRegime.TRENDING_DOWN.value]
+        regime = pd.Series(
+            np.select(conditions, choices, default=MarketRegime.RANGING.value),
+            index=data.index,
+        )
+
+        return regime
+
+    def detect_combined_regime(
+        self,
+        data: pd.DataFrame,
+        price_column: str = "close",
+    ) -> pd.Series:
+        """Detect combined volatility + trend regime.
+
+        Args:
+            data: DataFrame with price data
+            price_column: Name of price column
+
+        Returns:
+            Series with combined regime labels (e.g., "high_vol_trending_up")
+        """
+        vol_regime = self.detect_volatility_regime(data, price_column)
+        trend_regime = self.detect_trend_regime(data, price_column)
+
+        # Combine regimes
+        combined = vol_regime.astype(str) + "_" + trend_regime.astype(str)
+        return combined
+
+    def split_by_regime(
+        self,
+        data: pd.DataFrame,
+        regime_type: str = "volatility",
+        regime_column: Optional[str] = None,
+        price_column: str = "close",
+    ) -> dict[str, pd.DataFrame]:
+        """Split data by market regime.
+
+        Args:
+            data: Input DataFrame
+            regime_type: "volatility", "trend", or "combined"
+            regime_column: Pre-existing regime column name (optional)
+            price_column: Price column for auto-detection
+
+        Returns:
+            Dictionary mapping regime names to DataFrames
+        """
+        if regime_column and regime_column in data.columns:
+            regime = data[regime_column]
+        elif regime_type == "volatility":
+            regime = self.detect_volatility_regime(data, price_column)
+        elif regime_type == "trend":
+            regime = self.detect_trend_regime(data, price_column)
+        elif regime_type == "combined":
+            regime = self.detect_combined_regime(data, price_column)
+        else:
+            raise InvalidSplitError(f"Unknown regime type: {regime_type}")
+
+        result: dict[str, pd.DataFrame] = {}
+
+        for regime_name in regime.dropna().unique():
+            mask = regime == regime_name
+            regime_data = data[mask].copy()
+            if len(regime_data) > 0:
+                result[str(regime_name)] = regime_data
+
+        return result
+
+
 class CryptoCVSplitter:
-    """Multi-dimensional cross-validation splitter for crypto data."""
+    """Multi-dimensional cross-validation splitter for crypto data.
+
+    Supports multiple split dimensions:
+    - Time-based splits (Train/Valid/Test with sequential or rolling windows)
+    - Market-based splits (Large/Mid/Small cap)
+    - Frequency-based splits (1h/4h/1d)
+    - Regime-based splits (High/Low volatility, Trending/Ranging)
+    """
 
     def __init__(self, config: CVSplitConfig) -> None:
         """Initialize CV splitter.
@@ -455,6 +641,12 @@ class CryptoCVSplitter:
         )
         self.market_splitter = MarketSplitter()
         self.frequency_splitter = FrequencySplitter()
+        self.regime_splitter = RegimeSplitter(
+            volatility_window=config.volatility_window,
+            volatility_bins=config.volatility_bins,
+            trend_window=config.trend_window,
+            trend_threshold=config.trend_threshold,
+        )
 
     def _validate_data(self, data: pd.DataFrame) -> None:
         """Validate input data."""
@@ -505,13 +697,30 @@ class CryptoCVSplitter:
         if self.config.frequency_split:
             n_splits *= len(self.config.frequencies)
 
+        if self.config.regime_split:
+            # Estimate 3 volatility regimes (low/medium/high)
+            n_splits *= 3
+
         return n_splits
 
-    def split(self, data: pd.DataFrame) -> Iterator[SplitResult]:
+    def split(
+        self,
+        data: pd.DataFrame,
+        regime_column: Optional[str] = None,
+        regime_type: str = "volatility",
+    ) -> Iterator[SplitResult]:
         """Generate cross-validation splits.
+
+        Supports multi-dimensional splitting:
+        - Time-based (sequential or rolling)
+        - Market-based (large/mid/small cap)
+        - Frequency-based (1h/4h/1d)
+        - Regime-based (volatility or trend)
 
         Args:
             data: Input DataFrame
+            regime_column: Optional pre-existing regime column name
+            regime_type: Type of regime detection ("volatility", "trend", "combined")
 
         Yields:
             SplitResult for each split configuration
@@ -541,6 +750,25 @@ class CryptoCVSplitter:
                     new_variants.append((freq_data, new_meta))
             data_variants = new_variants if new_variants else data_variants
 
+        # Apply regime split
+        if self.config.regime_split:
+            new_variants = []
+            for d, meta in data_variants:
+                try:
+                    regime_splits = self.regime_splitter.split_by_regime(
+                        d,
+                        regime_type=regime_type,
+                        regime_column=regime_column,
+                        price_column="close" if "close" in d.columns else d.columns[0],
+                    )
+                    for regime_name, regime_data in regime_splits.items():
+                        new_meta = {**meta, "regime": regime_name}
+                        new_variants.append((regime_data, new_meta))
+                except InvalidSplitError:
+                    # If regime split fails, keep original data
+                    new_variants.append((d, meta))
+            data_variants = new_variants if new_variants else data_variants
+
         # Apply time split to each variant
         for d, meta in data_variants:
             if len(d) == 0:
@@ -562,3 +790,77 @@ class CryptoCVSplitter:
                     test=d.iloc[int(len(d) * 0.8):].copy(),
                     metadata=meta,
                 )
+
+    def split_with_regime_stratification(
+        self,
+        data: pd.DataFrame,
+        regime_type: str = "volatility",
+    ) -> Iterator[SplitResult]:
+        """Generate regime-stratified cross-validation splits.
+
+        Ensures each regime is proportionally represented in train/test splits.
+
+        Args:
+            data: Input DataFrame with price data
+            regime_type: Type of regime detection
+
+        Yields:
+            SplitResult with stratified sampling across regimes
+        """
+        # Detect regime
+        if regime_type == "volatility":
+            regime = self.regime_splitter.detect_volatility_regime(data)
+        elif regime_type == "trend":
+            regime = self.regime_splitter.detect_trend_regime(data)
+        else:
+            regime = self.regime_splitter.detect_combined_regime(data)
+
+        # Add regime column to data
+        data_with_regime = data.copy()
+        data_with_regime["_regime"] = regime
+
+        # Get unique regimes
+        unique_regimes = regime.dropna().unique()
+
+        # For each regime, get time-ordered splits
+        train_parts = []
+        test_parts = []
+        valid_parts = []
+
+        for regime_name in unique_regimes:
+            regime_data = data_with_regime[data_with_regime["_regime"] == regime_name]
+
+            if len(regime_data) < self.config.min_train_size:
+                continue
+
+            # Apply time split within regime
+            n = len(regime_data)
+            train_end = int(n * self.config.train_ratio)
+            valid_end = train_end + int(n * self.config.valid_ratio)
+
+            regime_data_sorted = regime_data.sort_values("datetime")
+            train_parts.append(regime_data_sorted.iloc[:train_end])
+            if self.config.valid_ratio > 0:
+                valid_parts.append(regime_data_sorted.iloc[train_end:valid_end])
+            test_parts.append(regime_data_sorted.iloc[valid_end:])
+
+        if not train_parts or not test_parts:
+            return
+
+        # Combine and sort by time
+        train = pd.concat(train_parts).sort_values("datetime").drop(columns=["_regime"])
+        test = pd.concat(test_parts).sort_values("datetime").drop(columns=["_regime"])
+        valid = None
+        if valid_parts:
+            valid = pd.concat(valid_parts).sort_values("datetime").drop(columns=["_regime"])
+
+        yield SplitResult(
+            train=train,
+            test=test,
+            valid=valid,
+            metadata={
+                "split_type": "regime_stratified",
+                "regime_type": regime_type,
+                "regimes": list(unique_regimes),
+            },
+        )

@@ -256,6 +256,85 @@ class PipelineRunORM(Base):
         }
 
 
+class FactorValueORM(Base):
+    """Factor value table - stores computed factor time-series (TimescaleDB hypertable)."""
+
+    __tablename__ = "factor_values"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    factor_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+
+    # Factor value
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Additional context (for multi-timeframe factors)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False, default="1d")
+
+    # Timestamp - hypertable partition column
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_factor_values_factor_symbol_ts", "factor_id", "symbol", "timestamp"),
+        Index("ix_factor_values_ts", "timestamp"),
+    )
+
+
+class MiningTaskORM(Base):
+    """Mining task table - stores factor mining task state."""
+
+    __tablename__ = "mining_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Configuration
+    factor_families: Mapped[list[str]] = mapped_column(ARRAY(String(50)), default=list)
+    target_count: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    auto_evaluate: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Progress
+    generated_count: Mapped[int] = mapped_column(Integer, default=0)
+    passed_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Celery task ID for tracking
+    celery_task_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True, index=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "factor_families": self.factor_families or [],
+            "target_count": self.target_count,
+            "auto_evaluate": self.auto_evaluate,
+            "generated_count": self.generated_count,
+            "passed_count": self.passed_count,
+            "failed_count": self.failed_count,
+            "status": self.status,
+            "progress": self.progress,
+            "error_message": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
 class TradeORM(Base):
     """Trade table - stores trading records (TimescaleDB hypertable)."""
 
@@ -388,12 +467,18 @@ SELECT create_hypertable('trades', 'timestamp', if_not_exists => TRUE);
 -- Convert ohlcv_data table to hypertable
 SELECT create_hypertable('ohlcv_data', 'timestamp', if_not_exists => TRUE);
 
+-- Convert factor_values table to hypertable
+SELECT create_hypertable('factor_values', 'timestamp', if_not_exists => TRUE);
+
 -- Add compression policy (compress chunks older than 7 days)
 SELECT add_compression_policy('trades', INTERVAL '7 days', if_not_exists => TRUE);
 SELECT add_compression_policy('ohlcv_data', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('factor_values', INTERVAL '7 days', if_not_exists => TRUE);
 
 -- Add retention policy (drop chunks older than 1 year)
 SELECT add_retention_policy('trades', INTERVAL '1 year', if_not_exists => TRUE);
 -- Keep OHLCV data for 3 years
 SELECT add_retention_policy('ohlcv_data', INTERVAL '3 years', if_not_exists => TRUE);
+-- Keep factor values for 2 years
+SELECT add_retention_policy('factor_values', INTERVAL '2 years', if_not_exists => TRUE);
 """

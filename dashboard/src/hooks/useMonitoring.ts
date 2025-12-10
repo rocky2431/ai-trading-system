@@ -130,7 +130,7 @@ export function useMonitoring(refreshInterval = 5000) {
       const response = await systemApi.getStatus()
       const baseMetrics = apiToMonitoringMetrics(response)
 
-      // 尝试获取额外的因子统计
+      // 获取因子统计 (使用扩展的 /factors/stats API)
       try {
         const factorsResponse = await fetch(
           `${import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}/factors/stats`
@@ -138,12 +138,12 @@ export function useMonitoring(refreshInterval = 5000) {
         if (factorsResponse.ok) {
           const factorStats = await factorsResponse.json()
           baseMetrics.factors = {
-            totalGenerated: factorStats.total || 0,
-            totalEvaluated: factorStats.evaluated || 0,
+            totalGenerated: factorStats.total_factors || 0,
+            totalEvaluated: factorStats.evaluated_count || 0,
             passRate: factorStats.pass_rate || 0,
             avgIC: factorStats.avg_ic || 0,
             avgSharpe: factorStats.avg_sharpe || 0,
-            pendingEvaluation: factorStats.pending || 0,
+            pendingEvaluation: factorStats.pending_count || 0,
           }
         }
       } catch {

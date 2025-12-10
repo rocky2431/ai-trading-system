@@ -14,11 +14,28 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# Qlib imports
-import qlib
-from qlib.data import D
-from qlib.data.dataset.handler import DataHandlerLP
-from qlib.contrib.crypto import CryptoDataHandler, CryptoField
+# Qlib imports (with optional crypto extension)
+try:
+    import qlib
+    from qlib.data import D
+    from qlib.data.dataset.handler import DataHandlerLP
+    QLIB_AVAILABLE = True
+except ImportError:
+    QLIB_AVAILABLE = False
+    D = None
+    DataHandlerLP = None
+
+# Crypto extension (P2.2: custom implementation for crypto markets)
+try:
+    from iqfmp.core.qlib_crypto import CryptoDataHandler, CryptoField
+    CRYPTO_AVAILABLE = True
+except ImportError:
+    CRYPTO_AVAILABLE = False
+    CryptoDataHandler = None
+    CryptoField = None
+
+# Import Qlib initialization
+from iqfmp.core.qlib_init import init_qlib, ensure_qlib_initialized, is_qlib_initialized
 
 logger = logging.getLogger(__name__)
 

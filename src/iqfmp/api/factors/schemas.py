@@ -98,12 +98,23 @@ class FactorStatusUpdateRequest(BaseModel):
 
 
 class FactorStatsResponse(BaseModel):
-    """Factor statistics response."""
+    """Factor statistics response.
 
+    Provides comprehensive statistics for monitoring dashboard.
+    """
+
+    # Basic counts
     total_factors: int
     by_status: dict[str, int]
     total_trials: int
     current_threshold: float
+
+    # Extended fields for monitoring dashboard
+    evaluated_count: int = 0  # Factors that have been evaluated (non-candidate)
+    pass_rate: float = 0.0  # Percentage of factors that passed threshold (core)
+    avg_ic: float = 0.0  # Average IC across all evaluated factors
+    avg_sharpe: float = 0.0  # Average Sharpe across all evaluated factors
+    pending_count: int = 0  # Factors pending evaluation (candidate status)
 
 
 # ============== Mining Task Schemas ==============

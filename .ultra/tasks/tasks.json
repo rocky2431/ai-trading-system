@@ -231,9 +231,11 @@
       "priority": "P0",
       "dependencies": ["15"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "completed",
       "type": "feature",
-      "trace_to": "specs/product.md#user-story-33"
+      "trace_to": "specs/product.md#user-story-33",
+      "started_at": "2025-12-10T10:45:00",
+      "completed_at": "2025-12-10T11:15:00"
     },
     {
       "id": "17",

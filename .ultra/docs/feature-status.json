@@ -9,6 +9,15 @@
       "implementedAt": "2025-12-10T10:30:00",
       "commit": "merged to main",
       "branch": "feat/task-15-strategy-generator"
+    },
+    {
+      "id": "feat-16",
+      "name": "实现开平仓止盈止损逻辑 (S-003)",
+      "status": "pending",
+      "taskId": "16",
+      "implementedAt": "2025-12-10T11:15:00",
+      "commit": "merged to main",
+      "branch": "feat/task-16-position-management"
     }
   ]
 }

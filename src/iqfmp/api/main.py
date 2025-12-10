@@ -8,17 +8,25 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from iqfmp import __version__
 from iqfmp.api.auth.router import router as auth_router
+from iqfmp.api.backtest.router import router as backtest_router
+from iqfmp.api.config.router import router as config_router
+from iqfmp.api.data.router import router as data_router
 from iqfmp.api.factors.router import router as factors_router
 from iqfmp.api.pipeline.router import router as pipeline_router
 from iqfmp.api.research.router import metrics_router, router as research_router
+from iqfmp.api.strategies.router import router as strategies_router
+from iqfmp.api.system.router import router as system_router
+from iqfmp.db.database import init_db, close_db
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
-    # Startup
+    # Startup: Initialize database connections
+    await init_db()
     yield
-    # Shutdown
+    # Shutdown: Close database connections
+    await close_db()
 
 
 def create_app() -> FastAPI:
@@ -44,10 +52,15 @@ def create_app() -> FastAPI:
 
     # Include routers
     app.include_router(auth_router, prefix="/api/v1/auth")
+    app.include_router(backtest_router, prefix="/api/v1/backtest")
+    app.include_router(config_router, prefix="/api/v1/config")
+    app.include_router(data_router, prefix="/api/v1/data")
     app.include_router(factors_router, prefix="/api/v1/factors")
     app.include_router(pipeline_router, prefix="/api/v1/pipeline")
     app.include_router(research_router, prefix="/api/v1/research")
     app.include_router(metrics_router, prefix="/api/v1/metrics")
+    app.include_router(strategies_router, prefix="/api/v1/strategies")
+    app.include_router(system_router, prefix="/api/v1/system")
 
     @app.get("/health")
     async def health_check() -> dict[str, str]:

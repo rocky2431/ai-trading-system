@@ -270,6 +270,219 @@ class FileStorage(LedgerStorage):
         return self._cached_trials.copy()
 
 
+class PostgresStorage(LedgerStorage):
+    """PostgreSQL-based storage backend using SQLAlchemy async.
+
+    This storage persists research trials to TimescaleDB/PostgreSQL,
+    ensuring data survives server restarts and supports querying.
+    """
+
+    def __init__(self) -> None:
+        """Initialize PostgreSQL storage."""
+        self._cached_trials: list[TrialRecord] = []
+        self._loaded = False
+        self._threshold = DynamicThreshold()
+
+    def save(self, trials: list[TrialRecord]) -> None:
+        """Save trials to PostgreSQL (sync wrapper for async operation)."""
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # If we're in an async context, schedule the coroutine
+                asyncio.create_task(self._save_async(trials))
+            else:
+                loop.run_until_complete(self._save_async(trials))
+        except RuntimeError:
+            # No event loop, create one
+            asyncio.run(self._save_async(trials))
+        self._cached_trials = trials.copy()
+
+    async def _save_async(self, trials: list[TrialRecord]) -> None:
+        """Async save implementation."""
+        from iqfmp.db.database import get_async_session
+        from iqfmp.db.models import ResearchTrialORM
+        from sqlalchemy import select, func
+
+        async with get_async_session() as session:
+            # Get existing trial IDs from database
+            result = await session.execute(
+                select(ResearchTrialORM.trial_id)
+            )
+            existing_ids = {row[0] for row in result.fetchall()}
+
+            # Get current max trial number
+            max_num_result = await session.execute(
+                select(func.max(ResearchTrialORM.trial_number))
+            )
+            max_num = max_num_result.scalar() or 0
+
+            # Insert only new trials
+            for trial in trials:
+                if trial.trial_id not in existing_ids:
+                    max_num += 1
+                    threshold = self._threshold.calculate(max_num)
+
+                    orm_trial = ResearchTrialORM(
+                        trial_id=trial.trial_id,
+                        trial_number=max_num,
+                        factor_name=trial.factor_name,
+                        factor_family=trial.factor_family,
+                        sharpe_ratio=trial.sharpe_ratio,
+                        ic_mean=trial.ic_mean,
+                        ir=trial.ir,
+                        max_drawdown=trial.max_drawdown,
+                        win_rate=trial.win_rate,
+                        threshold_used=threshold,
+                        passed_threshold=trial.sharpe_ratio >= threshold,
+                        evaluation_config=trial.metadata,
+                    )
+                    session.add(orm_trial)
+
+    def load(self) -> list[TrialRecord]:
+        """Load trials from PostgreSQL (sync wrapper)."""
+        if not self._loaded:
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Return cached if in async context
+                    return self._cached_trials.copy()
+                else:
+                    self._cached_trials = loop.run_until_complete(self._load_async())
+            except RuntimeError:
+                self._cached_trials = asyncio.run(self._load_async())
+            self._loaded = True
+        return self._cached_trials.copy()
+
+    async def _load_async(self) -> list[TrialRecord]:
+        """Async load implementation."""
+        from iqfmp.db.database import get_async_session
+        from iqfmp.db.models import ResearchTrialORM
+        from sqlalchemy import select
+
+        try:
+            async with get_async_session() as session:
+                result = await session.execute(
+                    select(ResearchTrialORM).order_by(ResearchTrialORM.trial_number)
+                )
+                orm_trials = result.scalars().all()
+
+                return [
+                    TrialRecord(
+                        trial_id=t.trial_id,
+                        factor_name=t.factor_name,
+                        factor_family=t.factor_family,
+                        sharpe_ratio=t.sharpe_ratio,
+                        ic_mean=t.ic_mean,
+                        ir=t.ir,
+                        max_drawdown=t.max_drawdown,
+                        win_rate=t.win_rate,
+                        created_at=t.created_at.replace(tzinfo=None) if t.created_at else None,
+                        metadata=t.evaluation_config or {},
+                    )
+                    for t in orm_trials
+                ]
+        except Exception as e:
+            # If database not available, return empty
+            print(f"Warning: PostgreSQL load failed: {e}")
+            return []
+
+    async def save_trial_async(
+        self,
+        trial: TrialRecord,
+        factor_id: Optional[str] = None,
+    ) -> str:
+        """Save a single trial asynchronously with factor linking.
+
+        Args:
+            trial: Trial record to save
+            factor_id: Optional factor ID to link
+
+        Returns:
+            Trial ID
+        """
+        from iqfmp.db.database import get_async_session
+        from iqfmp.db.models import ResearchTrialORM
+        from sqlalchemy import select, func
+
+        async with get_async_session() as session:
+            # Get current max trial number
+            max_num_result = await session.execute(
+                select(func.max(ResearchTrialORM.trial_number))
+            )
+            max_num = (max_num_result.scalar() or 0) + 1
+
+            threshold = self._threshold.calculate(max_num)
+
+            orm_trial = ResearchTrialORM(
+                trial_id=trial.trial_id,
+                trial_number=max_num,
+                factor_id=factor_id,
+                factor_name=trial.factor_name,
+                factor_family=trial.factor_family,
+                sharpe_ratio=trial.sharpe_ratio,
+                ic_mean=trial.ic_mean,
+                ir=trial.ir,
+                max_drawdown=trial.max_drawdown,
+                win_rate=trial.win_rate,
+                threshold_used=threshold,
+                passed_threshold=trial.sharpe_ratio >= threshold,
+                evaluation_config=trial.metadata,
+            )
+            session.add(orm_trial)
+
+            # Update cache
+            self._cached_trials.append(trial)
+
+        return trial.trial_id
+
+    async def get_trial_count_async(self) -> int:
+        """Get trial count from database."""
+        from iqfmp.db.database import get_async_session
+        from iqfmp.db.models import ResearchTrialORM
+        from sqlalchemy import select, func
+
+        try:
+            async with get_async_session() as session:
+                result = await session.execute(
+                    select(func.count(ResearchTrialORM.id))
+                )
+                return result.scalar() or 0
+        except Exception:
+            return len(self._cached_trials)
+
+    async def get_trials_by_family_async(self, family: str) -> list[TrialRecord]:
+        """Get trials by family from database."""
+        from iqfmp.db.database import get_async_session
+        from iqfmp.db.models import ResearchTrialORM
+        from sqlalchemy import select
+
+        async with get_async_session() as session:
+            result = await session.execute(
+                select(ResearchTrialORM)
+                .where(ResearchTrialORM.factor_family == family)
+                .order_by(ResearchTrialORM.trial_number)
+            )
+            orm_trials = result.scalars().all()
+
+            return [
+                TrialRecord(
+                    trial_id=t.trial_id,
+                    factor_name=t.factor_name,
+                    factor_family=t.factor_family,
+                    sharpe_ratio=t.sharpe_ratio,
+                    ic_mean=t.ic_mean,
+                    ir=t.ir,
+                    max_drawdown=t.max_drawdown,
+                    win_rate=t.win_rate,
+                    created_at=t.created_at.replace(tzinfo=None) if t.created_at else None,
+                    metadata=t.evaluation_config or {},
+                )
+                for t in orm_trials
+            ]
+
+
 @dataclass
 class LedgerStatistics:
     """Statistics computed from ledger trials."""

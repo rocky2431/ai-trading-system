@@ -1,24 +1,32 @@
-"""Factor API router."""
+"""Factor API router with async database support."""
 
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from iqfmp.api.factors.schemas import (
+    FactorCompareRequest,
+    FactorCompareResponse,
+    FactorCreateRequest,
     FactorEvaluateRequest,
     FactorEvaluateResponse,
     FactorGenerateRequest,
+    FactorLibraryStats,
     FactorListResponse,
     FactorResponse,
+    FactorStatsResponse,
     FactorStatusUpdateRequest,
     MetricsResponse,
+    MiningTaskCancelResponse,
+    MiningTaskCreateRequest,
+    MiningTaskCreateResponse,
+    MiningTaskListResponse,
+    MiningTaskStatus,
     StabilityResponse,
 )
-from iqfmp.api.factors.service import (
-    FactorNotFoundError,
-    FactorService,
-    get_factor_service,
-)
+from iqfmp.api.factors.service import FactorNotFoundError, FactorService
+from iqfmp.db.database import get_db, get_redis
 from iqfmp.models.factor import Factor
 
 router = APIRouter(tags=["factors"])
@@ -63,26 +71,69 @@ def _factor_to_response(factor: Factor) -> FactorResponse:
     )
 
 
+async def get_factor_service(
+    session: AsyncSession = Depends(get_db),
+    redis_client=Depends(get_redis),
+) -> FactorService:
+    """Dependency injection for FactorService."""
+    return FactorService(session, redis_client)
+
+
 @router.post("/generate", response_model=FactorResponse, status_code=status.HTTP_201_CREATED)
 async def generate_factor(
     request: FactorGenerateRequest,
     factor_service: FactorService = Depends(get_factor_service),
 ) -> FactorResponse:
-    """Generate a new factor from description.
+    """Generate a new factor from description using LLM.
 
     Args:
-        request: Factor generation request
+        request: Factor generation request with description
         factor_service: Factor service
 
     Returns:
         Generated factor
     """
-    factor = factor_service.generate_factor(
-        description=request.description,
-        family=request.family,
-        target_task=request.target_task,
-    )
-    return _factor_to_response(factor)
+    try:
+        factor = await factor_service.generate_factor(
+            description=request.description,
+            family=request.family,
+            target_task=request.target_task,
+        )
+        return _factor_to_response(factor)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
+
+
+@router.post("", response_model=FactorResponse, status_code=status.HTTP_201_CREATED)
+async def create_factor(
+    request: FactorCreateRequest,
+    factor_service: FactorService = Depends(get_factor_service),
+) -> FactorResponse:
+    """Create a new factor with provided code.
+
+    Args:
+        request: Factor creation request
+        factor_service: Factor service
+
+    Returns:
+        Created factor
+    """
+    try:
+        factor = await factor_service.create_factor(
+            name=request.name,
+            family=request.family,
+            code=request.code,
+            target_task=request.target_task,
+        )
+        return _factor_to_response(factor)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e),
+        )
 
 
 @router.get("", response_model=FactorListResponse)
@@ -90,7 +141,7 @@ async def list_factors(
     page: int = Query(1, ge=1),
     page_size: int = Query(10, ge=1, le=100),
     family: Optional[str] = Query(None),
-    status: Optional[str] = Query(None),
+    status_filter: Optional[str] = Query(None, alias="status"),
     factor_service: FactorService = Depends(get_factor_service),
 ) -> FactorListResponse:
     """List factors with pagination and filtering.
@@ -99,17 +150,17 @@ async def list_factors(
         page: Page number (1-indexed)
         page_size: Items per page
         family: Filter by family
-        status: Filter by status
+        status_filter: Filter by status
         factor_service: Factor service
 
     Returns:
-        List of factors
+        List of factors with pagination info
     """
-    factors, total = factor_service.list_factors(
+    factors, total = await factor_service.list_factors(
         page=page,
         page_size=page_size,
         family=family,
-        status=status,
+        status=status_filter,
     )
     return FactorListResponse(
         factors=[_factor_to_response(f) for f in factors],
@@ -117,6 +168,193 @@ async def list_factors(
         page=page,
         page_size=page_size,
     )
+
+
+@router.get("/stats", response_model=FactorStatsResponse)
+async def get_factor_stats(
+    factor_service: FactorService = Depends(get_factor_service),
+) -> FactorStatsResponse:
+    """Get factor statistics.
+
+    Args:
+        factor_service: Factor service
+
+    Returns:
+        Factor statistics including totals, status counts, and thresholds
+    """
+    stats = await factor_service.get_stats()
+    return FactorStatsResponse(
+        total_factors=stats["total_factors"],
+        by_status=stats["by_status"],
+        total_trials=stats["total_trials"],
+        current_threshold=stats["current_threshold"],
+    )
+
+
+# ==================== Mining Task Endpoints ====================
+# NOTE: These routes MUST be defined BEFORE /{factor_id} to avoid route conflicts
+
+
+@router.post("/mining", response_model=MiningTaskCreateResponse, status_code=status.HTTP_201_CREATED)
+async def create_mining_task(
+    request: MiningTaskCreateRequest,
+    factor_service: FactorService = Depends(get_factor_service),
+) -> MiningTaskCreateResponse:
+    """Create and start a factor mining task.
+
+    Args:
+        request: Mining task creation request
+        factor_service: Factor service
+
+    Returns:
+        Mining task creation response with task ID
+    """
+    try:
+        task_id = await factor_service.create_mining_task(
+            name=request.name,
+            description=request.description,
+            factor_families=request.factor_families,
+            target_count=request.target_count,
+            auto_evaluate=request.auto_evaluate,
+        )
+        return MiningTaskCreateResponse(
+            success=True,
+            message=f"Mining task '{request.name}' created successfully",
+            task_id=task_id,
+        )
+    except Exception as e:
+        return MiningTaskCreateResponse(
+            success=False,
+            message=str(e),
+            task_id=None,
+        )
+
+
+@router.get("/mining", response_model=MiningTaskListResponse)
+async def list_mining_tasks(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    limit: int = Query(20, ge=1, le=100),
+    factor_service: FactorService = Depends(get_factor_service),
+) -> MiningTaskListResponse:
+    """List mining tasks with optional status filter.
+
+    Args:
+        status_filter: Filter by task status
+        limit: Maximum number of tasks to return
+        factor_service: Factor service
+
+    Returns:
+        List of mining tasks
+    """
+    tasks = await factor_service.list_mining_tasks(status=status_filter, limit=limit)
+    return MiningTaskListResponse(tasks=tasks, total=len(tasks))
+
+
+@router.get("/mining/{task_id}", response_model=MiningTaskStatus)
+async def get_mining_task(
+    task_id: str,
+    factor_service: FactorService = Depends(get_factor_service),
+) -> MiningTaskStatus:
+    """Get mining task status by ID.
+
+    Args:
+        task_id: Mining task ID
+        factor_service: Factor service
+
+    Returns:
+        Mining task status
+
+    Raises:
+        HTTPException: If task not found
+    """
+    task = await factor_service.get_mining_task(task_id)
+    if not task:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Mining task {task_id} not found",
+        )
+    return task
+
+
+@router.delete("/mining/{task_id}", response_model=MiningTaskCancelResponse)
+async def cancel_mining_task(
+    task_id: str,
+    factor_service: FactorService = Depends(get_factor_service),
+) -> MiningTaskCancelResponse:
+    """Cancel a running mining task.
+
+    Args:
+        task_id: Mining task ID
+        factor_service: Factor service
+
+    Returns:
+        Cancel response
+    """
+    success = await factor_service.cancel_mining_task(task_id)
+    if success:
+        return MiningTaskCancelResponse(
+            success=True,
+            message=f"Mining task {task_id} cancelled successfully",
+        )
+    return MiningTaskCancelResponse(
+        success=False,
+        message=f"Failed to cancel mining task {task_id} (not found or already completed)",
+    )
+
+
+# ==================== Factor Library Endpoints ====================
+
+
+@router.get("/library/stats", response_model=FactorLibraryStats)
+async def get_library_stats(
+    factor_service: FactorService = Depends(get_factor_service),
+) -> FactorLibraryStats:
+    """Get factor library statistics.
+
+    Args:
+        factor_service: Factor service
+
+    Returns:
+        Comprehensive library statistics
+    """
+    return await factor_service.get_library_stats()
+
+
+@router.post("/compare", response_model=FactorCompareResponse)
+async def compare_factors(
+    request: FactorCompareRequest,
+    factor_service: FactorService = Depends(get_factor_service),
+) -> FactorCompareResponse:
+    """Compare multiple factors.
+
+    Args:
+        request: Factor comparison request with factor IDs
+        factor_service: Factor service
+
+    Returns:
+        Factor comparison with correlation matrix and ranking
+
+    Raises:
+        HTTPException: If any factor not found
+    """
+    try:
+        factors, correlation_matrix, ranking = await factor_service.compare_factors(
+            factor_ids=request.factor_ids
+        )
+        return FactorCompareResponse(
+            factors=[_factor_to_response(f) for f in factors],
+            correlation_matrix=correlation_matrix,
+            ranking=ranking,
+        )
+    except FactorNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e),
+        )
+
+
+# ==================== Individual Factor Endpoints ====================
+# NOTE: These routes with /{factor_id} MUST be defined AFTER static routes
 
 
 @router.get("/{factor_id}", response_model=FactorResponse)
@@ -136,7 +374,7 @@ async def get_factor(
     Raises:
         HTTPException: If factor not found
     """
-    factor = factor_service.get_factor(factor_id)
+    factor = await factor_service.get_factor(factor_id)
     if not factor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -151,21 +389,21 @@ async def evaluate_factor(
     request: FactorEvaluateRequest,
     factor_service: FactorService = Depends(get_factor_service),
 ) -> FactorEvaluateResponse:
-    """Evaluate a factor.
+    """Evaluate a factor and record in research ledger.
 
     Args:
         factor_id: Factor ID
-        request: Evaluation request
+        request: Evaluation request with splits
         factor_service: Factor service
 
     Returns:
-        Evaluation results
+        Evaluation results with metrics, stability, and threshold check
 
     Raises:
         HTTPException: If factor not found
     """
     try:
-        metrics, stability, passed, exp_num = factor_service.evaluate_factor(
+        metrics, stability, passed, exp_num = await factor_service.evaluate_factor(
             factor_id=factor_id,
             splits=request.splits,
             market_splits=request.market_splits,
@@ -218,9 +456,31 @@ async def update_factor_status(
         HTTPException: If factor not found
     """
     try:
-        factor = factor_service.update_status(factor_id, request.status)
+        factor = await factor_service.update_status(factor_id, request.status)
         return _factor_to_response(factor)
     except FactorNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Factor {factor_id} not found",
+        )
+
+
+@router.delete("/{factor_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_factor(
+    factor_id: str,
+    factor_service: FactorService = Depends(get_factor_service),
+) -> None:
+    """Delete a factor.
+
+    Args:
+        factor_id: Factor ID
+        factor_service: Factor service
+
+    Raises:
+        HTTPException: If factor not found
+    """
+    deleted = await factor_service.delete_factor(factor_id)
+    if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Factor {factor_id} not found",

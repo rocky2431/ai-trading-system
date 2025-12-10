@@ -1,11 +1,18 @@
-"""Research service for business logic."""
+"""Research service for business logic.
 
+This module provides PostgreSQL-backed research ledger management,
+ensuring trial data persists across server restarts.
+"""
+
+import os
 from datetime import datetime
 from typing import Any, Optional
 
 from iqfmp.evaluation.research_ledger import (
     DynamicThreshold,
     LedgerStatistics,
+    MemoryStorage,
+    PostgresStorage,
     ResearchLedger,
     ThresholdConfig,
     TrialRecord,
@@ -13,11 +20,29 @@ from iqfmp.evaluation.research_ledger import (
 
 
 class ResearchService:
-    """Service for research ledger management."""
+    """Service for research ledger management with PostgreSQL persistence."""
 
-    def __init__(self) -> None:
-        """Initialize research service."""
-        self._ledger = ResearchLedger()
+    def __init__(self, use_postgres: bool = True) -> None:
+        """Initialize research service.
+
+        Args:
+            use_postgres: Whether to use PostgreSQL storage (default True).
+                         Falls back to memory storage if DB is unavailable.
+        """
+        self._use_postgres = use_postgres
+        self._postgres_storage: Optional[PostgresStorage] = None
+
+        # Try PostgreSQL first, fall back to memory
+        if use_postgres:
+            try:
+                self._postgres_storage = PostgresStorage()
+                self._ledger = ResearchLedger(storage=self._postgres_storage)
+            except Exception as e:
+                print(f"Warning: PostgreSQL unavailable, using memory storage: {e}")
+                self._ledger = ResearchLedger(storage=MemoryStorage())
+        else:
+            self._ledger = ResearchLedger(storage=MemoryStorage())
+
         self._threshold_config = ThresholdConfig()
 
     def add_trial(
@@ -57,6 +82,54 @@ class ResearchService:
             metadata=metadata or {},
         )
         return self._ledger.record(trial)
+
+    async def add_trial_async(
+        self,
+        factor_name: str,
+        factor_family: str,
+        sharpe_ratio: float,
+        factor_id: Optional[str] = None,
+        ic_mean: Optional[float] = None,
+        ir: Optional[float] = None,
+        max_drawdown: Optional[float] = None,
+        win_rate: Optional[float] = None,
+        metadata: Optional[dict] = None,
+    ) -> str:
+        """Add a trial to the ledger asynchronously with factor linking.
+
+        This method directly saves to PostgreSQL with proper factor_id linking.
+
+        Args:
+            factor_name: Name of the factor
+            factor_family: Factor family category
+            sharpe_ratio: Sharpe ratio of the factor
+            factor_id: Optional factor ID for database linking
+            ic_mean: Mean information coefficient
+            ir: Information ratio
+            max_drawdown: Maximum drawdown
+            win_rate: Win rate
+            metadata: Additional metadata
+
+        Returns:
+            Trial ID
+        """
+        trial = TrialRecord(
+            factor_name=factor_name,
+            factor_family=factor_family,
+            sharpe_ratio=sharpe_ratio,
+            ic_mean=ic_mean,
+            ir=ir,
+            max_drawdown=max_drawdown,
+            win_rate=win_rate,
+            metadata=metadata or {},
+        )
+
+        # Use PostgresStorage async method if available
+        if self._postgres_storage is not None:
+            return await self._postgres_storage.save_trial_async(trial, factor_id=factor_id)
+        else:
+            # Fall back to sync method
+            return self._ledger.record(trial)
 
     def list_trials(
         self,

@@ -1,141 +1,65 @@
 /**
- * Agent 状态 Hook - 提供 Mock 数据，后续连接真实 API
+ * Agent 状态 Hook - 使用真实 API 数据
  */
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import { systemApi } from '@/api'
+import type { SystemStatusResponse } from '@/api'
 import type { AgentSystemStatus, Agent, TaskQueueItem, LLMMetrics, ResourceMetrics } from '@/types/agent'
 
-function generateMockAgents(): Agent[] {
-  return [
-    {
-      id: 'agent-1',
-      name: 'Factor Generator',
-      type: 'factor_generation',
-      status: 'running',
-      currentTask: 'Generating momentum factor',
-      progress: 67,
-      startedAt: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
-      lastActivity: new Date().toISOString(),
-    },
-    {
-      id: 'agent-2',
-      name: 'Factor Evaluator',
-      type: 'evaluation',
-      status: 'idle',
-      currentTask: null,
-      progress: 0,
-      startedAt: null,
-      lastActivity: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
-    },
-    {
-      id: 'agent-3',
-      name: 'Strategy Builder',
-      type: 'strategy',
-      status: 'paused',
-      currentTask: 'Building multi-factor strategy',
-      progress: 45,
-      startedAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-      lastActivity: new Date(Date.now() - 1000 * 60 * 2).toISOString(),
-    },
-    {
-      id: 'agent-4',
-      name: 'Backtester',
-      type: 'backtest',
-      status: 'running',
-      currentTask: 'Running 3-year backtest',
-      progress: 23,
-      startedAt: new Date(Date.now() - 1000 * 60 * 3).toISOString(),
-      lastActivity: new Date().toISOString(),
-    },
-  ]
-}
-
-function generateMockTaskQueue(): TaskQueueItem[] {
-  return [
-    {
-      id: 'task-1',
-      type: 'factor_generation',
-      status: 'running',
-      createdAt: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
-      startedAt: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
-      completedAt: null,
-      agentId: 'agent-1',
-      priority: 'high',
-    },
-    {
-      id: 'task-2',
-      type: 'evaluation',
-      status: 'pending',
-      createdAt: new Date(Date.now() - 1000 * 60 * 8).toISOString(),
-      startedAt: null,
-      completedAt: null,
-      agentId: null,
-      priority: 'normal',
-    },
-    {
-      id: 'task-3',
-      type: 'backtest',
-      status: 'running',
-      createdAt: new Date(Date.now() - 1000 * 60 * 6).toISOString(),
-      startedAt: new Date(Date.now() - 1000 * 60 * 3).toISOString(),
-      completedAt: null,
-      agentId: 'agent-4',
-      priority: 'high',
-    },
-    {
-      id: 'task-4',
-      type: 'factor_generation',
-      status: 'completed',
-      createdAt: new Date(Date.now() - 1000 * 60 * 30).toISOString(),
-      startedAt: new Date(Date.now() - 1000 * 60 * 25).toISOString(),
-      completedAt: new Date(Date.now() - 1000 * 60 * 15).toISOString(),
-      agentId: 'agent-1',
-      priority: 'normal',
-    },
-    {
-      id: 'task-5',
-      type: 'strategy',
-      status: 'pending',
-      createdAt: new Date(Date.now() - 1000 * 60 * 2).toISOString(),
-      startedAt: null,
-      completedAt: null,
-      agentId: null,
-      priority: 'low',
-    },
-  ]
-}
-
-function generateMockLLMMetrics(): LLMMetrics {
+// 将 API 响应转换为前端类型
+function apiToAgentStatus(response: SystemStatusResponse): AgentSystemStatus {
   return {
-    provider: 'OpenRouter',
-    model: 'deepseek-coder-v2',
-    totalRequests: 1247,
-    successRate: 98.5,
-    avgLatency: 856,
-    p95Latency: 1520,
-    p99Latency: 2340,
-    tokensUsed: 2450000,
-    costEstimate: 12.35,
-    lastHourRequests: [45, 52, 48, 61, 55, 42, 38, 67, 72, 58, 49, 53],
-  }
-}
-
-function generateMockResourceMetrics(): ResourceMetrics {
-  return {
-    cpu: {
-      usage: 45 + Math.random() * 20,
-      cores: 8,
+    agents: response.agents.map(agent => ({
+      id: agent.id,
+      name: agent.name,
+      type: agent.type,
+      status: agent.status,
+      currentTask: agent.current_task,
+      progress: agent.progress,
+      startedAt: agent.started_at,
+      lastActivity: agent.last_activity,
+    })),
+    taskQueue: response.task_queue.map(task => ({
+      id: task.id,
+      type: task.type,
+      status: task.status,
+      createdAt: task.created_at,
+      startedAt: task.started_at,
+      completedAt: task.completed_at,
+      agentId: task.agent_id,
+      priority: task.priority,
+    })),
+    llmMetrics: {
+      provider: response.llm_metrics.provider,
+      model: response.llm_metrics.model,
+      totalRequests: response.llm_metrics.total_requests,
+      successRate: response.llm_metrics.success_rate,
+      avgLatency: response.llm_metrics.avg_latency,
+      p95Latency: response.llm_metrics.p95_latency,
+      p99Latency: response.llm_metrics.p99_latency,
+      tokensUsed: response.llm_metrics.tokens_used,
+      costEstimate: response.llm_metrics.cost_estimate,
+      lastHourRequests: response.llm_metrics.last_hour_requests,
     },
-    memory: {
-      used: 6.2 + Math.random() * 0.5,
-      total: 16,
-      percentage: ((6.2 + Math.random() * 0.5) / 16) * 100,
+    resources: {
+      cpu: {
+        usage: response.resources.cpu.usage,
+        cores: response.resources.cpu.cores,
+      },
+      memory: {
+        used: response.resources.memory.used,
+        total: response.resources.memory.total,
+        percentage: response.resources.memory.percentage,
+      },
+      disk: {
+        used: response.resources.disk.used,
+        total: response.resources.disk.total,
+        percentage: response.resources.disk.percentage,
+      },
     },
-    disk: {
-      used: 125,
-      total: 500,
-      percentage: 25,
-    },
+    systemHealth: response.system_health,
+    uptime: response.uptime,
   }
 }
 
@@ -144,50 +68,27 @@ export function useAgentStatus() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<Error | null>(null)
 
-  useEffect(() => {
-    // 模拟初始加载
-    const loadData = () => {
-      try {
-        const mockData: AgentSystemStatus = {
-          agents: generateMockAgents(),
-          taskQueue: generateMockTaskQueue(),
-          llmMetrics: generateMockLLMMetrics(),
-          resources: generateMockResourceMetrics(),
-          systemHealth: 'healthy',
-          uptime: 3600 * 24 * 3 + 3600 * 5 + 60 * 23,
-        }
-        setStatus(mockData)
-        setLoading(false)
-      } catch (err) {
-        setError(err instanceof Error ? err : new Error('Unknown error'))
-        setLoading(false)
-      }
+  const loadStatus = useCallback(async () => {
+    try {
+      const response = await systemApi.getStatus()
+      setStatus(apiToAgentStatus(response))
+      setError(null)
+    } catch (err) {
+      console.error('Failed to load system status:', err)
+      setError(err instanceof Error ? err : new Error('Failed to load system status'))
+    } finally {
+      setLoading(false)
     }
-
-    loadData()
-
-    // 模拟实时更新
-    const interval = setInterval(() => {
-      setStatus((prev) => {
-        if (!prev) return prev
-        return {
-          ...prev,
-          resources: generateMockResourceMetrics(),
-          agents: prev.agents.map((agent) => ({
-            ...agent,
-            progress: agent.status === 'running'
-              ? Math.min(100, agent.progress + Math.random() * 2)
-              : agent.progress,
-            lastActivity: agent.status === 'running'
-              ? new Date().toISOString()
-              : agent.lastActivity,
-          })),
-        }
-      })
-    }, 2000)
-
-    return () => clearInterval(interval)
   }, [])
 
-  return { status, loading, error }
+  useEffect(() => {
+    loadStatus()
+
+    // 定期刷新系统状态 (每 5 秒)
+    const interval = setInterval(loadStatus, 5000)
+
+    return () => clearInterval(interval)
+  }, [loadStatus])
+
+  return { status, loading, error, refresh: loadStatus }
 }

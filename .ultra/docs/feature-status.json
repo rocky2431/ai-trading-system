@@ -1,0 +1,14 @@
+{
+  "version": "1.0",
+  "features": [
+    {
+      "id": "feat-15",
+      "name": "实现策略代码自动生成 (S-002)",
+      "status": "pending",
+      "taskId": "15",
+      "implementedAt": "2025-12-10T10:30:00",
+      "commit": "merged to main",
+      "branch": "feat/task-15-strategy-generator"
+    }
+  ]
+}

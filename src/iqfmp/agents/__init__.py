@@ -37,6 +37,16 @@ from iqfmp.agents.factor_generation import (
     InvalidFactorError,
     SecurityViolationError,
 )
+from iqfmp.agents.hypothesis_agent import (
+    FeedbackAnalyzer,
+    Hypothesis,
+    HypothesisAgent,
+    HypothesisFamily,
+    HypothesisGenerator,
+    HypothesisStatus,
+    HypothesisToCode,
+    HYPOTHESIS_TEMPLATES,
+)
 
 __all__ = [
     # Orchestrator
@@ -66,4 +76,13 @@ __all__ = [
     "GeneratedFactor",
     "InvalidFactorError",
     "SecurityViolationError",
+    # Hypothesis Agent
+    "FeedbackAnalyzer",
+    "Hypothesis",
+    "HypothesisAgent",
+    "HypothesisFamily",
+    "HypothesisGenerator",
+    "HypothesisStatus",
+    "HypothesisToCode",
+    "HYPOTHESIS_TEMPLATES",
 ]

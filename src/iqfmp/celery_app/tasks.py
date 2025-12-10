@@ -396,31 +396,73 @@ def emergency_close_task(
 # 辅助函数
 
 def _execute_backtest(task, strategy_id: str, config: dict[str, Any]) -> dict[str, Any]:
-    """执行回测的内部实现"""
-    # 模拟回测计算
-    import time
-    import random
+    """执行回测的内部实现 - 使用真实回测引擎"""
+    from iqfmp.core.backtest_engine import BacktestEngine
+    from iqfmp.core.factor_engine import BUILTIN_FACTORS
 
-    # 模拟进度更新
-    for i in range(1, 11):
+    # 阶段1: 初始化
+    task.update_state(
+        state="PROGRESS",
+        meta={"current": 10, "total": 100, "status": "Loading market data..."},
+    )
+
+    # 获取因子代码 (从配置或使用默认)
+    factor_code = config.get("factor_code")
+    if not factor_code:
+        # 根据策略类型选择内置因子
+        factor_name = config.get("factor_name", "momentum_20d")
+        factor_code = BUILTIN_FACTORS.get(factor_name, BUILTIN_FACTORS["momentum_20d"])
+
+    # 阶段2: 加载数据
+    task.update_state(
+        state="PROGRESS",
+        meta={"current": 30, "total": 100, "status": "Initializing backtest engine..."},
+    )
+
+    try:
+        engine = BacktestEngine()
+
+        # 阶段3: 执行回测
         task.update_state(
             state="PROGRESS",
-            meta={
-                "current": i * 10,
-                "total": 100,
-                "status": f"Processing data batch {i}/10...",
-            },
+            meta={"current": 50, "total": 100, "status": "Running backtest simulation..."},
         )
-        time.sleep(0.1)  # 模拟计算耗时
 
-    # 返回模拟结果
-    return {
-        "sharpe_ratio": round(random.uniform(0.5, 2.5), 2),
-        "max_drawdown": round(random.uniform(5, 20), 2),
-        "total_return": round(random.uniform(-10, 50), 2),
-        "win_rate": round(random.uniform(40, 70), 2),
-        "total_trades": random.randint(50, 200),
-    }
+        result = engine.run_factor_backtest(
+            factor_code=factor_code,
+            initial_capital=config.get("initial_capital", 100000.0),
+            start_date=config.get("start_date"),
+            end_date=config.get("end_date"),
+            rebalance_frequency=config.get("rebalance_frequency", "daily"),
+            position_size=config.get("position_size", 1.0),
+            long_only=config.get("long_only", False),
+        )
+
+        # 阶段4: 处理结果
+        task.update_state(
+            state="PROGRESS",
+            meta={"current": 90, "total": 100, "status": "Processing results..."},
+        )
+
+        return {
+            "sharpe_ratio": result.sharpe_ratio,
+            "sortino_ratio": result.sortino_ratio,
+            "max_drawdown": result.max_drawdown,
+            "total_return": result.total_return,
+            "annual_return": result.annual_return,
+            "win_rate": result.win_rate,
+            "total_trades": result.trade_count,
+            "profit_factor": result.profit_factor,
+            "calmar_ratio": result.calmar_ratio,
+            "volatility": result.volatility,
+            "avg_trade_return": result.avg_trade_return,
+            "avg_holding_period": result.avg_holding_period,
+            "monthly_returns": result.monthly_returns,
+        }
+
+    except Exception as e:
+        logger.error(f"Backtest execution failed: {e}")
+        raise TaskError(f"Backtest failed: {e}")
 
 
 def _execute_factor_evaluation(
@@ -429,28 +471,89 @@ def _execute_factor_evaluation(
     factor_code: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """执行因子评估的内部实现"""
-    import time
-    import random
+    """执行因子评估的内部实现 - 使用真实因子引擎"""
+    from iqfmp.core.factor_engine import FactorEngine, FactorEvaluator, create_engine_with_sample_data
+    from iqfmp.evaluation.research_ledger import DynamicThreshold, ThresholdConfig
 
-    for i in range(1, 6):
+    # 阶段1: 加载数据
+    task.update_state(
+        state="PROGRESS",
+        meta={"current": 20, "total": 100, "status": "Loading market data..."},
+    )
+
+    try:
+        # 创建引擎并加载样本数据
+        engine = create_engine_with_sample_data()
+
+        # 阶段2: 计算因子值
         task.update_state(
             state="PROGRESS",
-            meta={
-                "current": i * 20,
-                "total": 100,
-                "status": f"Evaluating factor on split {i}/5...",
-            },
+            meta={"current": 40, "total": 100, "status": "Computing factor values..."},
         )
-        time.sleep(0.1)
 
-    return {
-        "ic": round(random.uniform(0.02, 0.08), 4),
-        "ic_ir": round(random.uniform(0.3, 1.2), 2),
-        "sharpe": round(random.uniform(0.5, 2.0), 2),
-        "stability_score": round(random.uniform(0.6, 0.95), 2),
-        "passed_threshold": random.choice([True, False]),
-    }
+        factor_values = engine.compute_factor(factor_code, factor_name=factor_id)
+
+        # 阶段3: 评估因子
+        task.update_state(
+            state="PROGRESS",
+            meta={"current": 60, "total": 100, "status": "Evaluating factor metrics..."},
+        )
+
+        evaluator = FactorEvaluator(engine)
+        eval_result = evaluator.evaluate(
+            factor_values=factor_values,
+            forward_periods=config.get("forward_periods", [1, 5, 10]),
+        )
+
+        # 阶段4: 计算动态阈值
+        task.update_state(
+            state="PROGRESS",
+            meta={"current": 80, "total": 100, "status": "Checking threshold..."},
+        )
+
+        # 获取当前试验数计算阈值
+        n_trials = config.get("n_trials", 1)
+        threshold_calc = DynamicThreshold(ThresholdConfig())
+        current_threshold = threshold_calc.calculate(n_trials)
+
+        metrics = eval_result["metrics"]
+        sharpe = metrics.get("sharpe", 0.0)
+        passed_threshold = sharpe >= current_threshold
+
+        # 阶段5: 汇总结果
+        task.update_state(
+            state="PROGRESS",
+            meta={"current": 95, "total": 100, "status": "Finalizing results..."},
+        )
+
+        # 计算稳定性评分
+        stability = eval_result.get("stability", {})
+        time_stability = stability.get("time_stability", {})
+        market_stability = stability.get("market_stability", {})
+        stability_score = (
+            abs(time_stability.get("monthly_ic_stability", 0)) +
+            abs(market_stability.get("overall", 0))
+        ) / 2
+
+        return {
+            "ic": metrics.get("ic_mean", 0.0),
+            "ic_std": metrics.get("ic_std", 0.0),
+            "ic_ir": metrics.get("ir", 0.0),
+            "sharpe": sharpe,
+            "max_drawdown": metrics.get("max_drawdown", 0.0),
+            "total_return": metrics.get("total_return", 0.0),
+            "win_rate": metrics.get("win_rate", 0.0),
+            "turnover": metrics.get("turnover", 0.0),
+            "ic_by_split": metrics.get("ic_by_split", {}),
+            "sharpe_by_split": metrics.get("sharpe_by_split", {}),
+            "stability_score": round(stability_score, 4),
+            "threshold_used": round(current_threshold, 4),
+            "passed_threshold": passed_threshold,
+        }
+
+    except Exception as e:
+        logger.error(f"Factor evaluation failed: {e}")
+        raise TaskError(f"Factor evaluation failed: {e}")
 
 
 def _execute_factor_generation(

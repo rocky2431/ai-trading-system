@@ -21,6 +21,28 @@ from iqfmp.core.security import (
     SecurityViolation,
     ViolationType,
 )
+from iqfmp.core.factor_engine import (
+    FactorEngine,
+    FactorEvaluator,
+    BUILTIN_FACTORS,
+    create_engine_with_sample_data,
+    get_default_data_path,
+)
+from iqfmp.core.backtest_engine import (
+    BacktestEngine,
+    BacktestResult,
+    Trade,
+    TradingCosts,
+    run_strategy_backtest,
+)
+from iqfmp.core.rd_loop import (
+    IterationResult,
+    LoopConfig,
+    LoopPhase,
+    LoopState,
+    RDLoop,
+    create_rd_loop,
+)
 
 __all__ = [
     # Security
@@ -41,4 +63,23 @@ __all__ = [
     "ReviewQueue",
     "ReviewRequest",
     "ReviewStatus",
+    # Factor Engine
+    "FactorEngine",
+    "FactorEvaluator",
+    "BUILTIN_FACTORS",
+    "create_engine_with_sample_data",
+    "get_default_data_path",
+    # Backtest Engine
+    "BacktestEngine",
+    "BacktestResult",
+    "Trade",
+    "TradingCosts",
+    "run_strategy_backtest",
+    # RD Loop
+    "IterationResult",
+    "LoopConfig",
+    "LoopPhase",
+    "LoopState",
+    "RDLoop",
+    "create_rd_loop",
 ]

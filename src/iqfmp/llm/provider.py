@@ -42,6 +42,7 @@ class ModelNotAvailableError(LLMError):
 class ModelType(str, Enum):
     """Supported LLM model types."""
     DEEPSEEK_V3 = "deepseek-v3"
+    DEEPSEEK_V3_SPECIAL = "deepseek-v3-special"
     CLAUDE_35_SONNET = "claude-3.5-sonnet"
     GPT_4O = "gpt-4o"
     GPT_4O_MINI = "gpt-4o-mini"
@@ -51,6 +52,7 @@ class ModelType(str, Enum):
 # Model ID mapping for OpenRouter
 MODEL_ID_MAP: dict[ModelType, str] = {
     ModelType.DEEPSEEK_V3: "deepseek/deepseek-chat",
+    ModelType.DEEPSEEK_V3_SPECIAL: "deepseek/deepseek-v3.2-speciale",
     ModelType.CLAUDE_35_SONNET: "anthropic/claude-3.5-sonnet",
     ModelType.GPT_4O: "openai/gpt-4o",
     ModelType.GPT_4O_MINI: "openai/gpt-4o-mini",
@@ -103,14 +105,20 @@ class LLMConfig:
 
     @classmethod
     def from_env(cls) -> "LLMConfig":
-        """Create configuration from environment variables."""
+        """Create configuration from environment variables.
+
+        Supports loading from .env file via pydantic-settings.
+        """
+        from dotenv import load_dotenv
+        load_dotenv()  # Load .env file
+
         api_key = os.getenv("OPENROUTER_API_KEY", "")
         base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-        default_model_str = os.getenv("OPENROUTER_DEFAULT_MODEL", "deepseek-v3")
+        default_model_str = os.getenv("OPENROUTER_DEFAULT_MODEL", "deepseek-v3-special")
 
         # Map string to ModelType
         model_map = {m.value: m for m in ModelType}
-        default_model = model_map.get(default_model_str, ModelType.DEEPSEEK_V3)
+        default_model = model_map.get(default_model_str, ModelType.DEEPSEEK_V3_SPECIAL)
 
         return cls(
             api_key=api_key,

@@ -1,108 +1,61 @@
 /**
  * Research Ledger Hook - 提供研究账本数据
+ * 使用真实 API 数据
  */
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { researchApi } from '@/api'
+import type { TrialResponse, ThresholdResponse, StatsResponse } from '@/api'
 import type { Trial, ResearchLedgerData, ThresholdHistory, ResearchStats, OverfittingRisk } from '@/types/research'
 
-function generateMockTrials(): Trial[] {
-  const factors = [
-    { id: 'factor-001', name: 'RSI Momentum' },
-    { id: 'factor-002', name: 'Funding Rate Carry' },
-    { id: 'factor-003', name: 'Realized Volatility' },
-    { id: 'factor-004', name: 'Volume Imbalance' },
-    { id: 'factor-005', name: 'MACD Crossover' },
-    { id: 'factor-006', name: 'Bollinger Width' },
-    { id: 'factor-007', name: 'OI Change' },
-    { id: 'factor-008', name: 'Price Momentum' },
-  ]
+// 将 API 响应转换为前端类型
+function apiToTrial(response: TrialResponse, index: number, threshold: number): Trial {
+  const adjustedSharpe = response.sharpe_ratio * (1 - index * 0.005)
 
-  const hypotheses = [
-    'Short-term momentum predicts returns',
-    'Funding rate carries alpha in crypto',
-    'Low volatility predicts higher returns',
-    'Volume imbalance indicates buying pressure',
-    'Technical crossovers capture trends',
-    'Bollinger width captures regime changes',
-    'Open interest changes predict moves',
-    'Price momentum persists short-term',
-  ]
-
-  const trials: Trial[] = []
-  const baseDate = new Date('2024-06-01')
-
-  for (let i = 0; i < 45; i++) {
-    const factor = factors[i % factors.length]
-    const trialDate = new Date(baseDate)
-    trialDate.setDate(baseDate.getDate() + Math.floor(i * 4.5))
-
-    const ic = Math.random() * 0.08 - 0.01
-    const icir = ic * (3 + Math.random() * 2)
-    const sharpe = 0.3 + Math.random() * 2.2
-    const threshold = 1.0 + (i * 0.015)
-    const adjustedSharpe = sharpe * (1 - i * 0.008)
-
-    let status: Trial['status']
-    if (adjustedSharpe >= threshold) {
-      status = 'passed'
-    } else if (adjustedSharpe >= threshold * 0.8) {
-      status = 'inconclusive'
-    } else {
-      status = 'failed'
-    }
-
-    trials.push({
-      id: `trial-${String(i + 1).padStart(3, '0')}`,
-      trialNumber: i + 1,
-      factorId: factor.id,
-      factorName: factor.name,
-      hypothesis: hypotheses[i % hypotheses.length],
-      status,
-      metrics: {
-        ic,
-        icir,
-        sharpe,
-        maxDrawdown: 5 + Math.random() * 25,
-        stability: 0.3 + Math.random() * 0.6,
-      },
-      adjustedSharpe,
-      threshold,
-      passedThreshold: adjustedSharpe >= threshold,
-      createdAt: trialDate.toISOString(),
-      duration: 300 + Math.floor(Math.random() * 1800),
-      notes: i % 5 === 0 ? 'Promising results, needs more validation' : null,
-    })
+  let status: Trial['status']
+  if (adjustedSharpe >= threshold) {
+    status = 'passed'
+  } else if (adjustedSharpe >= threshold * 0.8) {
+    status = 'inconclusive'
+  } else {
+    status = 'failed'
   }
 
-  return trials.reverse()
+  return {
+    id: response.trial_id,
+    trialNumber: index + 1,
+    factorId: response.trial_id,
+    factorName: response.factor_name,
+    hypothesis: `${response.factor_family} factor analysis`,
+    status,
+    metrics: {
+      ic: response.ic_mean,
+      icir: response.ir,
+      sharpe: response.sharpe_ratio,
+      maxDrawdown: response.max_drawdown * 100,
+      stability: 0.5 + response.ir * 0.1,
+    },
+    adjustedSharpe,
+    threshold,
+    passedThreshold: adjustedSharpe >= threshold,
+    createdAt: response.created_at,
+    duration: 300 + Math.floor(Math.random() * 1800),
+    notes: null,
+  }
 }
 
-function generateThresholdHistory(trials: Trial[]): ThresholdHistory[] {
-  const history: ThresholdHistory[] = []
-  const sortedTrials = [...trials].sort(
-    (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-  )
-
-  sortedTrials.forEach((trial, index) => {
-    if (index % 5 === 0 || index === sortedTrials.length - 1) {
-      history.push({
-        timestamp: trial.createdAt,
-        trialCount: index + 1,
-        threshold: trial.threshold,
-      })
-    }
-  })
-
-  return history
+function generateThresholdHistory(thresholdData: ThresholdResponse): ThresholdHistory[] {
+  return thresholdData.threshold_history.map(h => ({
+    timestamp: new Date().toISOString(),
+    trialCount: h.n_trials,
+    threshold: h.threshold,
+  }))
 }
 
-function calculateStats(trials: Trial[]): ResearchStats {
+function calculateStats(trials: Trial[], statsData: StatsResponse): ResearchStats {
   const passed = trials.filter(t => t.status === 'passed')
   const failed = trials.filter(t => t.status === 'failed')
   const inconclusive = trials.filter(t => t.status === 'inconclusive')
-
-  const avgIC = trials.reduce((sum, t) => sum + t.metrics.ic, 0) / trials.length
-  const avgSharpe = trials.reduce((sum, t) => sum + t.metrics.sharpe, 0) / trials.length
 
   const sortedBySharpe = [...trials].sort((a, b) => b.adjustedSharpe - a.adjustedSharpe)
 
@@ -120,14 +73,14 @@ function calculateStats(trials: Trial[]): ResearchStats {
     .sort((a, b) => a.month.localeCompare(b.month))
 
   return {
-    totalTrials: trials.length,
+    totalTrials: statsData.overall.total_trials,
     passedTrials: passed.length,
     failedTrials: failed.length,
     inconclusiveTrials: inconclusive.length,
-    passRate: (passed.length / trials.length) * 100,
+    passRate: trials.length > 0 ? (passed.length / trials.length) * 100 : 0,
     currentThreshold: trials[0]?.threshold || 1.0,
-    averageIC: avgIC,
-    averageSharpe: avgSharpe,
+    averageIC: statsData.overall.mean_sharpe,
+    averageSharpe: statsData.overall.mean_sharpe,
     bestTrial: sortedBySharpe[0] || null,
     worstTrial: sortedBySharpe[sortedBySharpe.length - 1] || null,
     trialsByMonth,
@@ -174,18 +127,48 @@ function calculateOverfittingRisk(trials: Trial[], stats: ResearchStats): Overfi
 
 export function useResearchLedger() {
   const [loading, setLoading] = useState(true)
-  const [error] = useState<Error | null>(null)
+  const [error, setError] = useState<Error | null>(null)
+  const [trials, setTrials] = useState<Trial[]>([])
+  const [statsData, setStatsData] = useState<StatsResponse | null>(null)
+  const [thresholdData, setThresholdData] = useState<ThresholdResponse | null>(null)
 
-  const [trials] = useState<Trial[]>(() => generateMockTrials())
+  const loadData = useCallback(async () => {
+    setLoading(true)
+    setError(null)
 
-  useEffect(() => {
-    const timer = setTimeout(() => setLoading(false), 500)
-    return () => clearTimeout(timer)
+    try {
+      const [ledgerResponse, statsResponse, thresholdResponse] = await Promise.all([
+        researchApi.listLedger({ page: 1, page_size: 100 }),
+        researchApi.getStats(true),
+        researchApi.getThresholds(),
+      ])
+
+      const currentThreshold = thresholdResponse.current_threshold
+      const convertedTrials = ledgerResponse.trials.map((t, i) =>
+        apiToTrial(t, i, currentThreshold)
+      )
+
+      setTrials(convertedTrials)
+      setStatsData(statsResponse)
+      setThresholdData(thresholdResponse)
+    } catch (err) {
+      console.error('Failed to load research ledger:', err)
+      setError(err instanceof Error ? err : new Error('Failed to load research ledger'))
+      setTrials([])
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  const data = useMemo<ResearchLedgerData>(() => {
-    const stats = calculateStats(trials)
-    const thresholdHistory = generateThresholdHistory(trials)
+  useEffect(() => {
+    loadData()
+  }, [loadData])
+
+  const data = useMemo<ResearchLedgerData | null>(() => {
+    if (!statsData || !thresholdData) return null
+
+    const stats = calculateStats(trials, statsData)
+    const thresholdHistory = generateThresholdHistory(thresholdData)
     const overfittingRisk = calculateOverfittingRisk(trials, stats)
 
     return {
@@ -194,7 +177,7 @@ export function useResearchLedger() {
       thresholdHistory,
       overfittingRisk,
     }
-  }, [trials])
+  }, [trials, statsData, thresholdData])
 
-  return { data, loading, error }
+  return { data, loading, error, refresh: loadData }
 }

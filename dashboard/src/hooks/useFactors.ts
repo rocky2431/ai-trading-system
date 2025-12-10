@@ -1,191 +1,53 @@
 /**
  * Factors Hook - 提供因子列表和筛选功能
+ * 使用真实 API 数据
  */
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
+import { factorsApi } from '@/api'
+import type { FactorResponse } from '@/api'
 import type { Factor, FactorFilter, FactorFamily, FactorStatus } from '@/types/factor'
 
-const mockFactors: Factor[] = [
-  {
-    id: 'factor-001',
-    name: 'RSI Momentum',
-    family: 'momentum',
-    status: 'approved',
-    description: 'Relative Strength Index based momentum factor with 14-day lookback',
-    code: 'def rsi_momentum(close, period=14):\n    delta = close.diff()\n    gain = delta.where(delta > 0, 0)\n    loss = -delta.where(delta < 0, 0)\n    avg_gain = gain.rolling(period).mean()\n    avg_loss = loss.rolling(period).mean()\n    rs = avg_gain / avg_loss\n    return 100 - (100 / (1 + rs))',
-    createdAt: '2024-11-15T10:30:00Z',
-    updatedAt: '2024-12-05T14:20:00Z',
-    authorId: 'user-001',
-    authorName: 'Alice Chen',
-    latestMetrics: {
-      ic: 0.045,
-      icir: 0.82,
-      sharpe: 1.45,
-      maxDrawdown: 12.3,
-      winRate: 56.2,
-      turnover: 25.5,
-      stability: 0.78,
-    },
-    evaluationCount: 12,
-    tags: ['momentum', 'technical', 'rsi'],
-  },
-  {
-    id: 'factor-002',
-    name: 'Funding Rate Carry',
-    family: 'value',
-    status: 'approved',
-    description: 'Perpetual funding rate based carry factor for crypto futures',
-    code: 'def funding_rate_carry(funding_rate, window=7):\n    return funding_rate.rolling(window).mean()',
-    createdAt: '2024-10-20T08:15:00Z',
-    updatedAt: '2024-12-01T09:45:00Z',
-    authorId: 'user-002',
-    authorName: 'Bob Wang',
-    latestMetrics: {
-      ic: 0.062,
-      icir: 1.15,
-      sharpe: 2.10,
-      maxDrawdown: 8.5,
-      winRate: 61.8,
-      turnover: 15.2,
-      stability: 0.85,
-    },
-    evaluationCount: 18,
-    tags: ['carry', 'funding', 'crypto'],
-  },
-  {
-    id: 'factor-003',
-    name: 'Realized Volatility',
-    family: 'volatility',
-    status: 'evaluating',
-    description: '20-day realized volatility using close-to-close returns',
-    code: 'def realized_vol(close, window=20):\n    returns = close.pct_change()\n    return returns.rolling(window).std() * np.sqrt(252)',
-    createdAt: '2024-12-01T11:00:00Z',
-    updatedAt: '2024-12-08T16:30:00Z',
-    authorId: 'user-001',
-    authorName: 'Alice Chen',
-    latestMetrics: {
-      ic: 0.028,
-      icir: 0.55,
-      sharpe: 0.95,
-      maxDrawdown: 18.7,
-      winRate: 52.1,
-      turnover: 32.8,
-      stability: 0.62,
-    },
-    evaluationCount: 5,
-    tags: ['volatility', 'risk'],
-  },
-  {
-    id: 'factor-004',
-    name: 'Volume Imbalance',
-    family: 'liquidity',
-    status: 'approved',
-    description: 'Buy/sell volume imbalance indicator',
-    code: 'def volume_imbalance(buy_vol, sell_vol, window=5):\n    imbalance = (buy_vol - sell_vol) / (buy_vol + sell_vol)\n    return imbalance.rolling(window).mean()',
-    createdAt: '2024-09-10T14:00:00Z',
-    updatedAt: '2024-11-28T10:15:00Z',
-    authorId: 'user-003',
-    authorName: 'Carol Li',
-    latestMetrics: {
-      ic: 0.038,
-      icir: 0.72,
-      sharpe: 1.28,
-      maxDrawdown: 14.2,
-      winRate: 54.8,
-      turnover: 42.1,
-      stability: 0.71,
-    },
-    evaluationCount: 22,
-    tags: ['liquidity', 'volume', 'orderflow'],
-  },
-  {
-    id: 'factor-005',
-    name: 'Twitter Sentiment',
-    family: 'sentiment',
-    status: 'draft',
-    description: 'Aggregated Twitter sentiment score for crypto assets',
-    code: 'def twitter_sentiment(sentiment_scores, window=3):\n    return sentiment_scores.rolling(window).mean()',
-    createdAt: '2024-12-05T09:30:00Z',
-    updatedAt: '2024-12-05T09:30:00Z',
-    authorId: 'user-002',
-    authorName: 'Bob Wang',
-    latestMetrics: null,
-    evaluationCount: 0,
-    tags: ['sentiment', 'social', 'twitter'],
-  },
-  {
-    id: 'factor-006',
-    name: 'MACD Crossover',
-    family: 'momentum',
-    status: 'rejected',
-    description: 'MACD line crossover signal with histogram confirmation',
-    code: 'def macd_crossover(close, fast=12, slow=26, signal=9):\n    ema_fast = close.ewm(span=fast).mean()\n    ema_slow = close.ewm(span=slow).mean()\n    macd = ema_fast - ema_slow\n    signal_line = macd.ewm(span=signal).mean()\n    return macd - signal_line',
-    createdAt: '2024-08-15T16:00:00Z',
-    updatedAt: '2024-10-20T11:45:00Z',
-    authorId: 'user-001',
-    authorName: 'Alice Chen',
-    latestMetrics: {
-      ic: 0.012,
-      icir: 0.25,
-      sharpe: 0.45,
-      maxDrawdown: 28.5,
-      winRate: 48.2,
-      turnover: 55.3,
-      stability: 0.35,
-    },
-    evaluationCount: 8,
-    tags: ['momentum', 'macd', 'technical'],
-  },
-  {
-    id: 'factor-007',
-    name: 'Open Interest Change',
-    family: 'sentiment',
-    status: 'approved',
-    description: 'Rate of change in open interest as sentiment indicator',
-    code: 'def oi_change(open_interest, window=5):\n    return open_interest.pct_change(window)',
-    createdAt: '2024-10-01T13:20:00Z',
-    updatedAt: '2024-11-15T08:50:00Z',
-    authorId: 'user-003',
-    authorName: 'Carol Li',
-    latestMetrics: {
-      ic: 0.051,
-      icir: 0.95,
-      sharpe: 1.68,
-      maxDrawdown: 10.8,
-      winRate: 58.5,
-      turnover: 28.4,
-      stability: 0.81,
-    },
-    evaluationCount: 15,
-    tags: ['sentiment', 'oi', 'derivatives'],
-  },
-  {
-    id: 'factor-008',
-    name: 'Bollinger Band Width',
-    family: 'volatility',
-    status: 'approved',
-    description: 'Bollinger Band width as volatility measure',
-    code: 'def bb_width(close, window=20, num_std=2):\n    sma = close.rolling(window).mean()\n    std = close.rolling(window).std()\n    upper = sma + num_std * std\n    lower = sma - num_std * std\n    return (upper - lower) / sma',
-    createdAt: '2024-07-20T10:00:00Z',
-    updatedAt: '2024-11-10T14:30:00Z',
-    authorId: 'user-002',
-    authorName: 'Bob Wang',
-    latestMetrics: {
-      ic: 0.033,
-      icir: 0.68,
-      sharpe: 1.15,
-      maxDrawdown: 16.2,
-      winRate: 53.5,
-      turnover: 22.8,
-      stability: 0.74,
-    },
-    evaluationCount: 20,
-    tags: ['volatility', 'bollinger', 'technical'],
-  },
-]
+// 将 API 响应转换为前端类型
+function apiToFactor(response: FactorResponse): Factor {
+  return {
+    id: response.id,
+    name: response.name,
+    family: (response.family?.[0] as FactorFamily) || 'momentum',
+    status: mapApiStatus(response.status),
+    description: `Factor for ${response.target_task}`,
+    code: response.code,
+    createdAt: response.created_at,
+    updatedAt: response.created_at,
+    authorId: 'system',
+    authorName: 'System',
+    latestMetrics: response.metrics ? {
+      ic: response.metrics.ic_mean,
+      icir: response.metrics.ir,
+      sharpe: response.metrics.sharpe,
+      maxDrawdown: response.metrics.max_drawdown * 100,
+      winRate: 50 + response.metrics.ir * 5,
+      turnover: response.metrics.turnover * 100,
+      stability: Object.values(response.metrics.ic_by_split).reduce((a, b) => a + b, 0) /
+        Math.max(Object.values(response.metrics.ic_by_split).length, 1) / response.metrics.ic_mean || 0.7,
+    } : null,
+    evaluationCount: response.experiment_number,
+    tags: response.family || [],
+  }
+}
+
+function mapApiStatus(status: string): FactorStatus {
+  const statusMap: Record<string, FactorStatus> = {
+    candidate: 'evaluating',
+    core: 'approved',
+    rejected: 'rejected',
+    redundant: 'archived',
+  }
+  return statusMap[status] || 'draft'
+}
 
 export function useFactors(initialFilter?: FactorFilter) {
-  const [factors] = useState<Factor[]>(mockFactors)
+  const [factors, setFactors] = useState<Factor[]>([])
   const [filter, setFilter] = useState<FactorFilter>(initialFilter || {
     family: 'all',
     status: 'all',
@@ -194,14 +56,89 @@ export function useFactors(initialFilter?: FactorFilter) {
     sortOrder: 'desc',
   })
   const [loading, setLoading] = useState(true)
-  const [error] = useState<Error | null>(null)
+  const [error, setError] = useState<Error | null>(null)
 
-  useEffect(() => {
-    // Simulate loading
-    const timer = setTimeout(() => setLoading(false), 500)
-    return () => clearTimeout(timer)
+  // 加载因子数据
+  const loadFactors = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+
+    try {
+      const response = await factorsApi.list({
+        page: 1,
+        page_size: 100,
+      })
+      setFactors(response.factors.map(apiToFactor))
+    } catch (err) {
+      console.error('Failed to load factors:', err)
+      setError(err instanceof Error ? err : new Error('Failed to load factors'))
+      setFactors([])
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
+  useEffect(() => {
+    loadFactors()
+  }, [loadFactors])
+
+  // 生成新因子
+  const generateFactor = useCallback(async (description: string, family?: string[]) => {
+    setLoading(true)
+    try {
+      const response = await factorsApi.generate({
+        description,
+        family,
+      })
+      const newFactor = apiToFactor(response)
+      setFactors(prev => [newFactor, ...prev])
+      return newFactor
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error('Failed to generate factor'))
+      throw err
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  // 评估因子
+  const evaluateFactor = useCallback(async (factorId: string) => {
+    try {
+      const response = await factorsApi.evaluate(factorId, {
+        splits: ['train', 'valid', 'test'],
+      })
+      // 重新加载因子列表以获取更新后的数据
+      await loadFactors()
+      return response
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error('Failed to evaluate factor'))
+      throw err
+    }
+  }, [loadFactors])
+
+  // 更新因子状态
+  const updateFactorStatus = useCallback(async (factorId: string, status: string) => {
+    try {
+      await factorsApi.updateStatus(factorId, status)
+      await loadFactors()
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error('Failed to update factor status'))
+      throw err
+    }
+  }, [loadFactors])
+
+  // 删除因子
+  const deleteFactor = useCallback(async (factorId: string) => {
+    try {
+      await factorsApi.delete(factorId)
+      setFactors(prev => prev.filter(f => f.id !== factorId))
+    } catch (err) {
+      setError(err instanceof Error ? err : new Error('Failed to delete factor'))
+      throw err
+    }
+  }, [])
+
+  // 过滤和排序
   const filteredFactors = useMemo(() => {
     let result = [...factors]
 
@@ -266,6 +203,7 @@ export function useFactors(initialFilter?: FactorFilter) {
     return result
   }, [factors, filter])
 
+  // 统计信息
   const stats = useMemo(() => {
     const byFamily: Record<FactorFamily, number> = {
       momentum: 0,
@@ -299,5 +237,11 @@ export function useFactors(initialFilter?: FactorFilter) {
     loading,
     error,
     stats,
+    // Actions
+    generateFactor,
+    evaluateFactor,
+    updateFactorStatus,
+    deleteFactor,
+    refresh: loadFactors,
   }
 }

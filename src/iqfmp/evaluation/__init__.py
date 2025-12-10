@@ -26,6 +26,7 @@ from iqfmp.evaluation.research_ledger import (
     LedgerStatistics,
     LedgerStorage,
     MemoryStorage,
+    PostgresStorage,
     ResearchLedger,
     ThresholdConfig,
     ThresholdExceededWarning,
@@ -69,6 +70,13 @@ from iqfmp.evaluation.factor_selection import (
     SelectionConfig,
     SelectionResult,
 )
+from iqfmp.evaluation.alpha_benchmark import (
+    ALPHA158_FACTORS,
+    AlphaBenchmarker,
+    BenchmarkResult,
+    create_alpha_benchmarker,
+    get_available_factors,
+)
 
 __all__ = [
     # CV Splitter
@@ -89,6 +97,7 @@ __all__ = [
     "LedgerStatistics",
     "LedgerStorage",
     "MemoryStorage",
+    "PostgresStorage",
     "ResearchLedger",
     "ThresholdConfig",
     "ThresholdExceededWarning",
@@ -128,4 +137,10 @@ __all__ = [
     "InvalidSelectionError",
     "SelectionConfig",
     "SelectionResult",
+    # Alpha Benchmark
+    "ALPHA158_FACTORS",
+    "AlphaBenchmarker",
+    "BenchmarkResult",
+    "create_alpha_benchmarker",
+    "get_available_factors",
 ]

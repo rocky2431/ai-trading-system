@@ -3,9 +3,13 @@ import { DashboardLayout } from '@/layouts/DashboardLayout'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { AgentMonitorPage } from '@/pages/AgentMonitorPage'
 import { FactorExplorerPage } from '@/pages/FactorExplorerPage'
+import { FactorMiningPage } from '@/pages/FactorMiningPage'
+import { StrategyWorkshopPage } from '@/pages/StrategyWorkshopPage'
+import { BacktestCenterPage } from '@/pages/BacktestCenterPage'
 import { ResearchLedgerPage } from '@/pages/ResearchLedgerPage'
 import { LiveTradingPage } from '@/pages/LiveTradingPage'
 import { PipelinePage } from '@/pages/PipelinePage'
+import { DataCenterPage } from '@/pages/DataCenterPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 
 function App() {
@@ -16,9 +20,13 @@ function App() {
           <Route index element={<DashboardPage />} />
           <Route path="agents" element={<AgentMonitorPage />} />
           <Route path="factors" element={<FactorExplorerPage />} />
+          <Route path="mining" element={<FactorMiningPage />} />
+          <Route path="strategies" element={<StrategyWorkshopPage />} />
+          <Route path="backtest" element={<BacktestCenterPage />} />
           <Route path="research" element={<ResearchLedgerPage />} />
           <Route path="trading" element={<LiveTradingPage />} />
           <Route path="pipeline" element={<PipelinePage />} />
+          <Route path="data" element={<DataCenterPage />} />
           <Route path="settings" element={<SettingsPage />} />
         </Route>
       </Routes>

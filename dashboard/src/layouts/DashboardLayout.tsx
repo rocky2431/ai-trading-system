@@ -13,12 +13,20 @@ import {
   Bot,
   Beaker,
   Zap,
+  Database,
+  Pickaxe,
+  Wrench,
+  FlaskConical,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
+  { name: 'Data Center', href: '/data', icon: Database },
   { name: 'Agents', href: '/agents', icon: Bot },
+  { name: 'Factor Mining', href: '/mining', icon: Pickaxe },
   { name: 'Factors', href: '/factors', icon: LineChart },
+  { name: 'Strategies', href: '/strategies', icon: Wrench },
+  { name: 'Backtest', href: '/backtest', icon: FlaskConical },
   { name: 'Research', href: '/research', icon: Beaker },
   { name: 'Trading', href: '/trading', icon: Zap },
   { name: 'Pipeline', href: '/pipeline', icon: Activity },

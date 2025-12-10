@@ -511,9 +511,10 @@
       "priority": "P1",
       "dependencies": ["35"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "in_progress",
       "type": "architecture",
-      "trace_to": "specs/architecture.md#deployment-architecture"
+      "trace_to": "specs/architecture.md#deployment-architecture",
+      "started_at": "2025-12-11T00:00:00"
     },
     {
       "id": "37",
@@ -550,8 +551,8 @@
   "stats": {
     "total": 38,
     "completed": 36,
-    "in_progress": 0,
-    "pending": 2,
+    "in_progress": 1,
+    "pending": 1,
     "blocked": 0
   }
 }

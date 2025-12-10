@@ -301,6 +301,14 @@ class BacktestService:
             backtest_data["progress"] = 100.0
             backtest_data["completed_at"] = datetime.now().isoformat()
 
+            # Persist to TimescaleDB (Task: backtest DB persistence)
+            await self._save_backtest_to_db(
+                backtest_id=backtest_id,
+                strategy_id=strategy.id,
+                config=config,
+                result=result,
+            )
+
         except Exception as e:
             backtest_data["status"] = "failed"
             backtest_data["error_message"] = str(e)
@@ -310,6 +318,52 @@ class BacktestService:
 
         if self.redis_client:
             await self.redis_client.srem("backtests:active", backtest_id)
+
+    async def _save_backtest_to_db(
+        self,
+        backtest_id: str,
+        strategy_id: str,
+        config: BacktestConfig,
+        result,
+    ) -> None:
+        """Persist backtest result to TimescaleDB.
+
+        Args:
+            backtest_id: Backtest ID
+            strategy_id: Strategy ID
+            config: Backtest configuration
+            result: BacktestResult from backtest_engine
+        """
+        try:
+            from iqfmp.db.models import BacktestResultORM
+
+            # Parse dates
+            start_date = datetime.fromisoformat(config.start_date) if config.start_date else datetime.now()
+            end_date = datetime.fromisoformat(config.end_date) if config.end_date else datetime.now()
+
+            # Create ORM object
+            db_result = BacktestResultORM(
+                id=backtest_id,
+                strategy_id=strategy_id,
+                start_date=start_date,
+                end_date=end_date,
+                total_return=result.total_return,
+                sharpe_ratio=result.sharpe_ratio,
+                max_drawdown=result.max_drawdown,
+                win_rate=result.win_rate,
+                profit_factor=result.profit_factor,
+                trade_count=result.trade_count,
+                full_results=result.to_dict(),
+            )
+
+            self.session.add(db_result)
+            await self.session.commit()
+
+        except Exception as e:
+            # Log but don't fail - Redis backup exists
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to save backtest to DB: {e}")
+            await self.session.rollback()
 
     async def _update_backtest(self, backtest_id: str, backtest_data: dict) -> None:
         """Update backtest in Redis."""

@@ -156,14 +156,21 @@ def save_to_csv(df: pd.DataFrame, filepath: Path):
     print(f"Saved to {filepath}")
 
 
-async def save_to_database(df: pd.DataFrame):
-    """Save DataFrame to database."""
+async def save_to_database(df: pd.DataFrame, batch_size: int = 500):
+    """Save DataFrame to database using batch inserts for better performance.
+
+    Args:
+        df: DataFrame with OHLCV data
+        batch_size: Number of rows per batch insert
+    """
     try:
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-        from sqlalchemy.orm import sessionmaker
+        from sqlalchemy.ext.asyncio import create_async_engine
         from sqlalchemy import text
 
-        database_url = os.getenv("DATABASE_URL", "postgresql+asyncpg://localhost/iqfmp")
+        database_url = os.getenv("DATABASE_URL", "")
+        if not database_url:
+            print("DATABASE_URL not set, skipping database save")
+            return False
 
         # Ensure async driver
         if "asyncpg" not in database_url:
@@ -173,7 +180,7 @@ async def save_to_database(df: pd.DataFrame):
         engine = create_async_engine(database_url, echo=False)
 
         async with engine.begin() as conn:
-            # Create table if not exists
+            # Ensure table exists (should be created by init_db.py)
             await conn.execute(text("""
                 CREATE TABLE IF NOT EXISTS ohlcv_data (
                     id SERIAL PRIMARY KEY,
@@ -190,51 +197,109 @@ async def save_to_database(df: pd.DataFrame):
                 )
             """))
 
-            # Create indexes
+            # Create unique constraint for upsert
             await conn.execute(text("""
-                CREATE INDEX IF NOT EXISTS ix_ohlcv_symbol_timeframe_timestamp
-                ON ohlcv_data (symbol, timeframe, timestamp)
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'ohlcv_unique_symbol_timeframe_timestamp'
+                    ) THEN
+                        ALTER TABLE ohlcv_data
+                        ADD CONSTRAINT ohlcv_unique_symbol_timeframe_timestamp
+                        UNIQUE (symbol, timeframe, timestamp);
+                    END IF;
+                END $$;
             """))
 
-            print("Table created/verified")
+            print("Table verified")
 
-        # Insert data
-        async with engine.connect() as conn:
+        # Batch insert with upsert (ON CONFLICT UPDATE)
+        async with engine.begin() as conn:
             inserted = 0
-            for _, row in df.iterrows():
-                try:
-                    await conn.execute(
-                        text("""
-                            INSERT INTO ohlcv_data
-                            (symbol, timeframe, exchange, market_type, timestamp, open, high, low, close, volume)
-                            VALUES (:symbol, :timeframe, :exchange, :market_type, :timestamp, :open, :high, :low, :close, :volume)
-                            ON CONFLICT DO NOTHING
-                        """),
-                        {
-                            "symbol": row["symbol"],
-                            "timeframe": row["timeframe"],
-                            "exchange": row["exchange"],
-                            "market_type": row["market_type"],
-                            "timestamp": row["timestamp"],
-                            "open": row["open"],
-                            "high": row["high"],
-                            "low": row["low"],
-                            "close": row["close"],
-                            "volume": row["volume"],
-                        }
-                    )
-                    inserted += 1
-                except Exception as e:
-                    pass
+            total_rows = len(df)
 
-            await conn.commit()
-            print(f"Inserted {inserted} rows to database")
+            for i in range(0, total_rows, batch_size):
+                batch = df.iloc[i:i + batch_size]
+                batch_values = []
+
+                for _, row in batch.iterrows():
+                    batch_values.append({
+                        "symbol": row["symbol"],
+                        "timeframe": row["timeframe"],
+                        "exchange": row["exchange"],
+                        "market_type": row["market_type"],
+                        "timestamp": row["timestamp"],
+                        "open": float(row["open"]),
+                        "high": float(row["high"]),
+                        "low": float(row["low"]),
+                        "close": float(row["close"]),
+                        "volume": float(row["volume"]),
+                    })
+
+                if batch_values:
+                    # Build batch insert statement with upsert
+                    placeholders = []
+                    params = {}
+                    for j, val in enumerate(batch_values):
+                        idx = i + j
+                        placeholders.append(
+                            f"(:symbol_{idx}, :timeframe_{idx}, :exchange_{idx}, :market_type_{idx}, "
+                            f":timestamp_{idx}, :open_{idx}, :high_{idx}, :low_{idx}, :close_{idx}, :volume_{idx})"
+                        )
+                        for k, v in val.items():
+                            params[f"{k}_{idx}"] = v
+
+                    sql = f"""
+                        INSERT INTO ohlcv_data
+                        (symbol, timeframe, exchange, market_type, timestamp, open, high, low, close, volume)
+                        VALUES {', '.join(placeholders)}
+                        ON CONFLICT (symbol, timeframe, timestamp)
+                        DO UPDATE SET
+                            open = EXCLUDED.open,
+                            high = EXCLUDED.high,
+                            low = EXCLUDED.low,
+                            close = EXCLUDED.close,
+                            volume = EXCLUDED.volume
+                    """
+
+                    try:
+                        await conn.execute(text(sql), params)
+                        inserted += len(batch_values)
+                        print(f"  Inserted batch {i // batch_size + 1} ({inserted}/{total_rows} rows)")
+                    except Exception as e:
+                        print(f"  Batch insert error: {e}")
+                        # Fallback to row-by-row insert for this batch
+                        for val in batch_values:
+                            try:
+                                await conn.execute(
+                                    text("""
+                                        INSERT INTO ohlcv_data
+                                        (symbol, timeframe, exchange, market_type, timestamp, open, high, low, close, volume)
+                                        VALUES (:symbol, :timeframe, :exchange, :market_type, :timestamp, :open, :high, :low, :close, :volume)
+                                        ON CONFLICT (symbol, timeframe, timestamp)
+                                        DO UPDATE SET
+                                            open = EXCLUDED.open,
+                                            high = EXCLUDED.high,
+                                            low = EXCLUDED.low,
+                                            close = EXCLUDED.close,
+                                            volume = EXCLUDED.volume
+                                    """),
+                                    val
+                                )
+                                inserted += 1
+                            except Exception:
+                                pass
+
+            print(f"Total inserted/updated: {inserted} rows")
 
         await engine.dispose()
         return True
 
     except Exception as e:
         print(f"Database save failed: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 

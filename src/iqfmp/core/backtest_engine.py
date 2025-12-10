@@ -246,6 +246,9 @@ class BacktestEngine:
 
         # Generate trading signals
         # Long when factor > 0, short when factor < 0
+        # IMPORTANT: Reset factor_values index to match df's integer index
+        # to avoid pandas index alignment issues during arithmetic operations
+        factor_values = factor_values.reset_index(drop=True)
         positions = np.sign(factor_values).fillna(0)
 
         if long_only:

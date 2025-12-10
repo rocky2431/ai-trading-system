@@ -189,10 +189,11 @@
       "priority": "P0",
       "dependencies": ["10", "11", "12"],
       "estimated_days": 3,
-      "status": "in_progress",
+      "status": "completed",
       "type": "feature",
       "trace_to": "specs/architecture.md#factor-evaluation-engine",
-      "started_at": "2025-12-10T08:00:00"
+      "started_at": "2025-12-10T08:00:00",
+      "completed_at": "2025-12-10T08:30:00"
     },
     {
       "id": "14",
@@ -486,7 +487,7 @@
   "metadata": {
     "last_updated": "2025-12-10",
     "total_tasks": 38,
-    "completed_tasks": 13,
+    "completed_tasks": 14,
     "in_progress_tasks": 0,
     "priority_distribution": {
       "P0": 27,

@@ -2,6 +2,11 @@
 
 This module provides factor calculation using Qlib's expression engine and D.features() API.
 Fully leverages Qlib's capabilities for expression parsing, computation, and optimization.
+
+Integrates with:
+- TimescaleDB for OHLCV data (via DataProvider)
+- CryptoDataHandler for crypto-specific fields
+- Qlib expression engine for factor computation
 """
 
 import logging
@@ -37,6 +42,9 @@ except ImportError:
 # Import Qlib initialization
 from iqfmp.core.qlib_init import init_qlib, ensure_qlib_initialized, is_qlib_initialized
 
+# Import data provider for DB integration
+from iqfmp.core.data_provider import load_ohlcv_sync, DataProvider
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,6 +53,11 @@ class QlibFactorEngine:
 
     Uses Qlib's D.features() API and expression engine for factor calculation.
     Supports both Qlib expression syntax and CryptoDataHandler for crypto data.
+
+    Data loading priority:
+    1. Pre-loaded DataFrame (if provided)
+    2. TimescaleDB via DataProvider (async)
+    3. CSV files (fallback)
     """
 
     def __init__(
@@ -53,6 +66,7 @@ class QlibFactorEngine:
         instruments: Optional[list[str]] = None,
         data_handler: Optional[DataHandlerLP] = None,
         df: Optional[pd.DataFrame] = None,
+        use_crypto_handler: bool = True,
     ):
         """Initialize Qlib factor engine.
 
@@ -61,6 +75,7 @@ class QlibFactorEngine:
             instruments: List of instruments to load (e.g., ["BTCUSDT", "ETHUSDT"])
             data_handler: Pre-configured Qlib DataHandler
             df: Pre-loaded DataFrame (will be converted to Qlib format)
+            use_crypto_handler: Use CryptoDataHandler for crypto-specific fields
         """
         self._qlib_initialized = False
         self._provider_uri = provider_uri
@@ -68,11 +83,25 @@ class QlibFactorEngine:
         self._data_handler = data_handler
         self._df: Optional[pd.DataFrame] = None
         self._qlib_data: Optional[pd.DataFrame] = None
+        self._use_crypto = use_crypto_handler and CRYPTO_AVAILABLE
+        self._crypto_handler: Optional[CryptoDataHandler] = None
+
+        # Try to initialize Qlib globally
+        if QLIB_AVAILABLE and not is_qlib_initialized():
+            try:
+                ensure_qlib_initialized()
+                self._qlib_initialized = is_qlib_initialized()
+                logger.info("Qlib initialized via ensure_qlib_initialized()")
+            except Exception as e:
+                logger.debug(f"Qlib initialization skipped: {e}")
 
         # Initialize with DataFrame if provided
         if df is not None:
             self._df = df.copy()
             self._prepare_data()
+            # Also initialize CryptoDataHandler if available
+            if self._use_crypto:
+                self._init_crypto_handler()
 
     def init_qlib(
         self,
@@ -106,6 +135,23 @@ class QlibFactorEngine:
             logger.warning(f"Qlib initialization failed: {e}")
             return False
 
+    def _init_crypto_handler(self) -> None:
+        """Initialize CryptoDataHandler with current data."""
+        if not self._use_crypto or self._df is None:
+            return
+
+        try:
+            self._crypto_handler = CryptoDataHandler(
+                instruments=self._instruments,
+                timeframe="1d",
+            )
+            self._crypto_handler.load_data(df=self._df)
+            self._crypto_handler.add_technical_indicators()
+            logger.info("CryptoDataHandler initialized with technical indicators")
+        except Exception as e:
+            logger.warning(f"Failed to initialize CryptoDataHandler: {e}")
+            self._crypto_handler = None
+
     def load_data(self, path: Path) -> None:
         """Load OHLCV data from CSV file.
 
@@ -115,7 +161,30 @@ class QlibFactorEngine:
         logger.info(f"Loading data from {path}")
         self._df = pd.read_csv(path)
         self._prepare_data()
+        if self._use_crypto:
+            self._init_crypto_handler()
         logger.info(f"Loaded {len(self._df)} rows")
+
+    def load_data_sync(
+        self,
+        symbol: str = "ETHUSDT",
+        timeframe: str = "1d",
+    ) -> None:
+        """Load data synchronously from CSV fallback.
+
+        Args:
+            symbol: Trading pair
+            timeframe: Data timeframe
+        """
+        try:
+            self._df = load_ohlcv_sync(symbol=symbol, timeframe=timeframe)
+            self._prepare_data()
+            if self._use_crypto:
+                self._init_crypto_handler()
+            logger.info(f"Loaded {len(self._df)} rows for {symbol}")
+        except Exception as e:
+            logger.error(f"Failed to load data: {e}")
+            raise
 
     def _prepare_data(self) -> None:
         """Prepare data for Qlib factor computation."""

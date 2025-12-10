@@ -2,13 +2,19 @@
 
 This module provides actual strategy backtesting using real market data
 and trading cost models. No random simulations.
+
+Supports:
+- Loading data from TimescaleDB with CSV fallback
+- Persisting results to BacktestResultORM
+- Real factor computation via QlibFactorEngine
 """
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -16,6 +22,14 @@ import pandas as pd
 from iqfmp.core.factor_engine import FactorEngine, get_default_data_path
 
 logger = logging.getLogger(__name__)
+
+# Try to import DataProvider for DB loading
+try:
+    from iqfmp.core.data_provider import load_ohlcv_sync, DataProvider
+    DATA_PROVIDER_AVAILABLE = True
+except ImportError:
+    DATA_PROVIDER_AVAILABLE = False
+    logger.debug("DataProvider not available, using CSV fallback")
 
 
 @dataclass
@@ -71,36 +85,119 @@ class BacktestResult:
     # Factor attribution
     factor_contributions: dict[str, float] = field(default_factory=dict)
 
+    def to_dict(self) -> dict:
+        """Convert to dictionary for serialization."""
+        return {
+            "total_return": self.total_return,
+            "annual_return": self.annual_return,
+            "sharpe_ratio": self.sharpe_ratio,
+            "sortino_ratio": self.sortino_ratio,
+            "max_drawdown": self.max_drawdown,
+            "max_drawdown_duration": self.max_drawdown_duration,
+            "win_rate": self.win_rate,
+            "profit_factor": self.profit_factor,
+            "calmar_ratio": self.calmar_ratio,
+            "volatility": self.volatility,
+            "trade_count": self.trade_count,
+            "avg_trade_return": self.avg_trade_return,
+            "avg_holding_period": self.avg_holding_period,
+            "equity_curve": self.equity_curve[-100:] if len(self.equity_curve) > 100 else self.equity_curve,
+            "trades": [
+                {
+                    "id": t.id,
+                    "symbol": t.symbol,
+                    "side": t.side,
+                    "entry_date": t.entry_date,
+                    "entry_price": t.entry_price,
+                    "exit_date": t.exit_date,
+                    "exit_price": t.exit_price,
+                    "pnl": t.pnl,
+                    "pnl_pct": t.pnl_pct,
+                    "holding_days": t.holding_days,
+                }
+                for t in self.trades[-50:]  # Last 50 trades
+            ],
+            "monthly_returns": self.monthly_returns,
+            "factor_contributions": self.factor_contributions,
+        }
+
 
 class BacktestEngine:
-    """Real backtesting engine using actual market data."""
+    """Real backtesting engine using actual market data.
+
+    Data loading priority:
+    1. TimescaleDB (via DataProvider)
+    2. CSV file (fallback)
+    """
 
     def __init__(
         self,
         data_path: Optional[Path] = None,
         trading_costs: Optional[TradingCosts] = None,
+        symbol: str = "ETH/USDT",
+        timeframe: str = "1d",
+        use_db: bool = True,
     ):
         """Initialize backtest engine.
 
         Args:
             data_path: Path to OHLCV data CSV
             trading_costs: Trading cost model
+            symbol: Trading pair for DB loading
+            timeframe: Data timeframe for DB loading
+            use_db: Whether to try loading from DB first
         """
         self.data_path = data_path or get_default_data_path()
         self.costs = trading_costs or TradingCosts()
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.use_db = use_db
         self._df: Optional[pd.DataFrame] = None
 
     def load_data(self) -> pd.DataFrame:
-        """Load market data."""
-        if self._df is None:
-            logger.info(f"Loading data from {self.data_path}")
-            self._df = pd.read_csv(self.data_path)
-            self._df["timestamp"] = pd.to_datetime(self._df["timestamp"], utc=True)
-            # Remove timezone for simpler comparisons
-            self._df["timestamp"] = self._df["timestamp"].dt.tz_localize(None)
-            self._df = self._df.sort_values("timestamp").reset_index(drop=True)
-            self._df["returns"] = self._df["close"].pct_change()
+        """Load market data from DB (primary) or CSV (fallback)."""
+        if self._df is not None:
+            return self._df
+
+        # Try loading from DB first
+        if self.use_db and DATA_PROVIDER_AVAILABLE:
+            try:
+                self._df = load_ohlcv_sync(
+                    symbol=self.symbol.replace("/", ""),
+                    timeframe=self.timeframe,
+                )
+                if self._df is not None and len(self._df) > 0:
+                    logger.info(f"Loaded {len(self._df)} rows from DataProvider for {self.symbol}")
+                    self._prepare_dataframe()
+                    return self._df
+            except Exception as e:
+                logger.warning(f"DB data load failed, falling back to CSV: {e}")
+
+        # Fallback to CSV
+        logger.info(f"Loading data from CSV: {self.data_path}")
+        self._df = pd.read_csv(self.data_path)
+        self._prepare_dataframe()
         return self._df
+
+    def _prepare_dataframe(self) -> None:
+        """Prepare DataFrame for backtesting."""
+        if self._df is None:
+            return
+
+        # Ensure timestamp column
+        if "timestamp" in self._df.columns:
+            self._df["timestamp"] = pd.to_datetime(self._df["timestamp"])
+        elif "datetime" in self._df.columns:
+            self._df["timestamp"] = pd.to_datetime(self._df["datetime"])
+        elif "date" in self._df.columns:
+            self._df["timestamp"] = pd.to_datetime(self._df["date"])
+
+        # Remove timezone for simpler comparisons
+        if self._df["timestamp"].dt.tz is not None:
+            self._df["timestamp"] = self._df["timestamp"].dt.tz_localize(None)
+
+        self._df = self._df.sort_values("timestamp").reset_index(drop=True)
+        self._df["returns"] = self._df["close"].pct_change()
 
     def run_factor_backtest(
         self,
@@ -486,3 +583,91 @@ def run_strategy_backtest(
         result.factor_contributions = {factor_ids[0]: 100.0}
 
     return result
+
+
+async def save_backtest_result_to_db(
+    result: BacktestResult,
+    strategy_id: str,
+    start_date: datetime,
+    end_date: datetime,
+) -> str:
+    """Save backtest result to database.
+
+    Args:
+        result: BacktestResult to save
+        strategy_id: ID of the strategy
+        start_date: Backtest start date
+        end_date: Backtest end date
+
+    Returns:
+        ID of the saved result
+    """
+    from iqfmp.db.database import get_async_session
+    from iqfmp.db.models import BacktestResultORM
+
+    result_id = str(uuid4())
+
+    async with get_async_session() as session:
+        db_result = BacktestResultORM(
+            id=result_id,
+            strategy_id=strategy_id,
+            start_date=start_date,
+            end_date=end_date,
+            total_return=result.total_return,
+            sharpe_ratio=result.sharpe_ratio,
+            max_drawdown=result.max_drawdown,
+            win_rate=result.win_rate,
+            profit_factor=result.profit_factor,
+            trade_count=result.trade_count,
+            full_results=result.to_dict(),
+        )
+        session.add(db_result)
+        await session.commit()
+
+    logger.info(f"Saved backtest result {result_id} for strategy {strategy_id}")
+    return result_id
+
+
+async def run_and_persist_backtest(
+    strategy_id: str,
+    factor_ids: list[str],
+    factor_codes: Optional[dict[str, str]] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    **kwargs,
+) -> tuple[BacktestResult, str]:
+    """Run backtest and persist results to database.
+
+    Args:
+        strategy_id: Strategy ID for the backtest
+        factor_ids: List of factor IDs
+        factor_codes: Mapping of factor ID to code
+        start_date: Start date string
+        end_date: End date string
+        **kwargs: Additional arguments for run_strategy_backtest
+
+    Returns:
+        Tuple of (BacktestResult, result_id)
+    """
+    # Run backtest
+    result = run_strategy_backtest(
+        factor_ids=factor_ids,
+        factor_codes=factor_codes,
+        start_date=start_date,
+        end_date=end_date,
+        **kwargs,
+    )
+
+    # Parse dates for DB
+    start_dt = datetime.fromisoformat(start_date) if start_date else datetime.now(timezone.utc)
+    end_dt = datetime.fromisoformat(end_date) if end_date else datetime.now(timezone.utc)
+
+    # Save to DB
+    result_id = await save_backtest_result_to_db(
+        result=result,
+        strategy_id=strategy_id,
+        start_date=start_dt,
+        end_date=end_dt,
+    )
+
+    return result, result_id

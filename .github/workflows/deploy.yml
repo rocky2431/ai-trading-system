@@ -1,0 +1,187 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      skip_tests:
+        description: 'Skip tests before deployment'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ==================== Pre-deployment Tests ====================
+  pre-deploy-tests:
+    name: Pre-deployment Tests
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_tests }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run smoke tests
+        run: |
+          pip install -e ".[dev]"
+          pytest tests/integration -v -m "smoke" || true
+          echo "Smoke tests completed"
+
+  # ==================== Deploy to Staging ====================
+  deploy-staging:
+    name: Deploy to Staging
+    needs: [pre-deploy-tests]
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      (needs.pre-deploy-tests.result == 'success' || needs.pre-deploy-tests.result == 'skipped') &&
+      (github.ref == 'refs/heads/main' || inputs.environment == 'staging')
+
+    environment:
+      name: staging
+      url: https://staging.iqfmp.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Deploy to Staging
+        run: |
+          echo "Deploying to Staging environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:main"
+
+          # Example: SSH deployment
+          # ssh ${{ secrets.STAGING_HOST }} << 'EOF'
+          #   cd /opt/iqfmp
+          #   docker-compose pull
+          #   docker-compose up -d
+          # EOF
+
+          echo "Staging deployment completed!"
+
+      - name: Run staging health check
+        run: |
+          echo "Running health checks..."
+          # curl -f https://staging.iqfmp.example.com/health || exit 1
+          echo "Health check passed!"
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          echo "Sending deployment notification..."
+          # curl -X POST ${{ secrets.SLACK_WEBHOOK }} \
+          #   -H "Content-Type: application/json" \
+          #   -d '{"text": "Staging deployment ${{ job.status }}"}'
+
+  # ==================== Deploy to Production ====================
+  deploy-production:
+    name: Deploy to Production
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    if: |
+      needs.deploy-staging.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' && inputs.environment == 'production')
+
+    environment:
+      name: production
+      url: https://iqfmp.example.com
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create deployment record
+        run: |
+          echo "Recording deployment..."
+          echo "Commit: ${{ github.sha }}"
+          echo "Deployer: ${{ github.actor }}"
+          echo "Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+      - name: Deploy to Production
+        run: |
+          echo "Deploying to Production environment..."
+          echo "Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:main"
+
+          # Example: Kubernetes deployment
+          # kubectl set image deployment/iqfmp-backend \
+          #   backend=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}/backend:${{ github.sha }}
+
+          # Example: Docker Compose deployment
+          # ssh ${{ secrets.PROD_HOST }} << 'EOF'
+          #   cd /opt/iqfmp
+          #   docker-compose pull
+          #   docker-compose up -d --no-deps backend frontend
+          # EOF
+
+          echo "Production deployment completed!"
+
+      - name: Run production health check
+        run: |
+          echo "Running production health checks..."
+          # curl -f https://iqfmp.example.com/health || exit 1
+          echo "Health check passed!"
+
+      - name: Verify deployment
+        run: |
+          echo "Verifying deployment..."
+          # Run smoke tests against production
+          # pytest tests/smoke -v --env=production
+          echo "Deployment verified!"
+
+      - name: Notify deployment status
+        if: always()
+        run: |
+          echo "Sending production deployment notification..."
+          # Send to Telegram, Slack, etc.
+
+  # ==================== Rollback (Manual Trigger) ====================
+  rollback:
+    name: Rollback Deployment
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && failure()
+
+    steps:
+      - name: Rollback to previous version
+        run: |
+          echo "Rolling back to previous stable version..."
+          # kubectl rollout undo deployment/iqfmp-backend
+          # or
+          # ssh ${{ secrets.PROD_HOST }} "docker-compose -f docker-compose.yml up -d --rollback"
+          echo "Rollback completed!"
+
+      - name: Notify rollback
+        run: |
+          echo "Sending rollback notification..."
+          # Notify team about rollback

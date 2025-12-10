@@ -11,12 +11,14 @@ import {
   Moon,
   Sun,
   Bot,
+  Beaker,
 } from 'lucide-react'
 
 const navigation = [
   { name: 'Dashboard', href: '/', icon: LayoutDashboard },
   { name: 'Agents', href: '/agents', icon: Bot },
   { name: 'Factors', href: '/factors', icon: LineChart },
+  { name: 'Research', href: '/research', icon: Beaker },
   { name: 'Pipeline', href: '/pipeline', icon: Activity },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]

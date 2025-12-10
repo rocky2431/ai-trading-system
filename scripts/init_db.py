@@ -37,17 +37,98 @@ async def init_database():
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS timescaledb;"))
                 print("TimescaleDB extension enabled")
 
-                # Convert trades table to hypertable
+                # ========================================
+                # 1. trades table (交易记录)
+                # ========================================
                 await conn.execute(text(
                     "SELECT create_hypertable('trades', 'timestamp', if_not_exists => TRUE);"
                 ))
-                print("Trades hypertable created")
+                print("trades hypertable created")
 
-                # Add compression policy
                 await conn.execute(text(
                     "SELECT add_compression_policy('trades', INTERVAL '7 days', if_not_exists => TRUE);"
                 ))
-                print("Compression policy added")
+                print("trades compression policy added")
+
+                # ========================================
+                # 2. factor_values table (因子值时序数据)
+                # ========================================
+                await conn.execute(text(
+                    "SELECT create_hypertable('factor_values', 'timestamp', if_not_exists => TRUE);"
+                ))
+                print("factor_values hypertable created")
+
+                # Add compression policy (compress data older than 30 days)
+                await conn.execute(text(
+                    "SELECT add_compression_policy('factor_values', INTERVAL '30 days', if_not_exists => TRUE);"
+                ))
+                print("factor_values compression policy added")
+
+                # Create index for factor_id + symbol queries
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_factor_values_factor_symbol
+                    ON factor_values (factor_id, symbol, timestamp DESC);
+                """))
+                print("factor_values index created")
+
+                # ========================================
+                # 3. ohlcv_data table (K线数据)
+                # ========================================
+                await conn.execute(text(
+                    "SELECT create_hypertable('ohlcv_data', 'timestamp', if_not_exists => TRUE);"
+                ))
+                print("ohlcv_data hypertable created")
+
+                # Add compression policy (compress data older than 90 days)
+                await conn.execute(text(
+                    "SELECT add_compression_policy('ohlcv_data', INTERVAL '90 days', if_not_exists => TRUE);"
+                ))
+                print("ohlcv_data compression policy added")
+
+                # Create index for symbol + timeframe queries
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_ohlcv_symbol_timeframe
+                    ON ohlcv_data (symbol, timeframe, timestamp DESC);
+                """))
+                print("ohlcv_data index created")
+
+                # ========================================
+                # 4. Create indexes for other tables
+                # ========================================
+                # mining_tasks index
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_mining_tasks_status
+                    ON mining_tasks (status, created_at DESC);
+                """))
+                print("mining_tasks index created")
+
+                # pipeline_runs index
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_pipeline_runs_status
+                    ON pipeline_runs (status, created_at DESC);
+                """))
+                print("pipeline_runs index created")
+
+                # factors index
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_factors_family_status
+                    ON factors (family, status, created_at DESC);
+                """))
+                print("factors index created")
+
+                # research_trials index
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_research_trials_created
+                    ON research_trials (created_at DESC);
+                """))
+                print("research_trials index created")
+
+                # rd_loop_runs index
+                await conn.execute(text("""
+                    CREATE INDEX IF NOT EXISTS idx_rd_loop_runs_status
+                    ON rd_loop_runs (status, created_at DESC);
+                """))
+                print("rd_loop_runs index created")
 
             except Exception as e:
                 print(f"Warning: TimescaleDB setup failed (may not be installed): {e}")

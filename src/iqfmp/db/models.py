@@ -256,6 +256,68 @@ class PipelineRunORM(Base):
         }
 
 
+class RDLoopRunORM(Base):
+    """RD Loop run table - stores RD Loop execution state for persistence."""
+
+    __tablename__ = "rd_loop_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+
+    # Configuration
+    config: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    data_source: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # State
+    status: Mapped[str] = mapped_column(
+        String(20), default="pending", index=True
+    )  # pending, running, completed, failed, stopped
+    phase: Mapped[str] = mapped_column(String(50), default="initialization")
+    iteration: Mapped[int] = mapped_column(Integer, default=0)
+    total_hypotheses_tested: Mapped[int] = mapped_column(Integer, default=0)
+    core_factors_count: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Core factors (list of factor names/IDs)
+    core_factors: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+
+    # Statistics
+    statistics: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+
+    # Iteration results
+    iteration_results: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+
+    # Error
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_rd_loop_runs_status_created", "status", "created_at"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "run_id": self.id,
+            "status": self.status,
+            "phase": self.phase,
+            "iteration": self.iteration,
+            "total_hypotheses_tested": self.total_hypotheses_tested,
+            "core_factors_count": self.core_factors_count,
+            "core_factors": self.core_factors or [],
+            "statistics": self.statistics,
+            "iteration_results": self.iteration_results or [],
+            "error": self.error_message,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+        }
+
+
 class FactorValueORM(Base):
     """Factor value table - stores computed factor time-series (TimescaleDB hypertable)."""
 

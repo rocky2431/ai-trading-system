@@ -57,6 +57,13 @@ from iqfmp.evaluation.stability_analyzer import (
 from iqfmp.vector.store import FactorVectorStore
 from iqfmp.vector.search import SimilaritySearcher, SearchResult
 
+# WebSocket broadcast imports
+from iqfmp.api.system.websocket import (
+    broadcast_factor_created,
+    broadcast_evaluation_complete,
+    broadcast_task_update,
+)
+
 
 class FactorDuplicateError(Exception):
     """Raised when a duplicate factor is detected."""
@@ -294,6 +301,16 @@ class FactorService:
         # Task 7.1: Index factor to vector store
         if not skip_vector_index:
             await self._index_factor_to_vector_store(factor)
+
+        # P1.2: Broadcast factor creation via WebSocket
+        try:
+            await broadcast_factor_created(
+                factor_id=factor.id,
+                name=factor.name,
+                family=factor.family,
+            )
+        except Exception as e:
+            print(f"Warning: Failed to broadcast factor creation: {e}")
 
         return factor
 
@@ -721,6 +738,22 @@ class FactorService:
         factor.experiment_number = trial_number
         await self.factor_repo.update(factor)
 
+        # P1.2: Broadcast evaluation completion via WebSocket
+        try:
+            await broadcast_evaluation_complete(
+                factor_id=factor_id,
+                passed=passed,
+                metrics={
+                    "ic_mean": metrics.ic_mean,
+                    "ir": metrics.ir,
+                    "sharpe": metrics.sharpe,
+                    "max_drawdown": metrics.max_drawdown,
+                    "experiment_number": trial_number,
+                },
+            )
+        except Exception as e:
+            print(f"Warning: Failed to broadcast evaluation completion: {e}")
+
         return metrics, stability, passed, trial_number
 
     def _prepare_evaluation_data(
@@ -889,16 +922,59 @@ class FactorService:
         }
 
     async def get_stats(self) -> dict:
-        """Get factor statistics."""
+        """Get comprehensive factor statistics for monitoring dashboard.
+
+        Returns:
+            Dictionary with basic and extended statistics for frontend dashboard.
+        """
         status_counts = await self.factor_repo.count_by_status()
         total_trials = await self.trial_repo.get_total_trials()
         threshold = await self.trial_repo.calculate_dynamic_threshold()
 
+        # Calculate extended metrics for monitoring dashboard
+        total_factors = sum(status_counts.values())
+        core_count = status_counts.get("core", 0)
+        candidate_count = status_counts.get("candidate", 0)
+        rejected_count = status_counts.get("rejected", 0)
+        redundant_count = status_counts.get("redundant", 0)
+
+        # Evaluated = all non-candidate factors
+        evaluated_count = core_count + rejected_count + redundant_count
+
+        # Pass rate = core / evaluated (if any evaluated)
+        pass_rate = (core_count / evaluated_count * 100) if evaluated_count > 0 else 0.0
+
+        # Calculate average IC and Sharpe from factors with metrics
+        avg_ic = 0.0
+        avg_sharpe = 0.0
+        try:
+            factors, _ = await self.factor_repo.list_factors(page=1, page_size=1000)
+            total_ic = 0.0
+            total_sharpe = 0.0
+            count_with_metrics = 0
+            for factor in factors:
+                if factor.metrics:
+                    total_ic += factor.metrics.ic_mean
+                    total_sharpe += factor.metrics.sharpe
+                    count_with_metrics += 1
+            if count_with_metrics > 0:
+                avg_ic = total_ic / count_with_metrics
+                avg_sharpe = total_sharpe / count_with_metrics
+        except Exception:
+            pass  # Use default 0.0 values
+
         return {
-            "total_factors": sum(status_counts.values()),
+            # Basic counts
+            "total_factors": total_factors,
             "by_status": status_counts,
             "total_trials": total_trials,
             "current_threshold": threshold,
+            # Extended fields for monitoring dashboard
+            "evaluated_count": evaluated_count,
+            "pass_rate": round(pass_rate, 2),
+            "avg_ic": round(avg_ic, 4),
+            "avg_sharpe": round(avg_sharpe, 4),
+            "pending_count": candidate_count,
         }
 
     # ==================== Mining Task Methods ====================
@@ -1006,6 +1082,22 @@ class FactorService:
                     failed_count=failed_count,
                     progress=progress,
                 )
+
+                # P1.2: Broadcast mining progress via WebSocket
+                try:
+                    await broadcast_task_update(
+                        task_id=task_id,
+                        task_type="mining",
+                        status="running",
+                        progress=progress,
+                        result={
+                            "generated": generated_count,
+                            "passed": passed_count,
+                            "failed": failed_count,
+                        },
+                    )
+                except Exception:
+                    pass  # Non-critical, continue execution
 
                 # Small delay to avoid overwhelming LLM
                 await asyncio.sleep(0.5)

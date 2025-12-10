@@ -174,20 +174,27 @@ async def list_factors(
 async def get_factor_stats(
     factor_service: FactorService = Depends(get_factor_service),
 ) -> FactorStatsResponse:
-    """Get factor statistics.
+    """Get comprehensive factor statistics for monitoring dashboard.
 
     Args:
         factor_service: Factor service
 
     Returns:
-        Factor statistics including totals, status counts, and thresholds
+        Factor statistics including totals, status counts, thresholds, and metrics
     """
     stats = await factor_service.get_stats()
     return FactorStatsResponse(
+        # Basic fields
         total_factors=stats["total_factors"],
         by_status=stats["by_status"],
         total_trials=stats["total_trials"],
         current_threshold=stats["current_threshold"],
+        # Extended fields for monitoring dashboard
+        evaluated_count=stats["evaluated_count"],
+        pass_rate=stats["pass_rate"],
+        avg_ic=stats["avg_ic"],
+        avg_sharpe=stats["avg_sharpe"],
+        pending_count=stats["pending_count"],
     )
 
 

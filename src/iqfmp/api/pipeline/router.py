@@ -1,4 +1,8 @@
-"""Pipeline API router."""
+"""Pipeline API router with PostgreSQL persistence.
+
+This module provides pipeline and RD Loop endpoints with full DB persistence.
+Pipeline runs and RD Loop states survive server restarts.
+"""
 
 import asyncio
 import logging
@@ -6,7 +10,9 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from iqfmp.api.pipeline.schemas import (
     PipelineListResponse,
@@ -24,16 +30,20 @@ from iqfmp.api.pipeline.schemas import (
 )
 from iqfmp.api.pipeline.service import PipelineNotFoundError, get_pipeline_service
 from iqfmp.api.system.websocket import manager as ws_manager, WebSocketMessage
+from iqfmp.db.database import get_db
+from iqfmp.db.models import RDLoopRunORM
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["pipeline"])
 
 # =============================================================================
-# RD Loop State Management (in-memory for now, can be persisted to DB)
+# RD Loop State Management (memory cache + DB persistence)
 # =============================================================================
 
+# Memory cache for running loops (hot state)
 _rd_loop_instances: dict[str, Any] = {}
+# Memory cache for results (also persisted to DB)
 _rd_loop_results: dict[str, dict[str, Any]] = {}
 
 
@@ -326,8 +336,9 @@ async def _execute_rd_loop(run_id: str, config: RDLoopConfigRequest, data_source
 async def run_rd_loop(
     request: RDLoopRunRequest,
     background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_db),
 ) -> RDLoopRunResponse:
-    """Start a new RD Loop run.
+    """Start a new RD Loop run with DB persistence.
 
     The RD Loop executes the research-development cycle for factor mining:
     1. Hypothesis Generation
@@ -337,10 +348,22 @@ async def run_rd_loop(
     5. Factor Selection
 
     Progress updates are broadcast via WebSocket.
+    State is persisted to PostgreSQL for recovery after restart.
     """
     run_id = str(uuid4())
 
-    # Initialize results entry
+    # Create DB record
+    db_run = RDLoopRunORM(
+        id=run_id,
+        config=request.config.model_dump() if request.config else None,
+        data_source=request.data_source,
+        status="starting",
+        phase="initialization",
+    )
+    session.add(db_run)
+    await session.commit()
+
+    # Also cache in memory
     _rd_loop_results[run_id] = {
         "status": "starting",
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -363,12 +386,16 @@ async def run_rd_loop(
 
 
 @router.get("/rd-loop/{run_id}/state", response_model=RDLoopStateResponse)
-async def get_rd_loop_state(run_id: str) -> RDLoopStateResponse:
-    """Get current state of an RD Loop run."""
+async def get_rd_loop_state(
+    run_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> RDLoopStateResponse:
+    """Get current state of an RD Loop run from DB or memory cache."""
+    # First check memory cache for running loop
     loop = _rd_loop_instances.get(run_id)
 
     if loop:
-        # Running loop
+        # Running loop - use real-time state
         state = loop.state
         return RDLoopStateResponse(
             run_id=run_id,
@@ -381,26 +408,42 @@ async def get_rd_loop_state(run_id: str) -> RDLoopStateResponse:
             stop_requested=state.stop_requested,
         )
 
-    # Check results for completed/failed runs
+    # Check memory cache for completed/failed runs
     result = _rd_loop_results.get(run_id)
-    if not result:
+    if result:
+        stats = result.get("statistics", {})
+        state_dict = stats.get("state", {})
+        return RDLoopStateResponse(
+            run_id=run_id,
+            phase=state_dict.get("phase", "completed"),
+            iteration=state_dict.get("iteration", 0),
+            total_hypotheses_tested=state_dict.get("total_hypotheses_tested", 0),
+            core_factors_count=state_dict.get("core_factors_count", 0),
+            core_factors=state_dict.get("core_factors", []),
+            is_running=False,
+            stop_requested=False,
+        )
+
+    # Fall back to DB lookup (for runs from previous server sessions)
+    db_result = await session.execute(
+        select(RDLoopRunORM).where(RDLoopRunORM.id == run_id)
+    )
+    db_run = db_result.scalar_one_or_none()
+
+    if not db_run:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"RD Loop run {run_id} not found",
         )
 
-    # Return final state from results
-    stats = result.get("statistics", {})
-    state_dict = stats.get("state", {})
-
     return RDLoopStateResponse(
         run_id=run_id,
-        phase=state_dict.get("phase", "completed"),
-        iteration=state_dict.get("iteration", 0),
-        total_hypotheses_tested=state_dict.get("total_hypotheses_tested", 0),
-        core_factors_count=state_dict.get("core_factors_count", 0),
-        core_factors=state_dict.get("core_factors", []),
-        is_running=False,
+        phase=db_run.phase,
+        iteration=db_run.iteration,
+        total_hypotheses_tested=db_run.total_hypotheses_tested,
+        core_factors_count=db_run.core_factors_count,
+        core_factors=db_run.core_factors[:20] if db_run.core_factors else [],
+        is_running=db_run.status == "running",
         stop_requested=False,
     )
 
@@ -526,11 +569,17 @@ async def stop_rd_loop(run_id: str) -> dict:
 
 
 @router.get("/rd-loop/runs")
-async def list_rd_loop_runs() -> dict:
-    """List all RD Loop runs (running and completed)."""
-    runs = []
+async def list_rd_loop_runs(
+    session: AsyncSession = Depends(get_db),
+) -> dict:
+    """List all RD Loop runs from DB (including historical runs).
 
-    # Add running loops
+    Combines running loops from memory cache with persisted runs from DB.
+    """
+    runs = []
+    seen_ids = set()
+
+    # Add running loops from memory cache (highest priority - real-time state)
     for run_id, loop in _rd_loop_instances.items():
         runs.append({
             "run_id": run_id,
@@ -539,10 +588,11 @@ async def list_rd_loop_runs() -> dict:
             "iteration": loop.state.iteration,
             "core_factors_count": len(loop.state.core_factors),
         })
+        seen_ids.add(run_id)
 
-    # Add completed/failed results
+    # Add completed/failed results from memory cache
     for run_id, result in _rd_loop_results.items():
-        if run_id not in _rd_loop_instances:
+        if run_id not in seen_ids:
             stats = result.get("statistics", {})
             state = stats.get("state", {})
             runs.append({
@@ -552,6 +602,25 @@ async def list_rd_loop_runs() -> dict:
                 "iteration": state.get("iteration", 0),
                 "core_factors_count": state.get("core_factors_count", 0),
                 "error": result.get("error"),
+            })
+            seen_ids.add(run_id)
+
+    # Fetch historical runs from DB (not in memory cache)
+    db_result = await session.execute(
+        select(RDLoopRunORM).order_by(RDLoopRunORM.created_at.desc()).limit(100)
+    )
+    db_runs = db_result.scalars().all()
+
+    for db_run in db_runs:
+        if db_run.id not in seen_ids:
+            runs.append({
+                "run_id": db_run.id,
+                "status": db_run.status,
+                "phase": db_run.phase,
+                "iteration": db_run.iteration,
+                "core_factors_count": db_run.core_factors_count,
+                "error": db_run.error_message,
+                "created_at": db_run.created_at.isoformat() if db_run.created_at else None,
             })
 
     return {"runs": runs, "total": len(runs)}

@@ -1,8 +1,15 @@
-"""System service for real system metrics."""
+"""System service for real system metrics.
+
+This module provides real-time system status from:
+- Database (mining tasks, pipeline runs, RD Loop runs)
+- LLM usage tracking (via global tracker)
+- System resources (CPU, memory, disk)
+"""
 
 import os
 import time
-from datetime import datetime, timezone
+from collections import deque
+from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from typing import Optional
 
@@ -20,8 +27,105 @@ from iqfmp.api.system.schemas import (
     SystemStatusResponse,
     TaskQueueItemResponse,
 )
-from iqfmp.db.models import MiningTaskORM, PipelineRunORM
+from iqfmp.db.models import MiningTaskORM, PipelineRunORM, RDLoopRunORM
 from iqfmp.llm.provider import LLMConfig
+
+
+# =============================================================================
+# Global LLM Usage Tracker
+# =============================================================================
+
+class LLMUsageTracker:
+    """Tracks LLM API usage across the application."""
+
+    def __init__(self, max_history: int = 60):
+        self._total_requests = 0
+        self._successful_requests = 0
+        self._failed_requests = 0
+        self._total_tokens = 0
+        self._total_cost = 0.0
+        self._latencies: deque[float] = deque(maxlen=1000)
+        self._hourly_requests: deque[int] = deque(maxlen=max_history)
+        self._last_hour_slot = -1
+
+    def record_request(
+        self,
+        success: bool,
+        latency_ms: float,
+        tokens_used: int = 0,
+        cost: float = 0.0,
+    ) -> None:
+        """Record an LLM API request."""
+        self._total_requests += 1
+        if success:
+            self._successful_requests += 1
+        else:
+            self._failed_requests += 1
+
+        self._latencies.append(latency_ms)
+        self._total_tokens += tokens_used
+        self._total_cost += cost
+
+        # Track hourly requests
+        current_hour = datetime.now(timezone.utc).hour
+        if current_hour != self._last_hour_slot:
+            self._hourly_requests.append(1)
+            self._last_hour_slot = current_hour
+        elif self._hourly_requests:
+            self._hourly_requests[-1] += 1
+
+    @property
+    def total_requests(self) -> int:
+        return self._total_requests
+
+    @property
+    def success_rate(self) -> float:
+        if self._total_requests == 0:
+            return 100.0
+        return (self._successful_requests / self._total_requests) * 100
+
+    @property
+    def avg_latency(self) -> float:
+        if not self._latencies:
+            return 0.0
+        return sum(self._latencies) / len(self._latencies)
+
+    @property
+    def p95_latency(self) -> float:
+        if len(self._latencies) < 2:
+            return self.avg_latency
+        sorted_lat = sorted(self._latencies)
+        idx = int(len(sorted_lat) * 0.95)
+        return sorted_lat[min(idx, len(sorted_lat) - 1)]
+
+    @property
+    def p99_latency(self) -> float:
+        if len(self._latencies) < 2:
+            return self.avg_latency
+        sorted_lat = sorted(self._latencies)
+        idx = int(len(sorted_lat) * 0.99)
+        return sorted_lat[min(idx, len(sorted_lat) - 1)]
+
+    @property
+    def tokens_used(self) -> int:
+        return self._total_tokens
+
+    @property
+    def cost_estimate(self) -> float:
+        return self._total_cost
+
+    @property
+    def hourly_requests(self) -> list[int]:
+        return list(self._hourly_requests)
+
+
+# Global instance
+_llm_tracker = LLMUsageTracker()
+
+
+def get_llm_tracker() -> LLMUsageTracker:
+    """Get global LLM usage tracker."""
+    return _llm_tracker
 
 
 class SystemService:
@@ -45,7 +149,13 @@ class SystemService:
         return self._llm_config
 
     async def get_agents(self) -> list[AgentResponse]:
-        """Get list of agents with their current status from database."""
+        """Get list of agents with their current status from database.
+
+        Queries:
+        - MiningTaskORM for factor generation tasks
+        - PipelineRunORM for pipeline runs
+        - RDLoopRunORM for RD Loop runs (hypothesis agent)
+        """
         agents = []
 
         # Base agent definitions
@@ -107,6 +217,31 @@ class SystemService:
                         }
             except Exception as e:
                 print(f"Warning: Failed to query pipeline runs: {e}")
+
+            # Query active RD Loop runs (evaluator agent status)
+            try:
+                result = await self._session.execute(
+                    select(RDLoopRunORM)
+                    .where(RDLoopRunORM.status == "running")
+                    .order_by(RDLoopRunORM.created_at.desc())
+                    .limit(5)
+                )
+                rd_loop_runs = result.scalars().all()
+
+                for run in rd_loop_runs:
+                    # Calculate progress based on iterations
+                    max_iter = run.config.get("max_iterations", 10) if run.config else 10
+                    progress = (run.iteration / max_iter) * 100 if max_iter > 0 else 0
+
+                    active_tasks["agent-evaluator"] = {
+                        "status": "running",
+                        "current_task": f"RD Loop: {run.phase} (iter {run.iteration})",
+                        "progress": min(progress, 100),
+                        "started_at": run.started_at,
+                    }
+                    break  # Use the most recent one
+            except Exception as e:
+                print(f"Warning: Failed to query RD Loop runs: {e}")
 
         # Build agent responses
         for agent_id, name, agent_type in agent_defs:
@@ -197,23 +332,26 @@ class SystemService:
         return tasks
 
     def get_llm_metrics(self) -> LLMMetricsResponse:
-        """Get LLM usage metrics."""
+        """Get LLM usage metrics from global tracker."""
         config = self._get_llm_config()
 
         # Extract provider from base_url
         provider = "OpenRouter" if "openrouter" in config.base_url else "Unknown"
 
+        # Get real metrics from global tracker
+        tracker = get_llm_tracker()
+
         return LLMMetricsResponse(
             provider=provider,
             model=config.default_model.value,
-            total_requests=0,
-            success_rate=100.0,
-            avg_latency=0.0,
-            p95_latency=0.0,
-            p99_latency=0.0,
-            tokens_used=0,
-            cost_estimate=0.0,
-            last_hour_requests=[],
+            total_requests=tracker.total_requests,
+            success_rate=round(tracker.success_rate, 2),
+            avg_latency=round(tracker.avg_latency, 2),
+            p95_latency=round(tracker.p95_latency, 2),
+            p99_latency=round(tracker.p99_latency, 2),
+            tokens_used=tracker.tokens_used,
+            cost_estimate=round(tracker.cost_estimate, 4),
+            last_hour_requests=tracker.hourly_requests,
         )
 
     def get_resource_metrics(self) -> ResourceMetricsResponse:

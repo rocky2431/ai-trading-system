@@ -206,9 +206,11 @@ async def pipeline_websocket(websocket: WebSocket, run_id: str) -> None:
 
 
 async def _execute_rd_loop(run_id: str, config: RDLoopConfigRequest, data_source: Optional[str]) -> None:
-    """Execute RD Loop in background and broadcast progress."""
+    """Execute RD Loop in background with DB persistence and broadcast progress."""
     from iqfmp.agents.hypothesis_agent import HypothesisFamily
     from iqfmp.core.rd_loop import RDLoop, LoopConfig, LoopPhase
+    from iqfmp.core.data_provider import DataProvider
+    from iqfmp.db.database import get_async_session
 
     try:
         # Create loop config
@@ -223,30 +225,60 @@ async def _execute_rd_loop(run_id: str, config: RDLoopConfigRequest, data_source
             enable_combination=config.enable_combination,
         )
 
-        # Create phase change callback
+        # Create phase change callback with DB update
         def on_phase_change(phase: LoopPhase) -> None:
-            asyncio.create_task(
-                ws_manager.broadcast(WebSocketMessage(
-                    type="rd_loop_phase",
-                    data={
-                        "run_id": run_id,
-                        "phase": phase.value,
-                    },
-                ))
-            )
+            async def update_phase():
+                try:
+                    async with get_async_session() as session:
+                        await session.execute(
+                            update(RDLoopRunORM)
+                            .where(RDLoopRunORM.id == run_id)
+                            .values(phase=phase.value)
+                        )
+                        await session.commit()
+                except Exception:
+                    pass  # Non-critical, continue
 
-        # Create iteration callback
-        def on_iteration_complete(iteration: int, result: dict) -> None:
-            asyncio.create_task(
-                ws_manager.broadcast(WebSocketMessage(
-                    type="rd_loop_progress",
-                    data={
-                        "run_id": run_id,
-                        "iteration": iteration,
-                        "result": result,
-                    },
+                await ws_manager.broadcast(WebSocketMessage(
+                    type="rd_loop_phase",
+                    data={"run_id": run_id, "phase": phase.value},
                 ))
-            )
+
+            asyncio.create_task(update_phase())
+
+        # Create iteration callback with DB update
+        def on_iteration_complete(iteration: int, result: dict) -> None:
+            async def update_iteration():
+                try:
+                    async with get_async_session() as session:
+                        # Get current run
+                        db_result = await session.execute(
+                            select(RDLoopRunORM).where(RDLoopRunORM.id == run_id)
+                        )
+                        db_run = db_result.scalar_one_or_none()
+                        if db_run:
+                            # Update iteration results
+                            iteration_results = db_run.iteration_results or []
+                            iteration_results.append(result)
+                            await session.execute(
+                                update(RDLoopRunORM)
+                                .where(RDLoopRunORM.id == run_id)
+                                .values(
+                                    iteration=iteration,
+                                    total_hypotheses_tested=result.get("total_tested", 0),
+                                    iteration_results=iteration_results,
+                                )
+                            )
+                            await session.commit()
+                except Exception as e:
+                    logger.warning(f"Failed to update iteration in DB: {e}")
+
+                await ws_manager.broadcast(WebSocketMessage(
+                    type="rd_loop_progress",
+                    data={"run_id": run_id, "iteration": iteration, "result": result},
+                ))
+
+            asyncio.create_task(update_iteration())
 
         loop_config.on_phase_change = on_phase_change
         loop_config.on_iteration_complete = on_iteration_complete
@@ -255,32 +287,57 @@ async def _execute_rd_loop(run_id: str, config: RDLoopConfigRequest, data_source
         loop = RDLoop(config=loop_config)
         _rd_loop_instances[run_id] = loop
 
-        # Load data
+        # Update status to running in DB
+        async with get_async_session() as session:
+            await session.execute(
+                update(RDLoopRunORM)
+                .where(RDLoopRunORM.id == run_id)
+                .values(status="running", started_at=datetime.now(timezone.utc))
+            )
+            await session.commit()
+
+        # Load data - prioritize DB, fallback to CSV/synthetic
+        df = None
         if data_source:
             loop.load_data(data_source)
         else:
-            # Use default sample data if available
-            import pandas as pd
-            import numpy as np
+            # Try loading from TimescaleDB first
+            try:
+                async with get_async_session() as session:
+                    provider = DataProvider(session=session)
+                    df = await provider.load_ohlcv(
+                        symbol="ETH/USDT",
+                        timeframe="1d",
+                    )
+                    logger.info(f"RD Loop: Loaded {len(df)} rows from DB")
+            except Exception as e:
+                logger.warning(f"RD Loop: DB data load failed: {e}, using fallback")
+                df = None
 
-            # Generate synthetic OHLCV data for testing
-            np.random.seed(42)
-            n_rows = 1000
-            dates = pd.date_range("2023-01-01", periods=n_rows, freq="1h")
-            close = 100 + np.cumsum(np.random.randn(n_rows) * 0.5)
-            high = close + np.abs(np.random.randn(n_rows) * 0.2)
-            low = close - np.abs(np.random.randn(n_rows) * 0.2)
-            open_price = low + (high - low) * np.random.rand(n_rows)
-            volume = np.random.randint(1000, 10000, n_rows)
+            # Fallback to synthetic data if DB failed
+            if df is None or len(df) < 100:
+                import pandas as pd
+                import numpy as np
 
-            df = pd.DataFrame({
-                "timestamp": dates,
-                "open": open_price,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": volume,
-            })
+                logger.info("RD Loop: Using synthetic data")
+                np.random.seed(42)
+                n_rows = 1000
+                dates = pd.date_range("2023-01-01", periods=n_rows, freq="1h")
+                close = 100 + np.cumsum(np.random.randn(n_rows) * 0.5)
+                high = close + np.abs(np.random.randn(n_rows) * 0.2)
+                low = close - np.abs(np.random.randn(n_rows) * 0.2)
+                open_price = low + (high - low) * np.random.rand(n_rows)
+                volume = np.random.randint(1000, 10000, n_rows)
+
+                df = pd.DataFrame({
+                    "timestamp": dates,
+                    "open": open_price,
+                    "high": high,
+                    "low": low,
+                    "close": close,
+                    "volume": volume,
+                })
+
             loop.load_data(df)
 
         # Prepare focus families
@@ -291,14 +348,34 @@ async def _execute_rd_loop(run_id: str, config: RDLoopConfigRequest, data_source
         # Run loop
         results = loop.run(focus_families=focus_families)
 
-        # Store results
+        # Store results in memory
+        core_factors = loop.get_core_factors()
+        statistics = loop.get_statistics()
+        results_list = [r.to_dict() for r in results]
+
         _rd_loop_results[run_id] = {
             "status": "completed",
-            "results": [r.to_dict() for r in results],
-            "core_factors": loop.get_core_factors(),
-            "statistics": loop.get_statistics(),
+            "results": results_list,
+            "core_factors": core_factors,
+            "statistics": statistics,
             "completed_at": datetime.now(timezone.utc).isoformat(),
         }
+
+        # Persist to DB
+        async with get_async_session() as session:
+            await session.execute(
+                update(RDLoopRunORM)
+                .where(RDLoopRunORM.id == run_id)
+                .values(
+                    status="completed",
+                    completed_at=datetime.now(timezone.utc),
+                    core_factors_count=len(core_factors),
+                    core_factors=[f.get("name", "") for f in core_factors],
+                    statistics=statistics,
+                    iteration_results=results_list,
+                )
+            )
+            await session.commit()
 
         # Broadcast completion
         await ws_manager.broadcast(WebSocketMessage(
@@ -306,7 +383,7 @@ async def _execute_rd_loop(run_id: str, config: RDLoopConfigRequest, data_source
             data={
                 "run_id": run_id,
                 "status": "completed",
-                "core_factors_count": len(loop.state.core_factors),
+                "core_factors_count": len(core_factors),
             },
         ))
 
@@ -318,12 +395,25 @@ async def _execute_rd_loop(run_id: str, config: RDLoopConfigRequest, data_source
             "failed_at": datetime.now(timezone.utc).isoformat(),
         }
 
+        # Persist failure to DB
+        try:
+            async with get_async_session() as session:
+                await session.execute(
+                    update(RDLoopRunORM)
+                    .where(RDLoopRunORM.id == run_id)
+                    .values(
+                        status="failed",
+                        completed_at=datetime.now(timezone.utc),
+                        error_message=str(e),
+                    )
+                )
+                await session.commit()
+        except Exception:
+            pass  # Already handling error
+
         await ws_manager.broadcast(WebSocketMessage(
             type="rd_loop_error",
-            data={
-                "run_id": run_id,
-                "error": str(e),
-            },
+            data={"run_id": run_id, "error": str(e)},
         ))
 
     finally:

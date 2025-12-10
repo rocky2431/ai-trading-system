@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from iqfmp import __version__
 from iqfmp.api.auth.router import router as auth_router
+from iqfmp.api.factors.router import router as factors_router
 
 
 @asynccontextmanager
@@ -41,6 +42,7 @@ def create_app() -> FastAPI:
 
     # Include routers
     app.include_router(auth_router, prefix="/api/v1/auth")
+    app.include_router(factors_router, prefix="/api/v1/factors")
 
     @app.get("/health")
     async def health_check() -> dict[str, str]:

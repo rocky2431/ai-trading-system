@@ -525,9 +525,10 @@
       "priority": "P1",
       "dependencies": ["0"],
       "estimated_days": 1,
-      "status": "pending",
+      "status": "in_progress",
       "type": "architecture",
-      "trace_to": "specs/architecture.md#disaster-recovery"
+      "trace_to": "specs/architecture.md#disaster-recovery",
+      "started_at": "2025-12-11T00:30:00"
     }
   ],
   "metadata": {
@@ -552,8 +553,8 @@
   "stats": {
     "total": 38,
     "completed": 37,
-    "in_progress": 0,
-    "pending": 1,
+    "in_progress": 1,
+    "pending": 0,
     "blocked": 0
   }
 }

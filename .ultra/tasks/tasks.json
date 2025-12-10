@@ -287,9 +287,10 @@
       "priority": "P0",
       "dependencies": ["19"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "in_progress",
       "type": "feature",
-      "trace_to": "specs/product.md#user-story-43-t-003"
+      "trace_to": "specs/product.md#user-story-43-t-003",
+      "started_at": "2025-12-10T13:45:00"
     },
     {
       "id": "21",

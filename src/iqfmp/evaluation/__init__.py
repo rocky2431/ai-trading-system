@@ -58,6 +58,17 @@ from iqfmp.evaluation.factor_evaluator import (
     InvalidFactorError,
     MetricsCalculator,
 )
+from iqfmp.evaluation.factor_selection import (
+    CorrelationAnalyzer,
+    CorrelationMatrix,
+    FactorEntry,
+    FactorLibrary,
+    FactorSelector,
+    HighCorrelationWarning,
+    InvalidSelectionError,
+    SelectionConfig,
+    SelectionResult,
+)
 
 __all__ = [
     # CV Splitter
@@ -107,4 +118,14 @@ __all__ = [
     "FactorReport",
     "InvalidFactorError",
     "MetricsCalculator",
+    # Factor Selection
+    "CorrelationAnalyzer",
+    "CorrelationMatrix",
+    "FactorEntry",
+    "FactorLibrary",
+    "FactorSelector",
+    "HighCorrelationWarning",
+    "InvalidSelectionError",
+    "SelectionConfig",
+    "SelectionResult",
 ]

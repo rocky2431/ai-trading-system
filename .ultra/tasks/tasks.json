@@ -413,9 +413,10 @@
       "priority": "P1",
       "dependencies": ["27", "24"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "in_progress",
       "type": "feature",
-      "trace_to": "specs/architecture.md#dashboard-pages"
+      "trace_to": "specs/architecture.md#dashboard-pages",
+      "started_at": "2025-12-10T20:15:00"
     },
     {
       "id": "30",
@@ -536,8 +537,8 @@
   "stats": {
     "total": 38,
     "completed": 29,
-    "in_progress": 0,
-    "pending": 9,
+    "in_progress": 1,
+    "pending": 8,
     "blocked": 0
   }
 }

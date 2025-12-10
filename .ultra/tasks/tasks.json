@@ -427,9 +427,11 @@
       "priority": "P1",
       "dependencies": ["27", "25"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "completed",
       "type": "feature",
-      "trace_to": "specs/architecture.md#dashboard-pages"
+      "trace_to": "specs/architecture.md#dashboard-pages",
+      "started_at": "2025-12-10T20:50:00",
+      "completed_at": "2025-12-10T21:20:00"
     },
     {
       "id": "31",
@@ -439,9 +441,11 @@
       "priority": "P1",
       "dependencies": ["27", "22"],
       "estimated_days": 3,
-      "status": "pending",
+      "status": "completed",
       "type": "feature",
-      "trace_to": "specs/architecture.md#dashboard-pages"
+      "trace_to": "specs/architecture.md#dashboard-pages",
+      "started_at": "2025-12-10T21:25:00",
+      "completed_at": "2025-12-10T21:55:00"
     },
     {
       "id": "32",
@@ -451,9 +455,11 @@
       "priority": "P1",
       "dependencies": ["0"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "completed",
       "type": "architecture",
-      "trace_to": "specs/architecture.md#message-queue-stack"
+      "trace_to": "specs/architecture.md#message-queue-stack",
+      "started_at": "2025-12-10T22:00:00",
+      "completed_at": "2025-12-10T22:25:00"
     },
     {
       "id": "33",
@@ -463,9 +469,11 @@
       "priority": "P1",
       "dependencies": ["0"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "completed",
       "type": "feature",
-      "trace_to": "specs/product.md#user-story-factor-dedup"
+      "trace_to": "specs/product.md#user-story-factor-dedup",
+      "started_at": "2025-12-10T22:30:00",
+      "completed_at": "2025-12-10T22:55:00"
     },
     {
       "id": "34",
@@ -475,9 +483,10 @@
       "priority": "P1",
       "dependencies": ["0"],
       "estimated_days": 2,
-      "status": "pending",
+      "status": "in_progress",
       "type": "architecture",
-      "trace_to": "specs/architecture.md#monitoring-alerting"
+      "trace_to": "specs/architecture.md#monitoring-alerting",
+      "started_at": "2025-12-10T23:00:00"
     },
     {
       "id": "35",
@@ -537,9 +546,9 @@
   },
   "stats": {
     "total": 38,
-    "completed": 30,
-    "in_progress": 0,
-    "pending": 8,
+    "completed": 34,
+    "in_progress": 1,
+    "pending": 3,
     "blocked": 0
   }
 }

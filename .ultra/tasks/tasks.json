@@ -399,10 +399,11 @@
       "priority": "P1",
       "dependencies": ["27", "24"],
       "estimated_days": 2,
-      "status": "in_progress",
+      "status": "completed",
       "type": "feature",
       "trace_to": "specs/product.md#user-story-51",
-      "started_at": "2025-12-10T19:35:00"
+      "started_at": "2025-12-10T19:35:00",
+      "completed_at": "2025-12-10T20:10:00"
     },
     {
       "id": "29",
@@ -534,8 +535,8 @@
   },
   "stats": {
     "total": 38,
-    "completed": 28,
-    "in_progress": 1,
+    "completed": 29,
+    "in_progress": 0,
     "pending": 9,
     "blocked": 0
   }

@@ -189,9 +189,10 @@
       "priority": "P0",
       "dependencies": ["10", "11", "12"],
       "estimated_days": 3,
-      "status": "pending",
+      "status": "in_progress",
       "type": "feature",
-      "trace_to": "specs/architecture.md#factor-evaluation-engine"
+      "trace_to": "specs/architecture.md#factor-evaluation-engine",
+      "started_at": "2025-12-10T08:00:00"
     },
     {
       "id": "14",

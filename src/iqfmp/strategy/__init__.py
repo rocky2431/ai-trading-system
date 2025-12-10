@@ -5,8 +5,23 @@ Provides tools for strategy generation and management:
 - Strategy validation
 - Weighting schemes
 - Position management
+- Backtesting
 """
 
+from iqfmp.strategy.backtest import (
+    BacktestConfig,
+    BacktestEngine,
+    BacktestError,
+    BacktestReport,
+    BacktestResult,
+    InsufficientDataError,
+    PerformanceCalculator,
+    PerformanceMetrics,
+    ReportConfig,
+    Trade,
+    TradeStatus,
+    TradeType,
+)
 from iqfmp.strategy.generator import (
     GeneratedStrategy,
     InvalidStrategyError,
@@ -41,6 +56,19 @@ from iqfmp.strategy.position import (
 )
 
 __all__ = [
+    # Backtest
+    "BacktestConfig",
+    "BacktestEngine",
+    "BacktestError",
+    "BacktestReport",
+    "BacktestResult",
+    "InsufficientDataError",
+    "PerformanceCalculator",
+    "PerformanceMetrics",
+    "ReportConfig",
+    "Trade",
+    "TradeStatus",
+    "TradeType",
     # Generator
     "GeneratedStrategy",
     "InvalidStrategyError",

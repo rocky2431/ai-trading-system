@@ -672,28 +672,38 @@ function DataConfigSection() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Database className="h-5 w-5" />
-          Data Configuration
+          默认数据配置
         </CardTitle>
         <CardDescription>
-          Configure data source and frequency settings
+          系统默认数据源和监控列表，创建任务时可单独覆盖
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
+        {/* Info Box */}
+        <div className="p-4 bg-blue-500/10 rounded-lg text-sm">
+          <p className="font-medium text-blue-600 mb-2">说明</p>
+          <ul className="list-disc list-inside space-y-1 text-muted-foreground">
+            <li>这些是系统<strong>默认配置</strong>，适用于所有新建任务</li>
+            <li>创建 Factor Mining 任务时，可以选择使用默认值或自定义</li>
+            <li>交易对列表用于全局监控和快速选择</li>
+          </ul>
+        </div>
+
         {/* Current Config */}
         <div className="p-4 bg-muted rounded-lg">
-          <h4 className="font-medium mb-2">Current Configuration</h4>
+          <h4 className="font-medium mb-2">当前默认配置</h4>
           <div className="grid grid-cols-3 gap-4 text-sm">
             <div>
-              <span className="text-muted-foreground">Frequency:</span>{' '}
+              <span className="text-muted-foreground">默认频率:</span>{' '}
               {config?.data_frequency || 'Not set'}
             </div>
             <div>
-              <span className="text-muted-foreground">Source:</span>{' '}
+              <span className="text-muted-foreground">默认数据源:</span>{' '}
               {config?.data_source || 'Not set'}
             </div>
             <div>
-              <span className="text-muted-foreground">Symbols:</span>{' '}
-              {config?.symbols.length || 0} configured
+              <span className="text-muted-foreground">监控交易对:</span>{' '}
+              {config?.symbols.length || 0} 个
             </div>
           </div>
           {config?.symbols && config.symbols.length > 0 && (
@@ -711,15 +721,15 @@ function DataConfigSection() {
         {/* Settings */}
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <Label>Data Frequency</Label>
+            <Label>默认数据频率</Label>
             <Select
-              options={[{ value: '', label: 'Select frequency...' }, ...frequencyOptions]}
+              options={[{ value: '', label: '选择频率...' }, ...frequencyOptions]}
               value={frequency || config?.data_frequency || ''}
               onChange={(e) => setFrequency(e.target.value)}
             />
           </div>
           <div className="space-y-2">
-            <Label>Data Source</Label>
+            <Label>默认数据源</Label>
             <Select
               options={sourceOptions}
               value={dataSource || config?.data_source || ''}
@@ -729,17 +739,20 @@ function DataConfigSection() {
         </div>
 
         <div className="space-y-2">
-          <Label>Symbols (comma-separated)</Label>
+          <Label>默认监控交易对 (逗号分隔)</Label>
           <Input
             placeholder="BTC/USDT, ETH/USDT, SOL/USDT..."
             value={symbolsInput || config?.symbols.join(', ') || ''}
             onChange={(e) => setSymbolsInput(e.target.value)}
           />
+          <p className="text-xs text-muted-foreground">
+            这些交易对会在 Data Center 监控，并作为新任务的默认选项
+          </p>
         </div>
 
         <Button onClick={handleSave} disabled={saving}>
           {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          Save Configuration
+          保存默认配置
         </Button>
       </CardContent>
     </Card>
@@ -754,21 +767,22 @@ function FactorMiningConfigSection() {
   const { keys, saveKeys } = useAPIKeys()
 
   const [selectedEmbedding, setSelectedEmbedding] = useState('')
-  const [localConfig, setLocalConfig] = useState<{
-    min_ic: number
-    min_ir: number
-    min_sharpe: number
-    max_turnover: number
-    cv_folds: number
-    max_concurrent: number
-  } | null>(null)
+  const [maxConcurrent, setMaxConcurrent] = useState(10)
+  const [codeTimeout, setCodeTimeout] = useState(30)
 
-  // 初始化 embedding model
+  // 初始化 embedding model 和系统配置
   useEffect(() => {
     if (keys?.embedding_model && !selectedEmbedding) {
       setSelectedEmbedding(keys.embedding_model)
     }
   }, [keys, selectedEmbedding])
+
+  useEffect(() => {
+    if (config) {
+      setMaxConcurrent(config.max_concurrent_generation || 10)
+      setCodeTimeout(config.code_execution_timeout || 30)
+    }
+  }, [config])
 
   const embeddingOptions = models?.embedding_models?.openrouter?.map(m => ({
     value: m.id,
@@ -780,45 +794,15 @@ function FactorMiningConfigSection() {
     await saveKeys({ embedding_model: selectedEmbedding })
   }
 
-  const handleSave = async () => {
-    if (!localConfig) return
+  const handleSaveSystem = async () => {
     await saveConfig({
-      evaluation: {
-        min_ic: localConfig.min_ic,
-        min_ir: localConfig.min_ir,
-        min_sharpe: localConfig.min_sharpe,
-        max_turnover: localConfig.max_turnover,
-        cv_folds: localConfig.cv_folds,
-        train_ratio: config?.evaluation.train_ratio || 0.6,
-        valid_ratio: config?.evaluation.valid_ratio || 0.2,
-        test_ratio: config?.evaluation.test_ratio || 0.2,
-        use_dynamic_threshold: config?.evaluation.use_dynamic_threshold || true,
-        deflation_rate: config?.evaluation.deflation_rate || 0.1,
-      },
-      max_concurrent_generation: localConfig.max_concurrent,
+      max_concurrent_generation: maxConcurrent,
+      code_execution_timeout: codeTimeout,
     })
   }
 
-  const handleFamilyToggle = async (familyId: string, enabled: boolean) => {
-    if (!config) return
-    const updatedFamilies = config.factor_families.map(f =>
-      f.id === familyId ? { ...f, enabled } : f
-    )
-    await saveConfig({ factor_families: updatedFamilies })
-  }
-
   if (loading) {
-    return <LoadingCard title="Factor Mining Configuration" />
-  }
-
-  const evaluation = config?.evaluation
-  const currentConfig = localConfig || {
-    min_ic: evaluation?.min_ic || 0.02,
-    min_ir: evaluation?.min_ir || 0.5,
-    min_sharpe: evaluation?.min_sharpe || 1.0,
-    max_turnover: evaluation?.max_turnover || 0.5,
-    cv_folds: evaluation?.cv_folds || 5,
-    max_concurrent: config?.max_concurrent_generation || 10,
+    return <LoadingCard title="Factor Mining 系统配置" />
   }
 
   return (
@@ -826,13 +810,22 @@ function FactorMiningConfigSection() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <TrendingUp className="h-5 w-5" />
-          Factor Mining Configuration
+          Factor Mining 系统配置
         </CardTitle>
         <CardDescription>
-          Configure factor families and evaluation thresholds
+          全局系统配置，任务级配置（因子家族、评估阈值等）在创建任务时设置
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
+        {/* Info Box */}
+        <div className="p-4 bg-blue-500/10 rounded-lg text-sm">
+          <p className="font-medium text-blue-600 mb-2">配置说明</p>
+          <ul className="list-disc list-inside space-y-1 text-muted-foreground">
+            <li><strong>系统配置</strong>（本页面）：Embedding 模型、并发数、超时时间</li>
+            <li><strong>任务配置</strong>（创建任务时）：因子家族、评估阈值、时间范围、数据集划分</li>
+          </ul>
+        </div>
+
         {/* Embedding Model Selection */}
         <div className="p-4 bg-muted rounded-lg">
           <h4 className="font-medium mb-3">Embedding Model (向量化模型)</h4>
@@ -859,118 +852,48 @@ function FactorMiningConfigSection() {
           )}
         </div>
 
-        {/* Factor Families */}
-        <div>
-          <h4 className="font-medium mb-3">Factor Families</h4>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            {config?.factor_families.map((family) => (
-              <div
-                key={family.id}
-                className="flex items-center justify-between p-3 border rounded-lg"
-              >
-                <div>
-                  <p className="font-medium text-sm">{family.name}</p>
-                  <p className="text-xs text-muted-foreground">{family.description}</p>
-                </div>
-                <Switch
-                  checked={family.enabled}
-                  onCheckedChange={(checked) => handleFamilyToggle(family.id, checked)}
-                  disabled={saving}
-                />
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Evaluation Thresholds */}
-        <div>
-          <h4 className="font-medium mb-3">Evaluation Thresholds</h4>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+        {/* System Settings */}
+        <div className="p-4 bg-muted rounded-lg">
+          <h4 className="font-medium mb-3">系统运行配置</h4>
+          <div className="grid grid-cols-2 gap-6">
             <div className="space-y-2">
               <div className="flex justify-between">
-                <Label>Min IC</Label>
-                <span className="text-sm text-muted-foreground">{currentConfig.min_ic}</span>
+                <Label>最大并发生成数</Label>
+                <span className="text-sm font-medium">{maxConcurrent}</span>
               </div>
               <Slider
-                value={currentConfig.min_ic}
-                onValueChange={(v) => setLocalConfig({ ...currentConfig, min_ic: v })}
-                min={0}
-                max={0.1}
-                step={0.005}
-              />
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <Label>Min IR</Label>
-                <span className="text-sm text-muted-foreground">{currentConfig.min_ir}</span>
-              </div>
-              <Slider
-                value={currentConfig.min_ir}
-                onValueChange={(v) => setLocalConfig({ ...currentConfig, min_ir: v })}
-                min={0}
-                max={2}
-                step={0.1}
-              />
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <Label>Min Sharpe</Label>
-                <span className="text-sm text-muted-foreground">{currentConfig.min_sharpe}</span>
-              </div>
-              <Slider
-                value={currentConfig.min_sharpe}
-                onValueChange={(v) => setLocalConfig({ ...currentConfig, min_sharpe: v })}
-                min={0}
-                max={3}
-                step={0.1}
-              />
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <Label>Max Turnover</Label>
-                <span className="text-sm text-muted-foreground">{currentConfig.max_turnover}</span>
-              </div>
-              <Slider
-                value={currentConfig.max_turnover}
-                onValueChange={(v) => setLocalConfig({ ...currentConfig, max_turnover: v })}
-                min={0}
-                max={1}
-                step={0.05}
-              />
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <Label>CV Folds</Label>
-                <span className="text-sm text-muted-foreground">{currentConfig.cv_folds}</span>
-              </div>
-              <Slider
-                value={currentConfig.cv_folds}
-                onValueChange={(v) => setLocalConfig({ ...currentConfig, cv_folds: v })}
-                min={3}
-                max={10}
-                step={1}
-              />
-            </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <Label>Max Concurrent</Label>
-                <span className="text-sm text-muted-foreground">{currentConfig.max_concurrent}</span>
-              </div>
-              <Slider
-                value={currentConfig.max_concurrent}
-                onValueChange={(v) => setLocalConfig({ ...currentConfig, max_concurrent: v })}
+                value={maxConcurrent}
+                onValueChange={(v) => setMaxConcurrent(v)}
                 min={1}
                 max={20}
                 step={1}
               />
+              <p className="text-xs text-muted-foreground">
+                同时生成因子的最大数量，影响系统负载
+              </p>
+            </div>
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>代码执行超时 (秒)</Label>
+                <span className="text-sm font-medium">{codeTimeout}s</span>
+              </div>
+              <Slider
+                value={codeTimeout}
+                onValueChange={(v) => setCodeTimeout(v)}
+                min={10}
+                max={120}
+                step={5}
+              />
+              <p className="text-xs text-muted-foreground">
+                单个因子代码执行的最大时间
+              </p>
             </div>
           </div>
+          <Button onClick={handleSaveSystem} disabled={saving} className="mt-4">
+            {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            保存系统配置
+          </Button>
         </div>
-
-        <Button onClick={handleSave} disabled={saving}>
-          {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          Save Evaluation Settings
-        </Button>
       </CardContent>
     </Card>
   )

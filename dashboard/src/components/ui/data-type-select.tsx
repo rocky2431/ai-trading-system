@@ -42,12 +42,12 @@ export function DataTypeSelect({
             key={option.id}
             onClick={() => toggleOption(option.id, isSupported)}
             className={cn(
-              "flex items-start gap-3 p-3 rounded-lg border transition-colors bg-white dark:bg-zinc-900",
+              "flex items-start gap-3 p-3 rounded-lg border transition-colors bg-card",
               isSupported
-                ? "cursor-pointer hover:bg-gray-50 dark:hover:bg-zinc-800"
+                ? "cursor-pointer hover:bg-muted"
                 : "cursor-not-allowed opacity-60",
               isSelected && isSupported
-                ? "border-primary bg-primary/5 dark:bg-primary/10"
+                ? "border-primary bg-primary/5"
                 : "border-input"
             )}
           >
@@ -57,7 +57,7 @@ export function DataTypeSelect({
                 isSelected && isSupported
                   ? "border-primary bg-primary text-primary-foreground"
                   : "border-input",
-                !isSupported && "bg-gray-100 dark:bg-gray-800"
+                !isSupported && "bg-muted"
               )}
             >
               {isSelected && isSupported && <Check className="h-3 w-3" />}
@@ -74,7 +74,7 @@ export function DataTypeSelect({
                   </span>
                 )}
                 {!isSupported && (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
                     Coming Soon
                   </span>
                 )}

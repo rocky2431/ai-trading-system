@@ -62,7 +62,7 @@ export function DialogContent({
   return (
     <div
       className={cn(
-        'relative bg-background rounded-lg border shadow-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto',
+        'relative bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 shadow-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto',
         className
       )}
       onClick={(e) => e.stopPropagation()}

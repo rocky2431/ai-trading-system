@@ -66,9 +66,9 @@ function StatusBadge({ status }: { status: MiningTaskStatus['status'] }) {
 
 function ProgressBar({ value, className = '' }: { value: number; className?: string }) {
   return (
-    <div className={`h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden ${className}`}>
+    <div className={`h-2 bg-muted rounded-full overflow-hidden ${className}`}>
       <div
-        className="h-full bg-blue-500 dark:bg-blue-400 transition-all duration-300"
+        className="h-full bg-primary transition-all duration-300"
         style={{ width: `${Math.min(value, 100)}%` }}
       />
     </div>
@@ -646,7 +646,7 @@ export function FactorMiningPage() {
                     >
                       <span
                         className={`w-2 h-2 rounded-full mr-2 ${
-                          selectedFamilies.includes(family.value) ? 'bg-white' : family.color
+                          selectedFamilies.includes(family.value) ? 'bg-primary-foreground' : family.color
                         }`}
                       />
                       {family.label}
@@ -706,7 +706,7 @@ export function FactorMiningPage() {
 
               {/* Advanced Configuration Panel */}
               {showAdvanced && (
-                <div className="space-y-6 border rounded-lg p-4 bg-gray-50 dark:bg-gray-900/50">
+                <div className="space-y-6 border rounded-lg p-4 bg-muted/50">
                   {/* Data Config */}
                   <div className="space-y-4">
                     <h4 className="font-medium flex items-center gap-2">
@@ -963,7 +963,7 @@ export function FactorMiningPage() {
                       </div>
                     </div>
                     {robustnessConfig.enableWalkForward && (
-                      <div className="grid grid-cols-3 gap-4 bg-white dark:bg-gray-800 p-3 rounded">
+                      <div className="grid grid-cols-3 gap-4 bg-card p-3 rounded">
                         <div className="space-y-2">
                           <Label>Windows: {robustnessConfig.walkForwardWindows}</Label>
                           <Slider

@@ -666,6 +666,35 @@ async def stop_rd_loop(run_id: str) -> dict:
     return {"message": "Stop requested", "run_id": run_id}
 
 
+@router.get("/rdloop/state")
+async def get_current_rd_loop_state() -> dict:
+    """Get current RD Loop state (for monitoring dashboard).
+
+    Returns state of any running RD Loop, or idle status if none running.
+    """
+    # Check for any running loop
+    for run_id, loop in _rd_loop_instances.items():
+        state = loop.state
+        return {
+            "run_id": run_id,
+            "is_running": True,
+            "phase": state.phase.value,
+            "iteration": state.iteration,
+            "total_hypotheses_tested": state.total_hypotheses_tested,
+            "core_factors_count": len(state.core_factors),
+        }
+
+    # No running loop - return idle state
+    return {
+        "run_id": None,
+        "is_running": False,
+        "phase": "idle",
+        "iteration": 0,
+        "total_hypotheses_tested": 0,
+        "core_factors_count": 0,
+    }
+
+
 @router.get("/rd-loop/runs")
 async def list_rd_loop_runs(
     session: AsyncSession = Depends(get_db),

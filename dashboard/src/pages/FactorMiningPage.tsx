@@ -504,12 +504,12 @@ export function FactorMiningPage() {
               <div className="border rounded-lg p-4 space-y-4 bg-muted/30">
                 <h4 className="font-medium flex items-center gap-2">
                   <Database className="h-4 w-4 text-blue-500" />
-                  数据选择 *
+                  Data Selection *
                 </h4>
 
                 {/* Market Type */}
                 <div className="space-y-2">
-                  <Label>市场类型</Label>
+                  <Label>Market Type</Label>
                   <div className="flex gap-2">
                     <Button
                       type="button"
@@ -520,7 +520,7 @@ export function FactorMiningPage() {
                         setSelectedSymbols([])
                       }}
                     >
-                      现货 (Spot)
+                      Spot
                     </Button>
                     <Button
                       type="button"
@@ -531,14 +531,14 @@ export function FactorMiningPage() {
                         setSelectedSymbols([])
                       }}
                     >
-                      合约 (Futures)
+                      Futures
                     </Button>
                   </div>
                 </div>
 
                 {/* Timeframe */}
                 <div className="space-y-2">
-                  <Label>时间级别</Label>
+                  <Label>Timeframe</Label>
                   <div className="flex gap-2">
                     {['1m', '5m', '15m', '1h', '4h', '1d'].map(tf => (
                       <Button
@@ -560,21 +560,21 @@ export function FactorMiningPage() {
                 {/* Symbol Selection */}
                 <div className="space-y-2">
                   <div className="flex justify-between items-center">
-                    <Label>选择交易对</Label>
+                    <Label>Select Symbols</Label>
                     <span className="text-xs text-muted-foreground">
-                      已选择 {selectedSymbols.length} 个
+                      {selectedSymbols.length} selected
                     </span>
                   </div>
 
                   {rangesLoading ? (
                     <div className="flex items-center justify-center p-4">
                       <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                      加载可用数据...
+                      Loading available data...
                     </div>
                   ) : availableSymbols.length === 0 ? (
                     <div className="p-4 bg-amber-500/10 rounded text-sm text-amber-600">
-                      没有找到 {selectedMarketType === 'spot' ? '现货' : '合约'} {selectedTimeframe} 数据。
-                      请先在 Data Center 下载数据。
+                      No {selectedMarketType === 'spot' ? 'spot' : 'futures'} {selectedTimeframe} data found.
+                      Please download data in Data Center first.
                     </div>
                   ) : (
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-48 overflow-y-auto p-2 border rounded">
@@ -607,7 +607,7 @@ export function FactorMiningPage() {
                         size="sm"
                         onClick={() => setSelectedSymbols(availableSymbols.map(s => s.symbol))}
                       >
-                        全选
+                        Select All
                       </Button>
                       <Button
                         type="button"
@@ -615,7 +615,7 @@ export function FactorMiningPage() {
                         size="sm"
                         onClick={() => setSelectedSymbols([])}
                       >
-                        清空
+                        Clear
                       </Button>
                     </div>
                   )}
@@ -624,7 +624,7 @@ export function FactorMiningPage() {
                 {/* Valid Date Range Info */}
                 {selectedSymbols.length > 0 && validDateRange.start && validDateRange.end && (
                   <div className="p-3 bg-green-500/10 rounded text-sm">
-                    <span className="text-green-600 font-medium">可用数据范围：</span>
+                    <span className="text-green-600 font-medium">Available data range:</span>
                     <span className="ml-2">
                       {validDateRange.start.slice(0, 10)} ~ {validDateRange.end.slice(0, 10)}
                     </span>
@@ -727,7 +727,7 @@ export function FactorMiningPage() {
                           className={!isValidDate(dataConfig.startDate) ? 'border-red-500' : ''}
                         />
                         {!isValidDate(dataConfig.startDate) && (
-                          <p className="text-xs text-red-500">格式: YYYY-MM-DD</p>
+                          <p className="text-xs text-red-500">Format: YYYY-MM-DD</p>
                         )}
                       </div>
                       <div className="space-y-2">
@@ -743,7 +743,7 @@ export function FactorMiningPage() {
                           className={!isValidDate(dataConfig.endDate) ? 'border-red-500' : ''}
                         />
                         {!isValidDate(dataConfig.endDate) && (
-                          <p className="text-xs text-red-500">格式: YYYY-MM-DD</p>
+                          <p className="text-xs text-red-500">Format: YYYY-MM-DD</p>
                         )}
                       </div>
                     </div>
@@ -752,7 +752,7 @@ export function FactorMiningPage() {
                         <Label>Train / Valid / Test Split</Label>
                         {!isSplitValid && (
                           <span className="text-xs text-red-500">
-                            总和需为 100%（当前: {splitTotal}%）
+                            Must equal 100% (current: {splitTotal}%)
                           </span>
                         )}
                       </div>

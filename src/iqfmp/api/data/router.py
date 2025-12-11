@@ -20,6 +20,8 @@ from iqfmp.api.data.schemas import (
     OHLCVDataResponse,
     DataRangeResponse,
     DataOptionsResponse,
+    BinanceSymbolListResponse,
+    ExtendedDataOptionsResponse,
 )
 from iqfmp.api.data.service import DataService
 
@@ -107,6 +109,8 @@ async def start_download(
         exchange=request.exchange,
         start_date=request.start_date,
         end_date=request.end_date,
+        data_type=request.data_type,
+        market_type=request.market_type,
     )
 
 
@@ -177,3 +181,36 @@ async def get_data_ranges(
 ) -> DataRangeResponse:
     """Get data availability ranges."""
     return await service.get_data_ranges(symbol=symbol, timeframe=timeframe)
+
+
+# ============== Binance Exchange Info ==============
+
+@router.get("/binance/symbols", response_model=BinanceSymbolListResponse)
+async def get_binance_symbols(
+    quote_asset: str = Query("USDT", description="Quote asset (USDT, BTC, etc.)"),
+    limit: int = Query(200, ge=1, le=500, description="Max symbols to return"),
+    search: Optional[str] = Query(None, description="Search by base asset name"),
+    service: DataService = Depends(get_data_service),
+) -> BinanceSymbolListResponse:
+    """Get top trading pairs from Binance by 24h volume.
+
+    Returns top tokens excluding stablecoins, sorted by trading volume.
+    Supports search filtering by base asset name.
+    """
+    return await service.get_binance_symbols(
+        quote_asset=quote_asset,
+        limit=limit,
+        search=search,
+    )
+
+
+@router.get("/options/extended", response_model=ExtendedDataOptionsResponse)
+async def get_extended_options(
+    service: DataService = Depends(get_data_service),
+) -> ExtendedDataOptionsResponse:
+    """Get extended data options including supported data types.
+
+    Returns exchanges, timeframes, and all supported data types
+    (OHLCV, trades, funding rate, etc.)
+    """
+    return service.get_extended_options()

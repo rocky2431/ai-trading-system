@@ -16,8 +16,8 @@ export function useConfigStatus() {
     try {
       setLoading(true)
       setError(null)
-      const response = await configApi.getStatus()
-      setStatus(response.data)
+      const data = await configApi.getStatus()
+      setStatus(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch config status')
     } finally {
@@ -43,8 +43,8 @@ export function useAvailableModels() {
     try {
       setLoading(true)
       setError(null)
-      const response = await configApi.getModels()
-      setModels(response.data)
+      const data = await configApi.getModels()
+      setModels(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch models')
     } finally {
@@ -66,13 +66,14 @@ export function useAPIKeys() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   const fetchKeys = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
-      const response = await configApi.getAPIKeys()
-      setKeys(response.data)
+      const data = await configApi.getAPIKeys()
+      setKeys(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch API keys')
     } finally {
@@ -84,11 +85,11 @@ export function useAPIKeys() {
     try {
       setSaving(true)
       setError(null)
-      const response = await configApi.setAPIKeys(data)
-      if (response.data.success) {
+      const result = await configApi.setAPIKeys(data)
+      if (result.success) {
         await fetchKeys()
       }
-      return response.data
+      return result
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save API keys'
       setError(message)
@@ -98,11 +99,29 @@ export function useAPIKeys() {
     }
   }, [fetchKeys])
 
+  const deleteKeys = useCallback(async (keyType: 'llm' | 'exchange') => {
+    try {
+      setDeleting(true)
+      setError(null)
+      const result = await configApi.deleteAPIKeys(keyType)
+      if (result.success) {
+        await fetchKeys()
+      }
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Failed to delete API keys'
+      setError(message)
+      return { success: false, message }
+    } finally {
+      setDeleting(false)
+    }
+  }, [fetchKeys])
+
   useEffect(() => {
     fetchKeys()
   }, [fetchKeys])
 
-  return { keys, loading, error, saving, saveKeys, refetch: fetchKeys }
+  return { keys, loading, error, saving, deleting, saveKeys, deleteKeys, refetch: fetchKeys }
 }
 
 // ============== Test Connections ==============
@@ -117,12 +136,12 @@ export function useTestConnections() {
     try {
       setTestingLLM(true)
       setLLMResult(null)
-      const response = await configApi.testLLM()
+      const result = await configApi.testLLM()
       setLLMResult({
-        success: response.data.success,
-        message: response.data.message
+        success: result.success,
+        message: result.message
       })
-      return response.data
+      return result
     } catch (err) {
       const result = {
         success: false,
@@ -139,12 +158,12 @@ export function useTestConnections() {
     try {
       setTestingExchange(true)
       setExchangeResult(null)
-      const response = await configApi.testExchange()
+      const result = await configApi.testExchange()
       setExchangeResult({
-        success: response.data.success,
-        message: response.data.message
+        success: result.success,
+        message: result.message
       })
-      return response.data
+      return result
     } catch (err) {
       const result = {
         success: false,
@@ -172,8 +191,8 @@ export function useAgentConfig() {
     try {
       setLoading(true)
       setError(null)
-      const response = await configApi.getAgentConfig()
-      setConfig(response.data)
+      const data = await configApi.getAgentConfig()
+      setConfig(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch agent config')
     } finally {
@@ -185,11 +204,11 @@ export function useAgentConfig() {
     try {
       setSaving(true)
       setError(null)
-      const response = await configApi.setAgentConfig(data)
-      if (response.data.success) {
+      const result = await configApi.setAgentConfig(data)
+      if (result.success) {
         await fetchConfig()
       }
-      return response.data
+      return result
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save agent config'
       setError(message)
@@ -218,8 +237,8 @@ export function useDataConfig() {
     try {
       setLoading(true)
       setError(null)
-      const response = await configApi.getDataConfig()
-      setConfig(response.data)
+      const data = await configApi.getDataConfig()
+      setConfig(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch data config')
     } finally {
@@ -231,11 +250,11 @@ export function useDataConfig() {
     try {
       setSaving(true)
       setError(null)
-      const response = await configApi.setDataConfig(data)
-      if (response.data.success) {
+      const result = await configApi.setDataConfig(data)
+      if (result.success) {
         await fetchConfig()
       }
-      return response.data
+      return result
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save data config'
       setError(message)
@@ -264,8 +283,8 @@ export function useFactorMiningConfig() {
     try {
       setLoading(true)
       setError(null)
-      const response = await configApi.getFactorMiningConfig()
-      setConfig(response.data)
+      const data = await configApi.getFactorMiningConfig()
+      setConfig(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch factor mining config')
     } finally {
@@ -277,11 +296,11 @@ export function useFactorMiningConfig() {
     try {
       setSaving(true)
       setError(null)
-      const response = await configApi.setFactorMiningConfig(data)
-      if (response.data.success) {
+      const result = await configApi.setFactorMiningConfig(data)
+      if (result.success) {
         await fetchConfig()
       }
-      return response.data
+      return result
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save factor mining config'
       setError(message)
@@ -310,8 +329,8 @@ export function useRiskControlConfig() {
     try {
       setLoading(true)
       setError(null)
-      const response = await configApi.getRiskControlConfig()
-      setConfig(response.data)
+      const data = await configApi.getRiskControlConfig()
+      setConfig(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch risk control config')
     } finally {
@@ -323,11 +342,11 @@ export function useRiskControlConfig() {
     try {
       setSaving(true)
       setError(null)
-      const response = await configApi.setRiskControlConfig(data)
-      if (response.data.success) {
+      const result = await configApi.setRiskControlConfig(data)
+      if (result.success) {
         await fetchConfig()
       }
-      return response.data
+      return result
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to save risk control config'
       setError(message)

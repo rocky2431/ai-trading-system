@@ -48,7 +48,10 @@ _rd_loop_results: dict[str, dict[str, Any]] = {}
 
 
 @router.post("/run", response_model=PipelineRunResponse, status_code=status.HTTP_201_CREATED)
-async def run_pipeline(request: PipelineRunRequest) -> PipelineRunResponse:
+async def run_pipeline(
+    request: PipelineRunRequest,
+    session: AsyncSession = Depends(get_db),
+) -> PipelineRunResponse:
     """Start a new pipeline run.
 
     Args:
@@ -58,14 +61,18 @@ async def run_pipeline(request: PipelineRunRequest) -> PipelineRunResponse:
         Pipeline run response with run_id
     """
     service = get_pipeline_service()
-    return service.create_run(
+    return await service.create_run_async(
         pipeline_type=request.pipeline_type,
         config=request.config,
+        session=session,
     )
 
 
 @router.get("/{run_id}/status", response_model=PipelineStatusResponse)
-async def get_pipeline_status(run_id: str) -> PipelineStatusResponse:
+async def get_pipeline_status(
+    run_id: str,
+    session: AsyncSession = Depends(get_db),
+) -> PipelineStatusResponse:
     """Get pipeline run status.
 
     Args:
@@ -78,7 +85,7 @@ async def get_pipeline_status(run_id: str) -> PipelineStatusResponse:
         HTTPException: If run not found
     """
     service = get_pipeline_service()
-    status_resp = service.get_run_status(run_id)
+    status_resp = await service.get_run_status_async(run_id, session)
 
     if not status_resp:
         raise HTTPException(
@@ -94,6 +101,7 @@ async def list_pipeline_runs(
     status_filter: Optional[PipelineStatus] = Query(
         default=None, alias="status", description="Filter by status"
     ),
+    session: AsyncSession = Depends(get_db),
 ) -> PipelineListResponse:
     """List pipeline runs.
 
@@ -104,7 +112,7 @@ async def list_pipeline_runs(
         List of pipeline runs
     """
     service = get_pipeline_service()
-    runs = service.list_runs(status=status_filter)
+    runs = await service.list_runs_async(status=status_filter, session=session)
 
     return PipelineListResponse(
         runs=runs,

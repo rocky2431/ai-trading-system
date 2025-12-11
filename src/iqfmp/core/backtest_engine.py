@@ -137,6 +137,7 @@ class BacktestEngine:
         symbol: str = "ETH/USDT",
         timeframe: str = "1d",
         use_db: bool = True,
+        df: Optional[pd.DataFrame] = None,
     ):
         """Initialize backtest engine.
 
@@ -146,13 +147,14 @@ class BacktestEngine:
             symbol: Trading pair for DB loading
             timeframe: Data timeframe for DB loading
             use_db: Whether to try loading from DB first
+            df: Optional preloaded OHLCV data (skip loading if provided)
         """
         self.data_path = data_path or get_default_data_path()
         self.costs = trading_costs or TradingCosts()
         self.symbol = symbol
         self.timeframe = timeframe
         self.use_db = use_db
-        self._df: Optional[pd.DataFrame] = None
+        self._df: Optional[pd.DataFrame] = df
 
     def load_data(self) -> pd.DataFrame:
         """Load market data from DB (primary) or CSV (fallback)."""
@@ -202,6 +204,7 @@ class BacktestEngine:
     def run_factor_backtest(
         self,
         factor_code: str,
+        factor_values: Optional[pd.Series] = None,
         initial_capital: float = 100000.0,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
@@ -236,13 +239,14 @@ class BacktestEngine:
 
         df = df.reset_index(drop=True)
 
-        # Compute factor values
-        engine = FactorEngine(df=df)
-        try:
-            factor_values = engine.compute_factor(factor_code, "signal")
-        except Exception as e:
-            logger.error(f"Factor computation failed: {e}")
-            raise ValueError(f"Factor computation failed: {e}")
+        # Compute factor values if not precomputed
+        if factor_values is None:
+            engine = FactorEngine(df=df)
+            try:
+                factor_values = engine.compute_factor(factor_code, "signal")
+            except Exception as e:
+                logger.error(f"Factor computation failed: {e}")
+                raise ValueError(f"Factor computation failed: {e}")
 
         # Generate trading signals
         # Long when factor > 0, short when factor < 0

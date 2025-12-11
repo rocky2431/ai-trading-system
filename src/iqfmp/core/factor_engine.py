@@ -30,6 +30,16 @@ except ImportError:
     D = None
     DataHandlerLP = None
 
+# Qlib Ops module for native expression evaluation
+try:
+    from qlib.data.ops import (
+        Ref, Mean, Std, Sum, Max, Min, Delta, Rank, Abs, Log, Sign,
+        Corr, Cov, WMA, EMA
+    )
+    QLIB_OPS_AVAILABLE = True
+except ImportError:
+    QLIB_OPS_AVAILABLE = False
+
 # Crypto extension (P2.2: custom implementation for crypto markets)
 try:
     from iqfmp.core.qlib_crypto import CryptoDataHandler, CryptoField
@@ -67,6 +77,8 @@ class QlibFactorEngine:
         data_handler: Optional[DataHandlerLP] = None,
         df: Optional[pd.DataFrame] = None,
         use_crypto_handler: bool = True,
+        symbol: str = "ETHUSDT",
+        timeframe: str = "1d",
     ):
         """Initialize Qlib factor engine.
 
@@ -76,6 +88,8 @@ class QlibFactorEngine:
             data_handler: Pre-configured Qlib DataHandler
             df: Pre-loaded DataFrame (will be converted to Qlib format)
             use_crypto_handler: Use CryptoDataHandler for crypto-specific fields
+            symbol: Default symbol to load when df is not provided
+            timeframe: Default timeframe to load when df is not provided
         """
         self._qlib_initialized = False
         self._provider_uri = provider_uri
@@ -85,6 +99,8 @@ class QlibFactorEngine:
         self._qlib_data: Optional[pd.DataFrame] = None
         self._use_crypto = use_crypto_handler and CRYPTO_AVAILABLE
         self._crypto_handler: Optional[CryptoDataHandler] = None
+        self._default_symbol = symbol
+        self._default_timeframe = timeframe
 
         # Try to initialize Qlib globally
         if QLIB_AVAILABLE and not is_qlib_initialized():
@@ -102,6 +118,12 @@ class QlibFactorEngine:
             # Also initialize CryptoDataHandler if available
             if self._use_crypto:
                 self._init_crypto_handler()
+        else:
+            # Attempt to load data from TimescaleDB (fallback to CSV)
+            try:
+                self.load_data_sync(symbol=self._default_symbol, timeframe=self._default_timeframe)
+            except Exception as e:
+                logger.warning(f"FactorEngine default data load failed: {e}")
 
     def init_qlib(
         self,
@@ -152,14 +174,18 @@ class QlibFactorEngine:
             logger.warning(f"Failed to initialize CryptoDataHandler: {e}")
             self._crypto_handler = None
 
-    def load_data(self, path: Path) -> None:
-        """Load OHLCV data from CSV file.
+    def load_data(self, data: Union[Path, pd.DataFrame]) -> None:
+        """Load OHLCV data from CSV file or DataFrame.
 
         Args:
-            path: Path to CSV file with OHLCV data
+            data: Path to CSV file or DataFrame with OHLCV data
         """
-        logger.info(f"Loading data from {path}")
-        self._df = pd.read_csv(path)
+        if isinstance(data, pd.DataFrame):
+            logger.info(f"Loading data from DataFrame ({len(data)} rows)")
+            self._df = data.copy()
+        else:
+            logger.info(f"Loading data from {data}")
+            self._df = pd.read_csv(data)
         self._prepare_data()
         if self._use_crypto:
             self._init_crypto_handler()
@@ -223,6 +249,24 @@ class QlibFactorEngine:
         """Get loaded data."""
         return self._df
 
+    def get_qlib_status(self) -> dict:
+        """Get Qlib integration status for debugging.
+
+        Returns:
+            Dictionary with Qlib integration information
+        """
+        return {
+            "qlib_available": QLIB_AVAILABLE,
+            "qlib_ops_available": QLIB_OPS_AVAILABLE,
+            "qlib_initialized": self._qlib_initialized,
+            "crypto_handler_available": CRYPTO_AVAILABLE,
+            "crypto_handler_initialized": self._crypto_handler is not None,
+            "data_loaded": self._df is not None,
+            "data_rows": len(self._df) if self._df is not None else 0,
+            "qlib_data_prepared": self._qlib_data is not None,
+            "available_indicators": list(self._get_crypto_precomputed_fields()) if CRYPTO_AVAILABLE else [],
+        }
+
     def compute_factor(
         self,
         expression: str,
@@ -268,14 +312,82 @@ class QlibFactorEngine:
         """Compute Qlib expression on local data.
 
         This method parses Qlib expression syntax and computes on the local DataFrame.
-        Supports common Qlib operators without requiring Qlib data storage.
+        Uses Qlib's native Ops module when available, falls back to local implementation.
         """
         df = self._qlib_data
 
-        # Tokenize and compute expression
-        result = self._evaluate_expression(expression, df)
+        # Try using CryptoDataHandler pre-computed indicators first
+        if self._crypto_handler and expression in self._get_crypto_precomputed_fields():
+            return self._get_crypto_indicator(expression)
 
+        # Try Qlib native ops if available (for simple expressions)
+        if QLIB_OPS_AVAILABLE and self._qlib_initialized:
+            try:
+                result = self._compute_with_qlib_ops(expression, df)
+                if result is not None:
+                    logger.debug(f"Computed '{expression}' using Qlib native Ops")
+                    return result
+            except Exception as e:
+                logger.debug(f"Qlib Ops failed for '{expression}': {e}, falling back to local parser")
+
+        # Fall back to local implementation (always works)
+        result = self._evaluate_expression(expression, df)
         return result
+
+    def _get_crypto_precomputed_fields(self) -> set[str]:
+        """Get set of pre-computed crypto indicator field names."""
+        return {
+            "RSI($close, 14)", "RSI_14", "$rsi_14",
+            "MACD($close, 12, 26, 9)", "MACD_HIST", "$macd_hist",
+            "$macd", "$macd_signal",
+            "$bb_upper", "$bb_lower", "$atr_14",
+            "$vwap", "$typical", "$dollar_volume",
+        }
+
+    def _get_crypto_indicator(self, expression: str) -> pd.Series:
+        """Get pre-computed indicator from CryptoDataHandler."""
+        if not self._crypto_handler or self._crypto_handler.data is None:
+            raise ValueError("CryptoDataHandler not initialized")
+
+        df = self._crypto_handler.data
+
+        # Map common expressions to CryptoDataHandler fields
+        field_map = {
+            "RSI($close, 14)": "$rsi_14",
+            "RSI_14": "$rsi_14",
+            "$rsi_14": "$rsi_14",
+            "MACD($close, 12, 26, 9)": "$macd_hist",
+            "MACD_HIST": "$macd_hist",
+            "$macd_hist": "$macd_hist",
+            "$macd": "$macd",
+            "$macd_signal": "$macd_signal",
+            "$bb_upper": "$bb_upper",
+            "$bb_lower": "$bb_lower",
+            "$atr_14": "$atr_14",
+            "$vwap": "$vwap",
+            "$typical": "$typical",
+            "$dollar_volume": "$dollar_volume",
+        }
+
+        field = field_map.get(expression, expression)
+        if field in df.columns:
+            return df[field]
+
+        raise ValueError(f"Pre-computed indicator not found: {expression}")
+
+    def _compute_with_qlib_ops(self, expression: str, df: pd.DataFrame) -> Optional[pd.Series]:
+        """Try to compute expression using Qlib's native Ops module.
+
+        Note: This requires Qlib to be properly initialized and only works
+        for expressions that can be parsed by Qlib's expression parser.
+        """
+        # For now, we use the local implementation as it's more reliable
+        # for arbitrary DataFrame data (not stored in Qlib format).
+        # Qlib's native Ops require specific data provider setup.
+        #
+        # This method is a placeholder for future Qlib integration when
+        # data is stored in Qlib format.
+        return None
 
     def _evaluate_expression(self, expr: str, df: pd.DataFrame) -> pd.Series:
         """Recursively evaluate Qlib expression.
@@ -344,6 +456,15 @@ class QlibFactorEngine:
         # Handle parentheses
         if expr.startswith("(") and expr.endswith(")"):
             return self._evaluate_expression(expr[1:-1], df)
+
+        # Handle column names (case-insensitive)
+        expr_lower = expr.lower()
+        if expr_lower in df.columns:
+            return df[expr_lower]
+
+        # Also check original column names (for mixed case DataFrames)
+        if expr in df.columns:
+            return df[expr]
 
         raise ValueError(f"Cannot parse expression: {expr}")
 

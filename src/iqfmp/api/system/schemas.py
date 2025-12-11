@@ -1,7 +1,7 @@
 """System API schemas."""
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -85,6 +85,18 @@ class ResourceMetricsResponse(BaseModel):
     disk: DiskMetrics
 
 
+class DatabaseStatsResponse(BaseModel):
+    """Database statistics response schema."""
+
+    total_factors: int = 0
+    total_backtests: int = 0
+    total_research_trials: int = 0
+    total_pipeline_runs: int = 0
+    total_ohlcv_records: int = 0
+    ohlcv_symbols: list[str] = Field(default_factory=list)
+    ohlcv_date_range: Optional[str] = None
+
+
 class SystemStatusResponse(BaseModel):
     """System status response schema."""
 
@@ -92,5 +104,65 @@ class SystemStatusResponse(BaseModel):
     task_queue: list[TaskQueueItemResponse]
     llm_metrics: LLMMetricsResponse
     resources: ResourceMetricsResponse
+    database_stats: Optional[DatabaseStatsResponse] = None
     system_health: SystemHealthType
     uptime: int  # seconds
+
+
+# ============== Agent Config Schemas ==============
+
+
+class AgentConfigResponse(BaseModel):
+    """Agent configuration response schema."""
+
+    id: str
+    agent_type: AgentType
+    name: str
+    description: Optional[str] = None
+    system_prompt: Optional[str] = None
+    user_prompt_template: Optional[str] = None
+    examples: Optional[str] = None
+    config: Optional[dict[str, Any]] = None
+    is_enabled: bool = True
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+class AgentConfigListResponse(BaseModel):
+    """Agent configuration list response schema."""
+
+    configs: list[AgentConfigResponse]
+    total: int
+
+
+class AgentConfigUpdateRequest(BaseModel):
+    """Request to update agent configuration."""
+
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=1000)
+    system_prompt: Optional[str] = Field(None, max_length=10000)
+    user_prompt_template: Optional[str] = Field(None, max_length=10000)
+    examples: Optional[str] = Field(None, max_length=20000)
+    config: Optional[dict[str, Any]] = None
+    is_enabled: Optional[bool] = None
+
+
+class AgentConfigCreateRequest(BaseModel):
+    """Request to create agent configuration (for initialization)."""
+
+    agent_type: AgentType
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(None, max_length=1000)
+    system_prompt: Optional[str] = Field(None, max_length=10000)
+    user_prompt_template: Optional[str] = Field(None, max_length=10000)
+    examples: Optional[str] = Field(None, max_length=20000)
+    config: Optional[dict[str, Any]] = None
+    is_enabled: bool = True
+
+
+class AgentConfigOperationResponse(BaseModel):
+    """Response for agent config operations."""
+
+    success: bool
+    message: str
+    config: Optional[AgentConfigResponse] = None

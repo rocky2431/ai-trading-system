@@ -8,6 +8,7 @@ This module provides real-time system status from:
 
 import os
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone, timedelta
 from functools import lru_cache
@@ -18,8 +19,13 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from iqfmp.api.system.schemas import (
+    AgentConfigListResponse,
+    AgentConfigOperationResponse,
+    AgentConfigResponse,
+    AgentConfigUpdateRequest,
     AgentResponse,
     CPUMetrics,
+    DatabaseStatsResponse,
     DiskMetrics,
     LLMMetricsResponse,
     MemoryMetrics,
@@ -27,7 +33,16 @@ from iqfmp.api.system.schemas import (
     SystemStatusResponse,
     TaskQueueItemResponse,
 )
-from iqfmp.db.models import MiningTaskORM, PipelineRunORM, RDLoopRunORM
+from iqfmp.db.models import (
+    AgentConfigORM,
+    MiningTaskORM,
+    PipelineRunORM,
+    RDLoopRunORM,
+    FactorORM,
+    BacktestResultORM,
+    ResearchTrialORM,
+    OHLCVDataORM,
+)
 from iqfmp.llm.provider import LLMConfig
 
 
@@ -402,18 +417,407 @@ class SystemService:
         """Get system uptime in seconds."""
         return int(time.time() - self._start_time)
 
+    async def get_database_stats(self) -> Optional[DatabaseStatsResponse]:
+        """Get database statistics from TimescaleDB.
+
+        Queries real counts from:
+        - FactorORM: Total factors
+        - BacktestResultORM: Total backtest results
+        - ResearchTrialORM: Total research trials
+        - PipelineRunORM: Total pipeline runs
+        - OHLCVDataORM: Total OHLCV records and symbols
+        """
+        if not self._session:
+            return None
+
+        try:
+            # Count factors
+            result = await self._session.execute(
+                select(func.count()).select_from(FactorORM)
+            )
+            total_factors = result.scalar() or 0
+
+            # Count backtest results
+            result = await self._session.execute(
+                select(func.count()).select_from(BacktestResultORM)
+            )
+            total_backtests = result.scalar() or 0
+
+            # Count research trials
+            result = await self._session.execute(
+                select(func.count()).select_from(ResearchTrialORM)
+            )
+            total_research_trials = result.scalar() or 0
+
+            # Count pipeline runs
+            result = await self._session.execute(
+                select(func.count()).select_from(PipelineRunORM)
+            )
+            total_pipeline_runs = result.scalar() or 0
+
+            # Count OHLCV records and get unique symbols
+            result = await self._session.execute(
+                select(func.count()).select_from(OHLCVDataORM)
+            )
+            total_ohlcv_records = result.scalar() or 0
+
+            # Get unique symbols
+            result = await self._session.execute(
+                select(OHLCVDataORM.symbol).distinct()
+            )
+            ohlcv_symbols = [row[0] for row in result.fetchall()]
+
+            # Get OHLCV date range
+            ohlcv_date_range = None
+            if total_ohlcv_records > 0:
+                result = await self._session.execute(
+                    select(
+                        func.min(OHLCVDataORM.timestamp),
+                        func.max(OHLCVDataORM.timestamp)
+                    )
+                )
+                row = result.fetchone()
+                if row and row[0] and row[1]:
+                    ohlcv_date_range = f"{row[0].date()} to {row[1].date()}"
+
+            return DatabaseStatsResponse(
+                total_factors=total_factors,
+                total_backtests=total_backtests,
+                total_research_trials=total_research_trials,
+                total_pipeline_runs=total_pipeline_runs,
+                total_ohlcv_records=total_ohlcv_records,
+                ohlcv_symbols=ohlcv_symbols,
+                ohlcv_date_range=ohlcv_date_range,
+            )
+
+        except Exception as e:
+            print(f"Warning: Failed to query database stats: {e}")
+            return None
+
     async def get_status(self) -> SystemStatusResponse:
         """Get complete system status."""
         agents = await self.get_agents()
         task_queue = await self.get_task_queue()
+        database_stats = await self.get_database_stats()
 
         return SystemStatusResponse(
             agents=agents,
             task_queue=task_queue,
             llm_metrics=self.get_llm_metrics(),
             resources=self.get_resource_metrics(),
+            database_stats=database_stats,
             system_health=self.get_system_health(),  # type: ignore
             uptime=self.get_uptime(),
         )
+
+    # =========================================================================
+    # Agent Config Methods
+    # =========================================================================
+
+    async def get_agent_configs(self) -> AgentConfigListResponse:
+        """Get all agent configurations."""
+        if not self._session:
+            return AgentConfigListResponse(configs=[], total=0)
+
+        try:
+            result = await self._session.execute(
+                select(AgentConfigORM).order_by(AgentConfigORM.agent_type)
+            )
+            configs = result.scalars().all()
+
+            config_responses = [
+                AgentConfigResponse(
+                    id=cfg.id,
+                    agent_type=cfg.agent_type,  # type: ignore
+                    name=cfg.name,
+                    description=cfg.description,
+                    system_prompt=cfg.system_prompt,
+                    user_prompt_template=cfg.user_prompt_template,
+                    examples=cfg.examples,
+                    config=cfg.config,
+                    is_enabled=cfg.is_enabled,
+                    created_at=cfg.created_at,
+                    updated_at=cfg.updated_at,
+                )
+                for cfg in configs
+            ]
+
+            return AgentConfigListResponse(
+                configs=config_responses,
+                total=len(config_responses),
+            )
+
+        except Exception as e:
+            print(f"Warning: Failed to query agent configs: {e}")
+            return AgentConfigListResponse(configs=[], total=0)
+
+    async def get_agent_config(
+        self, agent_type: str
+    ) -> Optional[AgentConfigResponse]:
+        """Get agent configuration by type."""
+        if not self._session:
+            return None
+
+        try:
+            result = await self._session.execute(
+                select(AgentConfigORM).where(AgentConfigORM.agent_type == agent_type)
+            )
+            cfg = result.scalar_one_or_none()
+
+            if not cfg:
+                return None
+
+            return AgentConfigResponse(
+                id=cfg.id,
+                agent_type=cfg.agent_type,  # type: ignore
+                name=cfg.name,
+                description=cfg.description,
+                system_prompt=cfg.system_prompt,
+                user_prompt_template=cfg.user_prompt_template,
+                examples=cfg.examples,
+                config=cfg.config,
+                is_enabled=cfg.is_enabled,
+                created_at=cfg.created_at,
+                updated_at=cfg.updated_at,
+            )
+
+        except Exception as e:
+            print(f"Warning: Failed to query agent config: {e}")
+            return None
+
+    async def update_agent_config(
+        self, agent_type: str, request: AgentConfigUpdateRequest
+    ) -> AgentConfigOperationResponse:
+        """Update agent configuration."""
+        if not self._session:
+            return AgentConfigOperationResponse(
+                success=False,
+                message="Database session not available",
+            )
+
+        try:
+            result = await self._session.execute(
+                select(AgentConfigORM).where(AgentConfigORM.agent_type == agent_type)
+            )
+            cfg = result.scalar_one_or_none()
+
+            if not cfg:
+                return AgentConfigOperationResponse(
+                    success=False,
+                    message=f"Agent config for type '{agent_type}' not found",
+                )
+
+            # Update only provided fields
+            if request.name is not None:
+                cfg.name = request.name
+            if request.description is not None:
+                cfg.description = request.description
+            if request.system_prompt is not None:
+                cfg.system_prompt = request.system_prompt
+            if request.user_prompt_template is not None:
+                cfg.user_prompt_template = request.user_prompt_template
+            if request.examples is not None:
+                cfg.examples = request.examples
+            if request.config is not None:
+                cfg.config = request.config
+            if request.is_enabled is not None:
+                cfg.is_enabled = request.is_enabled
+
+            cfg.updated_at = datetime.now(timezone.utc)
+
+            await self._session.commit()
+            await self._session.refresh(cfg)
+
+            return AgentConfigOperationResponse(
+                success=True,
+                message=f"Agent config for '{agent_type}' updated successfully",
+                config=AgentConfigResponse(
+                    id=cfg.id,
+                    agent_type=cfg.agent_type,  # type: ignore
+                    name=cfg.name,
+                    description=cfg.description,
+                    system_prompt=cfg.system_prompt,
+                    user_prompt_template=cfg.user_prompt_template,
+                    examples=cfg.examples,
+                    config=cfg.config,
+                    is_enabled=cfg.is_enabled,
+                    created_at=cfg.created_at,
+                    updated_at=cfg.updated_at,
+                ),
+            )
+
+        except Exception as e:
+            await self._session.rollback()
+            return AgentConfigOperationResponse(
+                success=False,
+                message=f"Failed to update agent config: {str(e)}",
+            )
+
+    async def init_default_agent_configs(self) -> AgentConfigOperationResponse:
+        """Initialize default agent configurations if they don't exist."""
+        if not self._session:
+            return AgentConfigOperationResponse(
+                success=False,
+                message="Database session not available",
+            )
+
+        # Default configurations for each agent type
+        default_configs = [
+            {
+                "agent_type": "factor_generation",
+                "name": "Factor Generator",
+                "description": "AI agent for generating quantitative factors using LLM",
+                "system_prompt": """You are a quantitative factor generation expert.
+Your task is to generate valid Python code for calculating quantitative factors.
+
+Rules:
+1. Use only allowed libraries: numpy, pandas, talib
+2. Factor code must be a function that takes a DataFrame with OHLCV columns
+3. Return a pandas Series with the factor values
+4. Include proper error handling
+5. Document the factor's logic and expected behavior""",
+                "user_prompt_template": """Generate a quantitative factor based on the following description:
+
+{description}
+
+Target task: {target_task}
+Factor family: {family}
+
+Requirements:
+- Function name should be descriptive
+- Include docstring explaining the factor
+- Handle edge cases (NaN, insufficient data)
+- Return a pandas Series""",
+                "examples": """Example factor code:
+
+def momentum_factor(df: pd.DataFrame, window: int = 20) -> pd.Series:
+    \"\"\"Calculate price momentum over a window period.
+
+    Args:
+        df: DataFrame with 'close' column
+        window: Lookback window for momentum calculation
+
+    Returns:
+        Series of momentum values (current price / past price - 1)
+    \"\"\"
+    if len(df) < window:
+        return pd.Series(index=df.index, dtype=float)
+
+    return df['close'].pct_change(window)""",
+                "config": {
+                    "security_check_enabled": True,
+                    "field_constraint_enabled": True,
+                    "max_code_length": 5000,
+                    "allowed_imports": ["numpy", "pandas", "talib"],
+                },
+            },
+            {
+                "agent_type": "evaluation",
+                "name": "Factor Evaluator",
+                "description": "AI agent for evaluating and analyzing factor performance",
+                "system_prompt": """You are a quantitative factor evaluation expert.
+Your task is to analyze factor performance metrics and provide insights.""",
+                "user_prompt_template": """Evaluate the following factor:
+
+Factor: {factor_name}
+Metrics:
+- IC Mean: {ic_mean}
+- IC Std: {ic_std}
+- IR: {ir}
+- Sharpe: {sharpe}
+
+Provide analysis and recommendations.""",
+                "examples": None,
+                "config": {
+                    "ic_threshold": 0.02,
+                    "sharpe_threshold": 0.5,
+                    "max_drawdown_threshold": 0.2,
+                },
+            },
+            {
+                "agent_type": "strategy",
+                "name": "Strategy Builder",
+                "description": "AI agent for building trading strategies from factors",
+                "system_prompt": """You are a quantitative strategy building expert.
+Your task is to combine factors into trading strategies.""",
+                "user_prompt_template": """Build a trading strategy using the following factors:
+
+{factors}
+
+Constraints:
+- Maximum position size: {max_position}
+- Risk budget: {risk_budget}
+- Target return: {target_return}""",
+                "examples": None,
+                "config": {
+                    "max_factors_per_strategy": 10,
+                    "position_sizing_method": "equal_weight",
+                },
+            },
+            {
+                "agent_type": "backtest",
+                "name": "Backtester",
+                "description": "AI agent for backtesting trading strategies",
+                "system_prompt": """You are a quantitative backtesting expert.
+Your task is to run and analyze backtests for trading strategies.""",
+                "user_prompt_template": """Backtest the following strategy:
+
+Strategy: {strategy_name}
+Period: {start_date} to {end_date}
+Initial capital: {initial_capital}
+
+Parameters:
+{parameters}""",
+                "examples": None,
+                "config": {
+                    "default_initial_capital": 1000000,
+                    "commission_rate": 0.001,
+                    "slippage_rate": 0.0005,
+                },
+            },
+        ]
+
+        try:
+            created_count = 0
+            for cfg_data in default_configs:
+                # Check if config already exists
+                result = await self._session.execute(
+                    select(AgentConfigORM).where(
+                        AgentConfigORM.agent_type == cfg_data["agent_type"]
+                    )
+                )
+                existing = result.scalar_one_or_none()
+
+                if existing:
+                    continue  # Skip if already exists
+
+                # Create new config
+                new_config = AgentConfigORM(
+                    id=str(uuid.uuid4()),
+                    agent_type=cfg_data["agent_type"],
+                    name=cfg_data["name"],
+                    description=cfg_data["description"],
+                    system_prompt=cfg_data["system_prompt"],
+                    user_prompt_template=cfg_data["user_prompt_template"],
+                    examples=cfg_data["examples"],
+                    config=cfg_data["config"],
+                    is_enabled=True,
+                )
+                self._session.add(new_config)
+                created_count += 1
+
+            await self._session.commit()
+
+            return AgentConfigOperationResponse(
+                success=True,
+                message=f"Initialized {created_count} default agent configurations",
+            )
+
+        except Exception as e:
+            await self._session.rollback()
+            return AgentConfigOperationResponse(
+                success=False,
+                message=f"Failed to initialize agent configs: {str(e)}",
+            )
 
 

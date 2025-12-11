@@ -71,6 +71,19 @@ async def set_api_keys(
     )
 
 
+@router.delete("/api-keys/{key_type}", response_model=SetAPIKeysResponse)
+async def delete_api_keys(
+    key_type: str,
+    service: ConfigService = Depends(get_config_service),
+) -> SetAPIKeysResponse:
+    """Delete API keys by type.
+
+    Args:
+        key_type: "llm" to delete LLM-related keys, "exchange" for exchange keys
+    """
+    return service.delete_api_keys(key_type)
+
+
 # ============== Test Connections ==============
 
 @router.post("/test-llm", response_model=TestLLMResponse)

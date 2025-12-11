@@ -77,6 +77,43 @@ from iqfmp.evaluation.alpha_benchmark import (
     create_alpha_benchmarker,
     get_available_factors,
 )
+from iqfmp.evaluation.walk_forward_validator import (
+    InsufficientDataError as WFInsufficientDataError,
+    WalkForwardConfig,
+    WalkForwardPipeline,
+    WalkForwardResult,
+    WalkForwardValidator,
+    WindowResult,
+)
+from iqfmp.evaluation.ic_decomposition import (
+    ICDecompositionAnalyzer,
+    ICDecompositionConfig,
+    ICDecompositionResult,
+    QuickICAnalyzer,
+)
+from iqfmp.evaluation.redundancy_detector import (
+    CorrelationHeatmapData,
+    IncrementalRedundancyChecker,
+    InsufficientFactorsError,
+    RedundancyConfig,
+    RedundancyDetector,
+    RedundancyResult,
+    RedundantCluster,
+)
+from iqfmp.evaluation.hyperopt_optimizer import (
+    BaseOptimizer,
+    BayesianOptimizer,
+    create_optimizer,
+    FACTOR_SEARCH_SPACES,
+    GeneticOptimizer,
+    GridSearchOptimizer,
+    InvalidSearchSpaceError,
+    OptimizationResult,
+    OptimizationTimeoutError,
+    RandomSearchOptimizer,
+    SearchSpace,
+    TrialResult,
+)
 
 __all__ = [
     # CV Splitter
@@ -143,4 +180,37 @@ __all__ = [
     "BenchmarkResult",
     "create_alpha_benchmarker",
     "get_available_factors",
+    # Walk-Forward Validator
+    "WFInsufficientDataError",
+    "WalkForwardConfig",
+    "WalkForwardPipeline",
+    "WalkForwardResult",
+    "WalkForwardValidator",
+    "WindowResult",
+    # IC Decomposition
+    "ICDecompositionAnalyzer",
+    "ICDecompositionConfig",
+    "ICDecompositionResult",
+    "QuickICAnalyzer",
+    # Redundancy Detector
+    "CorrelationHeatmapData",
+    "IncrementalRedundancyChecker",
+    "InsufficientFactorsError",
+    "RedundancyConfig",
+    "RedundancyDetector",
+    "RedundancyResult",
+    "RedundantCluster",
+    # Hyperparameter Optimizer
+    "BaseOptimizer",
+    "BayesianOptimizer",
+    "create_optimizer",
+    "FACTOR_SEARCH_SPACES",
+    "GeneticOptimizer",
+    "GridSearchOptimizer",
+    "InvalidSearchSpaceError",
+    "OptimizationResult",
+    "OptimizationTimeoutError",
+    "RandomSearchOptimizer",
+    "SearchSpace",
+    "TrialResult",
 ]

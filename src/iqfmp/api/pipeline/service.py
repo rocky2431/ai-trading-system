@@ -418,7 +418,7 @@ class PipelineService:
         self,
         status: Optional[PipelineStatus] = None,
     ) -> list[PipelineStatusResponse]:
-        """List pipeline runs.
+        """List pipeline runs (memory cache).
 
         Args:
             status: Filter by status
@@ -444,6 +444,39 @@ class PipelineService:
             )
             for r in runs
         ]
+
+    async def list_runs_async(
+        self,
+        status: Optional[PipelineStatus],
+        session: AsyncSession,
+    ) -> list[PipelineStatusResponse]:
+        """List pipeline runs from DB (with memory cache merge)."""
+        result = await session.execute(
+            select(PipelineRunORM).order_by(PipelineRunORM.created_at.desc())
+        )
+        orm_runs = result.scalars().all()
+
+        runs = [
+            PipelineStatusResponse(
+                run_id=orm.id,
+                status=orm.status,
+                progress=orm.progress,
+                current_step=orm.current_step,
+                started_at=orm.started_at,
+                completed_at=orm.completed_at,
+                result=orm.result,
+                error=orm.error_message,
+            )
+            for orm in orm_runs
+            if (not status or orm.status == status)
+        ]
+
+        # Merge in-memory runs not yet persisted
+        mem_runs = self.list_runs(status=status)
+        mem_ids = {r.run_id for r in runs}
+        runs.extend([r for r in mem_runs if r.run_id not in mem_ids])
+
+        return runs
 
 
 # Singleton instance

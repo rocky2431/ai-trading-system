@@ -464,6 +464,8 @@ class DataDownloadTaskORM(Base):
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     timeframe: Mapped[str] = mapped_column(String(10), nullable=False)
     exchange: Mapped[str] = mapped_column(String(20), nullable=False)
+    data_type: Mapped[str] = mapped_column(String(20), nullable=False, default="ohlcv")  # ohlcv, agg_trades, etc.
+    market_type: Mapped[str] = mapped_column(String(10), nullable=False, default="spot")  # spot, futures
 
     # Period
     start_date: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -516,6 +518,62 @@ class SymbolInfoORM(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class AgentConfigORM(Base):
+    """Agent configuration table - stores AI agent settings and prompts."""
+
+    __tablename__ = "agent_configs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    agent_type: Mapped[str] = mapped_column(
+        String(30), nullable=False, unique=True, index=True
+    )  # factor_generation, evaluation, strategy, backtest
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Prompts
+    system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    user_prompt_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    examples: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Configuration (JSON)
+    config: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    # Expected config keys:
+    # - security_check_enabled: bool
+    # - field_constraint_enabled: bool
+    # - max_retries: int
+    # - timeout_seconds: float
+    # - include_examples: bool
+    # - temperature: float
+    # - max_tokens: int
+
+    # Status
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "id": self.id,
+            "agent_type": self.agent_type,
+            "name": self.name,
+            "description": self.description,
+            "system_prompt": self.system_prompt,
+            "user_prompt_template": self.user_prompt_template,
+            "examples": self.examples,
+            "config": self.config or {},
+            "is_enabled": self.is_enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
 
 
 # SQL to create TimescaleDB hypertable (run after creating tables)

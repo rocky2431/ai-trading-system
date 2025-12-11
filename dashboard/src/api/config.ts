@@ -191,6 +191,7 @@ export const configApi = {
   // API Keys
   getAPIKeys: () => api.get<SavedAPIKeysResponse>('/config/api-keys'),
   setAPIKeys: (data: SetAPIKeysRequest) => api.post<SetAPIKeysResponse>('/config/api-keys', data),
+  deleteAPIKeys: (keyType: 'llm' | 'exchange') => api.delete<SetAPIKeysResponse>(`/config/api-keys/${keyType}`),
 
   // Test Connections
   testLLM: () => api.post<TestLLMResponse>('/config/test-llm', {}),

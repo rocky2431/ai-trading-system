@@ -11,22 +11,21 @@ import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import { Label } from '@/components/ui/label'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
-import { useDataStatus, useDataOptions, useSymbols, useDownloads, useDataRanges } from '@/hooks/useData'
+import { useDataStatus, useDownloads, useDataRanges, useBinanceSymbols, useExtendedDataOptions } from '@/hooks/useData'
+import { SymbolSelect } from '@/components/ui/symbol-select'
+import { DataTypeSelect } from '@/components/ui/data-type-select'
 import {
   Database,
-  Plus,
-  Trash2,
   Download,
   RefreshCw,
   CheckCircle,
   XCircle,
   Loader2,
-  Clock,
-  HardDrive,
   BarChart3,
   Calendar,
   X,
   Play,
+  HardDrive,
 } from 'lucide-react'
 
 export function DataCenterPage() {
@@ -47,14 +46,10 @@ export function DataCenterPage() {
       <StatusOverview />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className="grid w-full grid-cols-3">
           <TabsTrigger value="overview">
             <BarChart3 className="h-4 w-4 mr-2" />
             Overview
-          </TabsTrigger>
-          <TabsTrigger value="symbols">
-            <HardDrive className="h-4 w-4 mr-2" />
-            Symbols
           </TabsTrigger>
           <TabsTrigger value="downloads">
             <Download className="h-4 w-4 mr-2" />
@@ -68,10 +63,6 @@ export function DataCenterPage() {
 
         <TabsContent value="overview">
           <DataOverviewSection />
-        </TabsContent>
-
-        <TabsContent value="symbols">
-          <SymbolManagementSection />
         </TabsContent>
 
         <TabsContent value="downloads">
@@ -247,160 +238,52 @@ function DataOverviewSection() {
   )
 }
 
-// ============== Symbol Management Section ==============
-
-function SymbolManagementSection() {
-  const { data, loading, adding, addSymbol, removeSymbol, refetch } = useSymbols()
-  const { options } = useDataOptions()
-
-  const [newSymbol, setNewSymbol] = useState('')
-  const [exchange, setExchange] = useState('binance')
-
-  const handleAdd = async () => {
-    if (!newSymbol.trim()) return
-    const result = await addSymbol({ symbol: newSymbol.trim(), exchange })
-    if (result.success) {
-      setNewSymbol('')
-    }
-  }
-
-  const exchangeOptions = options?.exchanges.map(e => ({ value: e.id, label: e.name })) || [
-    { value: 'binance', label: 'Binance' }
-  ]
-
-  if (loading) {
-    return <LoadingCard title="Symbol Management" />
-  }
-
-  return (
-    <Card>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <div>
-            <CardTitle>Symbol Management</CardTitle>
-            <CardDescription>Add and manage trading symbols</CardDescription>
-          </div>
-          <Button variant="ghost" size="sm" onClick={refetch}>
-            <RefreshCw className="h-4 w-4" />
-          </Button>
-        </div>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        {/* Add Symbol */}
-        <div className="flex gap-4">
-          <div className="flex-1">
-            <Input
-              placeholder="Enter symbol (e.g., BTC/USDT)"
-              value={newSymbol}
-              onChange={(e) => setNewSymbol(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-            />
-          </div>
-          <Select
-            options={exchangeOptions}
-            value={exchange}
-            onChange={(e) => setExchange(e.target.value)}
-            className="w-40"
-          />
-          <Button onClick={handleAdd} disabled={adding || !newSymbol.trim()}>
-            {adding ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-            Add
-          </Button>
-        </div>
-
-        {/* Symbol List */}
-        <div className="border rounded-lg">
-          <div className="grid grid-cols-6 gap-4 p-3 bg-muted font-medium text-sm">
-            <div>Symbol</div>
-            <div>Exchange</div>
-            <div>Timeframes</div>
-            <div>Data Range</div>
-            <div>Rows</div>
-            <div></div>
-          </div>
-          {data?.symbols.length === 0 ? (
-            <div className="p-8 text-center text-muted-foreground">
-              No symbols configured. Add your first symbol above.
-            </div>
-          ) : (
-            data?.symbols.map((symbol) => (
-              <div
-                key={symbol.symbol}
-                className="grid grid-cols-6 gap-4 p-3 border-t items-center"
-              >
-                <div className="font-medium">{symbol.symbol}</div>
-                <div className="text-sm">{symbol.exchange}</div>
-                <div className="flex flex-wrap gap-1">
-                  {symbol.has_1m && <Badge variant="outline">1m</Badge>}
-                  {symbol.has_5m && <Badge variant="outline">5m</Badge>}
-                  {symbol.has_15m && <Badge variant="outline">15m</Badge>}
-                  {symbol.has_1h && <Badge variant="outline">1h</Badge>}
-                  {symbol.has_4h && <Badge variant="outline">4h</Badge>}
-                  {symbol.has_1d && <Badge variant="outline">1d</Badge>}
-                </div>
-                <div className="text-sm text-muted-foreground">
-                  {symbol.data_start && symbol.data_end ? (
-                    <>
-                      {new Date(symbol.data_start).toLocaleDateString()} -{' '}
-                      {new Date(symbol.data_end).toLocaleDateString()}
-                    </>
-                  ) : (
-                    'No data'
-                  )}
-                </div>
-                <div className="text-sm">{symbol.total_rows.toLocaleString()}</div>
-                <div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => removeSymbol(symbol.symbol)}
-                  >
-                    <Trash2 className="h-4 w-4 text-red-500" />
-                  </Button>
-                </div>
-              </div>
-            ))
-          )}
-        </div>
-
-        <p className="text-sm text-muted-foreground">
-          Total: {data?.total || 0} symbols
-        </p>
-      </CardContent>
-    </Card>
-  )
-}
-
 // ============== Download Management Section ==============
 
 function DownloadManagementSection() {
   const { data, loading, starting, startDownload, cancelDownload, refetch } = useDownloads()
-  const { options } = useDataOptions()
-  const { data: symbolsData } = useSymbols()
+  const { options: extendedOptions, loading: optionsLoading } = useExtendedDataOptions()
+  const { data: binanceSymbols, loading: symbolsLoading } = useBinanceSymbols({ limit: 200 })
 
   const [symbol, setSymbol] = useState('')
+  const [marketType, setMarketType] = useState('spot')
   const [timeframe, setTimeframe] = useState('1h')
+  const [dataTypes, setDataTypes] = useState<string[]>(['ohlcv'])
   const [exchange, setExchange] = useState('binance')
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
 
   const handleStart = async () => {
-    if (!symbol || !startDate) return
-    await startDownload({
-      symbol,
-      timeframe,
-      exchange,
-      start_date: startDate,
-      end_date: endDate || undefined,
-    })
+    if (!symbol || !startDate || dataTypes.length === 0) return
+    // Format symbol from BTCUSDT to BTC/USDT
+    const selectedSymbol = binanceSymbols?.symbols.find(s => s.symbol === symbol)
+    const formattedSymbol = selectedSymbol
+      ? `${selectedSymbol.base_asset}/${selectedSymbol.quote_asset}`
+      : symbol
+
+    // Start download for each selected data type
+    for (const dt of dataTypes) {
+      await startDownload({
+        symbol: formattedSymbol,
+        timeframe,
+        exchange,
+        data_type: dt,
+        market_type: marketType,
+        start_date: startDate,
+        end_date: endDate || undefined,
+      })
+    }
   }
 
-  const symbolOptions = [
-    { value: '', label: 'Select symbol...' },
-    ...(symbolsData?.symbols.map(s => ({ value: s.symbol, label: s.symbol })) || [])
+  const marketTypeOptions = extendedOptions?.market_types?.map(m => ({
+    value: m.id,
+    label: m.name
+  })) || [
+    { value: 'spot', label: '现货 (Spot)' },
+    { value: 'futures', label: '合约 (USDT-M Futures)' },
   ]
 
-  const timeframeOptions = options?.timeframes.map(t => ({
+  const timeframeOptions = extendedOptions?.timeframes.map(t => ({
     value: t.id,
     label: t.name
   })) || [
@@ -412,6 +295,12 @@ function DownloadManagementSection() {
     { value: '1d', label: '1 Day' },
   ]
 
+  // Filter data types based on market type
+  const allDataTypes = extendedOptions?.data_types || []
+  const dataTypeOptions = marketType === 'futures'
+    ? allDataTypes  // Futures: show all types
+    : allDataTypes.filter(dt => !dt.requires_futures)  // Spot: hide futures-only types
+
   if (loading) {
     return <LoadingCard title="Download Management" />
   }
@@ -422,7 +311,7 @@ function DownloadManagementSection() {
         <div className="flex items-center justify-between">
           <div>
             <CardTitle>Download Management</CardTitle>
-            <CardDescription>Download historical market data</CardDescription>
+            <CardDescription>Download historical market data from Binance</CardDescription>
           </div>
           <Button variant="ghost" size="sm" onClick={refetch}>
             <RefreshCw className="h-4 w-4" />
@@ -433,13 +322,29 @@ function DownloadManagementSection() {
         {/* New Download Form */}
         <div className="p-4 border rounded-lg space-y-4">
           <h4 className="font-medium">Start New Download</h4>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+
+          {/* Row 1: Market Type, Symbol, Timeframe */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="space-y-2">
-              <Label>Symbol</Label>
+              <Label>Market Type</Label>
               <Select
-                options={symbolOptions}
+                options={marketTypeOptions}
+                value={marketType}
+                onChange={(e) => {
+                  setMarketType(e.target.value)
+                  // Reset data types when switching market type
+                  setDataTypes(['ohlcv'])
+                }}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Symbol (Top 200 by Volume)</Label>
+              <SymbolSelect
+                symbols={binanceSymbols?.symbols || []}
                 value={symbol}
-                onChange={(e) => setSymbol(e.target.value)}
+                onChange={setSymbol}
+                loading={symbolsLoading}
+                placeholder="Search or select symbol..."
               />
             </div>
             <div className="space-y-2">
@@ -458,8 +363,12 @@ function DownloadManagementSection() {
                 onChange={(e) => setStartDate(e.target.value)}
               />
             </div>
+          </div>
+
+          {/* Row 2: End Date */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <div className="space-y-2">
-              <Label>End Date (optional)</Label>
+              <Label>End Date (optional, defaults to now)</Label>
               <Input
                 type="date"
                 value={endDate}
@@ -467,9 +376,24 @@ function DownloadManagementSection() {
               />
             </div>
           </div>
-          <Button onClick={handleStart} disabled={starting || !symbol || !startDate}>
+
+          {/* Row 2: Data Types Multi-select */}
+          <div className="space-y-2">
+            <Label>Data Types (select multiple)</Label>
+            <DataTypeSelect
+              options={dataTypeOptions}
+              value={dataTypes}
+              onChange={setDataTypes}
+              className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+            />
+            {dataTypes.length === 0 && (
+              <p className="text-sm text-orange-500">Please select at least one data type</p>
+            )}
+          </div>
+
+          <Button onClick={handleStart} disabled={starting || !symbol || !startDate || dataTypes.length === 0}>
             {starting ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Play className="h-4 w-4 mr-2" />}
-            Start Download
+            Start Download ({dataTypes.length} data type{dataTypes.length !== 1 ? 's' : ''})
           </Button>
         </div>
 
@@ -487,9 +411,13 @@ function DownloadManagementSection() {
                 className="p-4 border rounded-lg space-y-2"
               >
                 <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <span className="font-medium">{task.symbol}</span>
                     <Badge variant="outline">{task.timeframe}</Badge>
+                    <Badge variant="secondary">{task.data_type || 'ohlcv'}</Badge>
+                    <Badge variant="outline" className="text-xs">
+                      {task.market_type === 'futures' ? '合约' : '现货'}
+                    </Badge>
                     <Badge variant={getStatusVariant(task.status)}>
                       {task.status}
                     </Badge>
@@ -569,9 +497,11 @@ function DataRangesSection() {
             No data available. Download some data first.
           </div>
         ) : (
-          <div className="border rounded-lg">
-            <div className="grid grid-cols-5 gap-4 p-3 bg-muted font-medium text-sm">
+          <div className="border rounded-lg overflow-x-auto">
+            <div className="grid grid-cols-7 gap-4 p-3 bg-muted font-medium text-sm min-w-[800px]">
               <div>Symbol</div>
+              <div>Market</div>
+              <div>Data Type</div>
               <div>Timeframe</div>
               <div>Start Date</div>
               <div>End Date</div>
@@ -579,10 +509,18 @@ function DataRangesSection() {
             </div>
             {data?.ranges.map((range, i) => (
               <div
-                key={`${range.symbol}-${range.timeframe}-${i}`}
-                className="grid grid-cols-5 gap-4 p-3 border-t items-center text-sm"
+                key={`${range.symbol}-${range.timeframe}-${range.market_type}-${i}`}
+                className="grid grid-cols-7 gap-4 p-3 border-t items-center text-sm min-w-[800px]"
               >
                 <div className="font-medium">{range.symbol}</div>
+                <div>
+                  <Badge variant="outline" className="text-xs">
+                    {range.market_type === 'futures' ? '合约' : '现货'}
+                  </Badge>
+                </div>
+                <div>
+                  <Badge variant="secondary">{(range.data_type || 'ohlcv').toUpperCase()}</Badge>
+                </div>
                 <div>
                   <Badge variant="outline">{range.timeframe}</Badge>
                 </div>

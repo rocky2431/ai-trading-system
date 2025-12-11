@@ -1,4 +1,10 @@
-"""Backtest service for strategy management and backtesting."""
+"""Backtest service for strategy management and backtesting.
+
+Integrates with:
+- StrategyRepository for strategy persistence (TimescaleDB)
+- BacktestResultORM for backtest results (TimescaleDB)
+- Redis for real-time backtest progress tracking
+"""
 
 import asyncio
 import json
@@ -7,6 +13,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
+import pandas as pd
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,6 +30,7 @@ from iqfmp.api.backtest.schemas import (
     OptimizationResponse,
     OptimizationResult,
 )
+from iqfmp.db.repositories import StrategyRepository
 
 
 class StrategyNotFoundError(Exception):
@@ -36,7 +44,13 @@ class BacktestNotFoundError(Exception):
 
 
 class BacktestService:
-    """Service for strategy and backtest management."""
+    """Service for strategy and backtest management.
+
+    Uses:
+    - StrategyRepository for strategy persistence (TimescaleDB primary, Redis cache)
+    - Redis for real-time backtest progress tracking
+    - BacktestResultORM for backtest results persistence
+    """
 
     def __init__(
         self,
@@ -46,6 +60,8 @@ class BacktestService:
         """Initialize backtest service."""
         self.session = session
         self.redis_client = redis_client
+        # Use StrategyRepository for strategy persistence (DB + Redis cache)
+        self.strategy_repo = StrategyRepository(session, redis_client)
 
     # ==================== Strategy Methods ====================
 
@@ -61,28 +77,35 @@ class BacktestService:
         long_only: bool,
         max_positions: int,
     ) -> StrategyResponse:
-        """Create a new strategy."""
+        """Create a new strategy and persist to TimescaleDB."""
         strategy_id = str(uuid.uuid4())
-        now = datetime.now()
 
-        strategy_data = {
-            "id": strategy_id,
-            "name": name,
-            "description": description,
-            "factor_ids": factor_ids,
+        # Store strategy config in config field (JSONB)
+        config = {
             "weighting_method": weighting_method,
             "rebalance_frequency": rebalance_frequency,
             "universe": universe,
             "custom_universe": custom_universe,
             "long_only": long_only,
             "max_positions": max_positions,
-            "status": "draft",
-            "created_at": now.isoformat(),
-            "updated_at": now.isoformat(),
         }
 
-        if self.redis_client:
-            await self.redis_client.hset("strategies", strategy_id, json.dumps(strategy_data))
+        # Persist to TimescaleDB via StrategyRepository
+        strategy_data = await self.strategy_repo.create(
+            strategy_id=strategy_id,
+            name=name,
+            description=description,
+            factor_ids=factor_ids,
+            factor_weights={"method": weighting_method},
+            code="",  # Strategy code (optional)
+            config=config,
+            status="draft",
+        )
+        await self.session.commit()
+
+        # Parse datetime from ISO string
+        created_at = datetime.fromisoformat(strategy_data["created_at"]) if strategy_data.get("created_at") else datetime.now()
+        updated_at = datetime.fromisoformat(strategy_data["updated_at"]) if strategy_data.get("updated_at") else datetime.now()
 
         return StrategyResponse(
             id=strategy_id,
@@ -96,8 +119,8 @@ class BacktestService:
             long_only=long_only,
             max_positions=max_positions,
             status="draft",
-            created_at=now,
-            updated_at=now,
+            created_at=created_at,
+            updated_at=updated_at,
         )
 
     async def list_strategies(
@@ -106,67 +129,64 @@ class BacktestService:
         page_size: int = 20,
         status: Optional[str] = None,
     ) -> tuple[list[StrategyResponse], int]:
-        """List strategies with pagination."""
+        """List strategies from TimescaleDB with pagination."""
+        # Query from TimescaleDB via StrategyRepository
+        strategy_dicts, total = await self.strategy_repo.list_strategies(
+            page=page,
+            page_size=page_size,
+            status=status,
+        )
+
         strategies = []
+        for data in strategy_dicts:
+            config = data.get("config") or {}
+            strategies.append(StrategyResponse(
+                id=data["id"],
+                name=data["name"],
+                description=data.get("description", ""),
+                factor_ids=data.get("factor_ids", []),
+                weighting_method=config.get("weighting_method", "equal"),
+                rebalance_frequency=config.get("rebalance_frequency", "daily"),
+                universe=config.get("universe", "all"),
+                custom_universe=config.get("custom_universe", []),
+                long_only=config.get("long_only", False),
+                max_positions=config.get("max_positions", 20),
+                status=data.get("status", "draft"),
+                created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(),
+                updated_at=datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else datetime.now(),
+            ))
 
-        if self.redis_client:
-            all_strategies = await self.redis_client.hgetall("strategies")
-            for data_json in all_strategies.values():
-                data = json.loads(data_json)
-                if status and data["status"] != status:
-                    continue
-                strategies.append(StrategyResponse(
-                    id=data["id"],
-                    name=data["name"],
-                    description=data.get("description", ""),
-                    factor_ids=data.get("factor_ids", []),
-                    weighting_method=data.get("weighting_method", "equal"),
-                    rebalance_frequency=data.get("rebalance_frequency", "daily"),
-                    universe=data.get("universe", "all"),
-                    custom_universe=data.get("custom_universe", []),
-                    long_only=data.get("long_only", False),
-                    max_positions=data.get("max_positions", 20),
-                    status=data["status"],
-                    created_at=datetime.fromisoformat(data["created_at"]),
-                    updated_at=datetime.fromisoformat(data["updated_at"]),
-                ))
-
-        strategies.sort(key=lambda s: s.created_at, reverse=True)
-        total = len(strategies)
-        start = (page - 1) * page_size
-        end = start + page_size
-
-        return strategies[start:end], total
+        return strategies, total
 
     async def get_strategy(self, strategy_id: str) -> Optional[StrategyResponse]:
-        """Get strategy by ID."""
-        if self.redis_client:
-            data_json = await self.redis_client.hget("strategies", strategy_id)
-            if data_json:
-                data = json.loads(data_json)
-                return StrategyResponse(
-                    id=data["id"],
-                    name=data["name"],
-                    description=data.get("description", ""),
-                    factor_ids=data.get("factor_ids", []),
-                    weighting_method=data.get("weighting_method", "equal"),
-                    rebalance_frequency=data.get("rebalance_frequency", "daily"),
-                    universe=data.get("universe", "all"),
-                    custom_universe=data.get("custom_universe", []),
-                    long_only=data.get("long_only", False),
-                    max_positions=data.get("max_positions", 20),
-                    status=data["status"],
-                    created_at=datetime.fromisoformat(data["created_at"]),
-                    updated_at=datetime.fromisoformat(data["updated_at"]),
-                )
-        return None
+        """Get strategy by ID from TimescaleDB (with Redis cache)."""
+        # Query from TimescaleDB via StrategyRepository
+        data = await self.strategy_repo.get_by_id(strategy_id)
+        if data is None:
+            return None
+
+        config = data.get("config") or {}
+        return StrategyResponse(
+            id=data["id"],
+            name=data["name"],
+            description=data.get("description", ""),
+            factor_ids=data.get("factor_ids", []),
+            weighting_method=config.get("weighting_method", "equal"),
+            rebalance_frequency=config.get("rebalance_frequency", "daily"),
+            universe=config.get("universe", "all"),
+            custom_universe=config.get("custom_universe", []),
+            long_only=config.get("long_only", False),
+            max_positions=config.get("max_positions", 20),
+            status=data.get("status", "draft"),
+            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(),
+            updated_at=datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else datetime.now(),
+        )
 
     async def delete_strategy(self, strategy_id: str) -> bool:
-        """Delete a strategy."""
-        if self.redis_client:
-            result = await self.redis_client.hdel("strategies", strategy_id)
-            return result > 0
-        return False
+        """Delete a strategy from TimescaleDB."""
+        result = await self.strategy_repo.delete(strategy_id)
+        await self.session.commit()
+        return result
 
     # ==================== Backtest Methods ====================
 
@@ -223,9 +243,11 @@ class BacktestService:
             backtest_data["started_at"] = datetime.now().isoformat()
             await self._update_backtest(backtest_id, backtest_data)
 
-            # Import real backtest engine
+            # Import real backtest engine and data/factor providers
             from iqfmp.core.backtest_engine import BacktestEngine
-            from iqfmp.core.factor_engine import BUILTIN_FACTORS
+            from iqfmp.core.factor_engine import BUILTIN_FACTORS, FactorEngine
+            from iqfmp.core.data_provider import DataProvider
+            from iqfmp.db.repositories import FactorRepository
 
             config = BacktestConfig(**backtest_data["config"])
 
@@ -233,17 +255,54 @@ class BacktestService:
             backtest_data["progress"] = 10.0
             await self._update_backtest(backtest_id, backtest_data)
 
-            # Get factor code (use default momentum if not available)
-            factor_code = BUILTIN_FACTORS.get("momentum_20d", BUILTIN_FACTORS["rsi_14"])
+            # Resolve factor codes from strategy factors (support multi-factor average)
+            factor_codes: list[str] = []
+            factor_repo = FactorRepository(self.session, self.redis_client)
+            for fid in strategy.factor_ids:
+                f = await factor_repo.get_by_id(fid)
+                if f:
+                    factor_codes.append(f.code)
+
+            # Fallback to builtin if none found
+            if not factor_codes:
+                factor_codes = [BUILTIN_FACTORS.get("momentum_20d", BUILTIN_FACTORS["rsi_14"])]
 
             # Update progress: running backtest
             backtest_data["progress"] = 30.0
             await self._update_backtest(backtest_id, backtest_data)
 
-            # Run real backtest
-            engine = BacktestEngine()
+            # Load market data from DB (fallback to CSV)
+            symbols = config.symbols or ["ETH/USDT"]
+            symbol = symbols[0]
+            timeframe = config.timeframe or "1d"
+            provider = DataProvider(session=self.session)
+            df = await provider.load_ohlcv(symbol=symbol, timeframe=timeframe)
+
+            # Compute factor values with real engine (DB data)
+            factor_engine = FactorEngine(df=df, symbol=symbol.replace("/", ""), timeframe=timeframe)
+            factor_value_series: list[pd.Series] = []
+            for code in factor_codes:
+                try:
+                    factor_value_series.append(factor_engine.compute_factor(code, "signal"))
+                except Exception:
+                    continue
+
+            if not factor_value_series:
+                raise ValueError("No valid factors to backtest")
+
+            # Simple equal-weight combination of multiple factors
+            if len(factor_value_series) == 1:
+                factor_values = factor_value_series[0]
+                factor_code = factor_codes[0]
+            else:
+                factor_values = sum(factor_value_series) / len(factor_value_series)
+                factor_code = "multi_factor_composite"
+
+            # Run real backtest using DB data and computed factor values
+            engine = BacktestEngine(df=df)
             result = engine.run_factor_backtest(
                 factor_code=factor_code,
+                factor_values=factor_values,
                 initial_capital=config.initial_capital,
                 start_date=config.start_date,
                 end_date=config.end_date,
@@ -410,6 +469,15 @@ class BacktestService:
                     completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
                 ))
 
+        # Also get backtests from DB (for completed backtests not in Redis)
+        db_backtests = await self._list_backtests_from_db(strategy_id, status)
+
+        # Merge Redis and DB results (DB results not already in Redis)
+        redis_ids = {b.id for b in backtests}
+        for db_backtest in db_backtests:
+            if db_backtest.id not in redis_ids:
+                backtests.append(db_backtest)
+
         backtests.sort(key=lambda b: b.created_at, reverse=True)
         total = len(backtests)
         start = (page - 1) * page_size
@@ -417,8 +485,80 @@ class BacktestService:
 
         return backtests[start:end], total
 
+    async def _list_backtests_from_db(
+        self,
+        strategy_id: Optional[str] = None,
+        status: Optional[str] = None,
+    ) -> list[BacktestResponse]:
+        """List backtests from TimescaleDB."""
+        backtests = []
+        try:
+            from sqlalchemy import select
+            from iqfmp.db.models import BacktestResultORM
+
+            query = select(BacktestResultORM).order_by(BacktestResultORM.created_at.desc())
+
+            if strategy_id:
+                query = query.where(BacktestResultORM.strategy_id == strategy_id)
+
+            result = await self.session.execute(query.limit(100))
+            db_results = result.scalars().all()
+
+            for db_result in db_results:
+                full_results = db_result.full_results or {}
+
+                metrics = BacktestMetrics(
+                    total_return=db_result.total_return,
+                    annual_return=full_results.get("annual_return", 0.0),
+                    sharpe_ratio=db_result.sharpe_ratio or 0.0,
+                    sortino_ratio=full_results.get("sortino_ratio", 0.0),
+                    max_drawdown=db_result.max_drawdown or 0.0,
+                    max_drawdown_duration=full_results.get("max_drawdown_duration", 0),
+                    win_rate=db_result.win_rate or 0.0,
+                    profit_factor=db_result.profit_factor or 0.0,
+                    calmar_ratio=full_results.get("calmar_ratio", 0.0),
+                    volatility=full_results.get("volatility", 0.0),
+                    beta=0.0,
+                    alpha=0.0,
+                    information_ratio=0.0,
+                    trade_count=db_result.trade_count or 0,
+                    avg_trade_return=full_results.get("avg_trade_return", 0.0),
+                    avg_holding_period=full_results.get("avg_holding_period", 0.0),
+                )
+
+                # Only include completed backtests from DB
+                if status and status != "completed":
+                    continue
+
+                backtests.append(BacktestResponse(
+                    id=db_result.id,
+                    strategy_id=db_result.strategy_id,
+                    strategy_name="",
+                    name=f"Backtest {db_result.id[:8]}",
+                    description="Loaded from database",
+                    config=BacktestConfig(
+                        start_date=db_result.start_date.isoformat() if db_result.start_date else None,
+                        end_date=db_result.end_date.isoformat() if db_result.end_date else None,
+                        initial_capital=100000.0,
+                    ),
+                    status="completed",
+                    progress=100.0,
+                    metrics=metrics,
+                    error_message=None,
+                    created_at=db_result.created_at,
+                    started_at=db_result.created_at,
+                    completed_at=db_result.created_at,
+                ))
+
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to list backtests from DB: {e}")
+
+        return backtests
+
     async def get_backtest(self, backtest_id: str) -> Optional[BacktestResponse]:
-        """Get backtest by ID."""
+        """Get backtest by ID from Redis with DB fallback."""
+        # Try Redis first (for running backtests)
         if self.redis_client:
             data_json = await self.redis_client.hget("backtests", backtest_id)
             if data_json:
@@ -440,6 +580,66 @@ class BacktestService:
                     started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
                     completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
                 )
+
+        # Fallback to database for completed backtests
+        return await self._get_backtest_from_db(backtest_id)
+
+    async def _get_backtest_from_db(self, backtest_id: str) -> Optional[BacktestResponse]:
+        """Get backtest from TimescaleDB."""
+        try:
+            from sqlalchemy import select
+            from iqfmp.db.models import BacktestResultORM
+
+            result = await self.session.execute(
+                select(BacktestResultORM).where(BacktestResultORM.id == backtest_id)
+            )
+            db_result = result.scalar_one_or_none()
+
+            if db_result:
+                full_results = db_result.full_results or {}
+
+                metrics = BacktestMetrics(
+                    total_return=db_result.total_return,
+                    annual_return=full_results.get("annual_return", 0.0),
+                    sharpe_ratio=db_result.sharpe_ratio or 0.0,
+                    sortino_ratio=full_results.get("sortino_ratio", 0.0),
+                    max_drawdown=db_result.max_drawdown or 0.0,
+                    max_drawdown_duration=full_results.get("max_drawdown_duration", 0),
+                    win_rate=db_result.win_rate or 0.0,
+                    profit_factor=db_result.profit_factor or 0.0,
+                    calmar_ratio=full_results.get("calmar_ratio", 0.0),
+                    volatility=full_results.get("volatility", 0.0),
+                    beta=0.0,
+                    alpha=0.0,
+                    information_ratio=0.0,
+                    trade_count=db_result.trade_count or 0,
+                    avg_trade_return=full_results.get("avg_trade_return", 0.0),
+                    avg_holding_period=full_results.get("avg_holding_period", 0.0),
+                )
+
+                return BacktestResponse(
+                    id=db_result.id,
+                    strategy_id=db_result.strategy_id,
+                    strategy_name="",  # Not stored in DB
+                    name=f"Backtest {db_result.id[:8]}",
+                    description="Loaded from database",
+                    config=BacktestConfig(
+                        start_date=db_result.start_date.isoformat() if db_result.start_date else None,
+                        end_date=db_result.end_date.isoformat() if db_result.end_date else None,
+                        initial_capital=100000.0,
+                    ),
+                    status="completed",
+                    progress=100.0,
+                    metrics=metrics,
+                    error_message=None,
+                    created_at=db_result.created_at,
+                    started_at=db_result.created_at,
+                    completed_at=db_result.created_at,
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Failed to get backtest from DB: {e}")
+
         return None
 
     async def get_backtest_detail(self, backtest_id: str) -> Optional[BacktestDetailResponse]:

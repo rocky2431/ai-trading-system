@@ -45,26 +45,35 @@ class CCXTDownloader:
     def __init__(
         self,
         exchange_id: str = "binance",
+        market_type: str = "spot",
         rate_limit_delay: float = 0.5,
     ):
         """Initialize downloader.
 
         Args:
             exchange_id: Exchange identifier (binance, okx, bybit, gate)
+            market_type: Market type (spot or futures)
             rate_limit_delay: Delay between API calls in seconds
         """
         self.exchange_id = exchange_id
+        self.market_type = market_type
         self.rate_limit_delay = rate_limit_delay
         self._exchange: Optional[ccxt.Exchange] = None
 
     async def _get_exchange(self) -> ccxt.Exchange:
         """Get or create exchange instance."""
         if self._exchange is None:
-            exchange_class = getattr(ccxt, self.exchange_id)
+            # Use binanceusdm for USDT-M futures
+            if self.exchange_id == "binance" and self.market_type == "futures":
+                exchange_class = getattr(ccxt, "binanceusdm")
+            else:
+                exchange_class = getattr(ccxt, self.exchange_id)
+
+            default_type = "future" if self.market_type == "futures" else "spot"
             self._exchange = exchange_class({
                 "enableRateLimit": True,
                 "options": {
-                    "defaultType": "spot",
+                    "defaultType": default_type,
                 }
             })
         return self._exchange
@@ -177,12 +186,13 @@ class CCXTDownloader:
                 for bar in ohlcv:
                     timestamp = datetime.fromtimestamp(bar[0] / 1000, tz=timezone.utc)
 
-                    # Check if exists
+                    # Check if exists (include market_type to allow same symbol with different markets)
                     existing = await session.execute(
                         select(OHLCVDataORM).where(
                             OHLCVDataORM.symbol == symbol,
                             OHLCVDataORM.timeframe == timeframe,
                             OHLCVDataORM.timestamp == timestamp,
+                            OHLCVDataORM.market_type == self.market_type,
                         )
                     )
                     if existing.scalar_one_or_none():
@@ -199,6 +209,7 @@ class CCXTDownloader:
                         close=float(bar[4]),
                         volume=float(bar[5]) if len(bar) > 5 else 0.0,
                         exchange=self.exchange_id,
+                        market_type=self.market_type,
                     )
                     session.add(record)
                     total_rows += 1
@@ -260,8 +271,9 @@ async def execute_download_task(
     await session.commit()
 
     try:
-        # Create downloader
-        downloader = CCXTDownloader(exchange_id=task.exchange)
+        # Create downloader with market_type
+        market_type = getattr(task, 'market_type', 'spot')
+        downloader = CCXTDownloader(exchange_id=task.exchange, market_type=market_type)
 
         # Progress callback
         async def update_progress(progress: float, rows: int):

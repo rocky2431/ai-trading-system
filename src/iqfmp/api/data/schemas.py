@@ -85,6 +85,8 @@ class DownloadTaskStatus(BaseModel):
     symbol: str
     timeframe: str
     exchange: str
+    data_type: str = "ohlcv"  # ohlcv, agg_trades, etc.
+    market_type: str = "spot"  # spot, futures
     start_date: datetime
     end_date: datetime
     status: str  # pending, running, completed, failed
@@ -107,6 +109,8 @@ class StartDownloadRequest(BaseModel):
     symbol: str
     timeframe: str = "1h"  # 1m, 5m, 15m, 1h, 4h, 1d
     exchange: str = "binance"
+    data_type: str = "ohlcv"  # ohlcv, agg_trades, trades, depth, funding_rate, etc.
+    market_type: str = "spot"  # spot, futures
     start_date: datetime
     end_date: Optional[datetime] = None  # Defaults to now
 
@@ -159,6 +163,8 @@ class DataRangeInfo(BaseModel):
     """Data range info for a symbol."""
     symbol: str
     timeframe: str
+    market_type: str = "spot"  # spot, futures
+    data_type: str = "ohlcv"  # ohlcv, agg_trades, etc.
     start_date: Optional[datetime] = None
     end_date: Optional[datetime] = None
     total_rows: int = 0
@@ -190,3 +196,51 @@ class DataOptionsResponse(BaseModel):
     """Data options response."""
     exchanges: list[ExchangeOption] = Field(default_factory=list)
     timeframes: list[TimeframeOption] = Field(default_factory=list)
+
+
+# ============== Binance Exchange Info ==============
+
+class BinanceSymbolInfo(BaseModel):
+    """Binance trading pair information."""
+    symbol: str  # e.g., "BTCUSDT"
+    base_asset: str  # e.g., "BTC"
+    quote_asset: str  # e.g., "USDT"
+    status: str  # e.g., "TRADING"
+    rank: int = 0  # Market cap rank (1-200)
+    volume_24h_usd: float = 0.0  # 24h trading volume in USD
+
+
+class BinanceSymbolListResponse(BaseModel):
+    """Binance symbol list response."""
+    symbols: list[BinanceSymbolInfo] = Field(default_factory=list)
+    total: int = 0
+    updated_at: Optional[datetime] = None
+
+
+# ============== Market Types ==============
+
+class MarketTypeOption(BaseModel):
+    """Market type option."""
+    id: str  # "spot" or "futures"
+    name: str  # Display name
+    description: str
+
+
+# ============== Data Types ==============
+
+class DataTypeOption(BaseModel):
+    """Data type option for download."""
+    id: str  # e.g., "ohlcv", "agg_trades", "funding_rate"
+    name: str  # Display name
+    description: str  # Brief description
+    requires_futures: bool = False  # Only for futures market
+    min_interval: str = "1m"  # Minimum time interval supported
+    supported: bool = True  # Whether download is implemented
+
+
+class ExtendedDataOptionsResponse(BaseModel):
+    """Extended data options with data types."""
+    exchanges: list[ExchangeOption] = Field(default_factory=list)
+    timeframes: list[TimeframeOption] = Field(default_factory=list)
+    data_types: list[DataTypeOption] = Field(default_factory=list)
+    market_types: list[MarketTypeOption] = Field(default_factory=list)

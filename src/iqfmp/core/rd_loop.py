@@ -29,13 +29,14 @@ from iqfmp.agents.hypothesis_agent import (
     HypothesisFamily,
     HypothesisStatus,
 )
-from iqfmp.core.factor_engine import FactorEngine, FactorEvaluator
+from iqfmp.core.factor_engine import FactorEngine, FactorEvaluator, get_default_data_path
 from iqfmp.evaluation.alpha_benchmark import AlphaBenchmarker, BenchmarkResult
 from iqfmp.evaluation.research_ledger import (
     DynamicThreshold,
     ResearchLedger,
     TrialRecord,
     MemoryStorage,
+    PostgresStorage,
 )
 from iqfmp.models.factor_combiner import (
     FactorCombiner,
@@ -181,7 +182,8 @@ class RDLoop:
         self.benchmarker = benchmarker or AlphaBenchmarker(
             novelty_threshold=self.config.novelty_threshold
         )
-        self.ledger = ledger or ResearchLedger(storage=MemoryStorage())
+        # Use PostgresStorage by default for persistence (falls back to memory if DB unavailable)
+        self.ledger = ledger or self._create_ledger_with_storage()
 
         # Data and engines (set by load_data)
         self._df: Optional[pd.DataFrame] = None
@@ -193,6 +195,28 @@ class RDLoop:
         self._validated_factors: dict[str, pd.Series] = {}
         self._factor_metadata: dict[str, dict] = {}
 
+    def _create_ledger_with_storage(self) -> ResearchLedger:
+        """Create ResearchLedger with appropriate storage backend.
+
+        Tries PostgresStorage first, falls back to MemoryStorage if DB is unavailable.
+
+        Returns:
+            ResearchLedger with storage backend
+        """
+        import os
+
+        # Check if DATABASE_URL is configured
+        if os.environ.get("DATABASE_URL"):
+            try:
+                storage = PostgresStorage()
+                logger.info("RDLoop using PostgresStorage for persistence")
+                return ResearchLedger(storage=storage)
+            except Exception as e:
+                logger.warning(f"PostgresStorage initialization failed: {e}, falling back to MemoryStorage")
+
+        logger.info("RDLoop using MemoryStorage (no DB configured)")
+        return ResearchLedger(storage=MemoryStorage())
+
     def load_data(
         self,
         data_source: str | Path | pd.DataFrame,
@@ -200,12 +224,21 @@ class RDLoop:
         """Load OHLCV data for factor mining.
 
         Args:
-            data_source: Path to CSV or DataFrame
+            data_source: Path to CSV/DB tag or DataFrame
         """
         if isinstance(data_source, pd.DataFrame):
             self._df = data_source.copy()
         else:
-            self._df = pd.read_csv(data_source)
+            # Support "db" or "auto" to load from TimescaleDB via DataProvider
+            if isinstance(data_source, str) and data_source.lower() in {"db", "auto"}:
+                try:
+                    from iqfmp.core.data_provider import load_ohlcv_sync
+                    self._df = load_ohlcv_sync(symbol="ETHUSDT", timeframe="1d", use_db=True)
+                except Exception as e:
+                    logger.warning(f"RD Loop DB load failed, fallback to CSV: {e}")
+                    self._df = pd.read_csv(get_default_data_path())
+            else:
+                self._df = pd.read_csv(data_source)
 
         # Prepare data
         if "timestamp" in self._df.columns:

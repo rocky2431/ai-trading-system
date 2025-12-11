@@ -4,11 +4,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 import asyncio
+import httpx
+import logging
 
 from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from iqfmp.db.models import OHLCVDataORM, DataDownloadTaskORM, SymbolInfoORM
+from iqfmp.data.downloader import execute_download_task
 from iqfmp.api.data.schemas import (
     DataStatusResponse,
     DatabaseStatus,
@@ -27,7 +30,14 @@ from iqfmp.api.data.schemas import (
     DataOptionsResponse,
     ExchangeOption,
     TimeframeOption,
+    BinanceSymbolInfo,
+    BinanceSymbolListResponse,
+    DataTypeOption,
+    MarketTypeOption,
+    ExtendedDataOptionsResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # Available exchanges
@@ -47,6 +57,87 @@ TIMEFRAMES = [
     {"id": "4h", "name": "4 Hours", "minutes": 240},
     {"id": "1d", "name": "1 Day", "minutes": 1440},
 ]
+
+# Binance supported data types
+# supported=True means download is implemented, False means planned but not yet implemented
+DATA_TYPES = [
+    {
+        "id": "ohlcv",
+        "name": "K线数据 (OHLCV)",
+        "description": "开盘价、最高价、最低价、收盘价、成交量",
+        "requires_futures": False,
+        "min_interval": "1m",
+        "supported": True,  # Implemented via CCXT
+    },
+    {
+        "id": "agg_trades",
+        "name": "聚合成交数据",
+        "description": "按价格聚合的成交记录，包含买卖方向",
+        "requires_futures": False,
+        "min_interval": "tick",
+        "supported": False,  # TODO: Implement
+    },
+    {
+        "id": "trades",
+        "name": "逐笔成交数据",
+        "description": "每一笔成交的详细记录",
+        "requires_futures": False,
+        "min_interval": "tick",
+        "supported": False,  # TODO: Implement
+    },
+    {
+        "id": "depth",
+        "name": "深度数据快照",
+        "description": "订单簿买卖盘口快照",
+        "requires_futures": False,
+        "min_interval": "snapshot",
+        "supported": False,  # TODO: Implement
+    },
+    {
+        "id": "funding_rate",
+        "name": "资金费率",
+        "description": "永续合约资金费率历史",
+        "requires_futures": True,
+        "min_interval": "8h",
+        "supported": False,  # TODO: Implement for futures
+    },
+    {
+        "id": "open_interest",
+        "name": "持仓量",
+        "description": "合约未平仓合约数量",
+        "requires_futures": True,
+        "min_interval": "5m",
+        "supported": False,  # TODO: Implement for futures
+    },
+    {
+        "id": "long_short_ratio",
+        "name": "多空比",
+        "description": "大户/散户多空持仓比例",
+        "requires_futures": True,
+        "min_interval": "5m",
+        "supported": False,  # TODO: Implement for futures
+    },
+]
+
+# Market types
+MARKET_TYPES = [
+    {
+        "id": "spot",
+        "name": "现货 (Spot)",
+        "description": "现货市场交易对，支持所有基础数据类型",
+    },
+    {
+        "id": "futures",
+        "name": "合约 (USDT-M Futures)",
+        "description": "USDT 本位永续合约，支持资金费率、持仓量等衍生品数据",
+    },
+]
+
+# Stablecoins to exclude from top tokens
+STABLECOINS = {
+    "USDT", "USDC", "BUSD", "DAI", "TUSD", "USDP", "GUSD", "FRAX",
+    "LUSD", "USDD", "SUSD", "EURS", "UST", "USTC", "FDUSD", "PYUSD",
+}
 
 
 class DataService:
@@ -82,7 +173,8 @@ class DataService:
             result = await self.session.execute(
                 text("SELECT pg_database_size(current_database()) / (1024.0 * 1024.0)")
             )
-            db_status.total_size_mb = result.scalar() or 0.0
+            size_value = result.scalar()
+            db_status.total_size_mb = float(size_value) if size_value else 0.0
 
         except Exception:
             pass
@@ -281,6 +373,8 @@ class DataService:
                 symbol=t.symbol,
                 timeframe=t.timeframe,
                 exchange=t.exchange,
+                data_type=getattr(t, 'data_type', 'ohlcv'),  # Backward compatible
+                market_type=getattr(t, 'market_type', 'spot'),  # Backward compatible
                 start_date=t.start_date,
                 end_date=t.end_date,
                 status=t.status,
@@ -303,6 +397,8 @@ class DataService:
         exchange: str,
         start_date: datetime,
         end_date: Optional[datetime] = None,
+        data_type: str = "ohlcv",
+        market_type: str = "spot",
     ) -> StartDownloadResponse:
         """Start a data download task."""
         if end_date is None:
@@ -316,6 +412,14 @@ class DataService:
                 message=f"Invalid timeframe: {timeframe}. Valid options: {valid_timeframes}",
             )
 
+        # Validate data_type is supported
+        supported_data_types = [d["id"] for d in DATA_TYPES if d.get("supported", False)]
+        if data_type not in supported_data_types:
+            return StartDownloadResponse(
+                success=False,
+                message=f"Data type '{data_type}' is not yet supported. Supported types: {supported_data_types}",
+            )
+
         # Create download task
         task_id = str(uuid.uuid4())
         task = DataDownloadTaskORM(
@@ -323,6 +427,8 @@ class DataService:
             symbol=symbol.upper(),
             timeframe=timeframe,
             exchange=exchange,
+            data_type=data_type,
+            market_type=market_type,
             start_date=start_date,
             end_date=end_date,
             status="pending",
@@ -332,14 +438,24 @@ class DataService:
         self.session.add(task)
         await self.session.commit()
 
-        # Note: Actual download would be handled by a background worker
-        # For now, we just create the task record
+        # Start background download task
+        asyncio.create_task(self._run_download_task(task_id))
 
         return StartDownloadResponse(
             success=True,
-            message=f"Download task created for {symbol} ({timeframe})",
+            message=f"Download task started for {symbol} ({timeframe}, {data_type})",
             task_id=task_id,
         )
+
+    async def _run_download_task(self, task_id: str):
+        """Run download task in background with a new session."""
+        from iqfmp.db.database import get_async_session
+
+        try:
+            async with get_async_session() as session:
+                await execute_download_task(task_id, session)
+        except Exception as e:
+            logger.error(f"Background download task {task_id} failed: {e}")
 
     async def get_download_task(self, task_id: str) -> Optional[DownloadTaskStatus]:
         """Get download task status."""
@@ -451,10 +567,11 @@ class DataService:
         query = select(
             OHLCVDataORM.symbol,
             OHLCVDataORM.timeframe,
+            OHLCVDataORM.market_type,
             func.min(OHLCVDataORM.timestamp),
             func.max(OHLCVDataORM.timestamp),
             func.count(),
-        ).group_by(OHLCVDataORM.symbol, OHLCVDataORM.timeframe)
+        ).group_by(OHLCVDataORM.symbol, OHLCVDataORM.timeframe, OHLCVDataORM.market_type)
 
         if symbol:
             query = query.where(OHLCVDataORM.symbol == symbol.upper())
@@ -468,9 +585,11 @@ class DataService:
             DataRangeInfo(
                 symbol=row[0],
                 timeframe=row[1],
-                start_date=row[2],
-                end_date=row[3],
-                total_rows=row[4],
+                market_type=row[2] or "spot",
+                data_type="ohlcv",
+                start_date=row[3],
+                end_date=row[4],
+                total_rows=row[5],
             )
             for row in rows
         ]
@@ -485,6 +604,111 @@ class DataService:
             exchanges=[ExchangeOption(**e) for e in EXCHANGES],
             timeframes=[TimeframeOption(**t) for t in TIMEFRAMES],
         )
+
+    def get_extended_options(self) -> ExtendedDataOptionsResponse:
+        """Get extended data options including data types and market types."""
+        return ExtendedDataOptionsResponse(
+            exchanges=[ExchangeOption(**e) for e in EXCHANGES],
+            timeframes=[TimeframeOption(**t) for t in TIMEFRAMES],
+            data_types=[DataTypeOption(**d) for d in DATA_TYPES],
+            market_types=[MarketTypeOption(**m) for m in MARKET_TYPES],
+        )
+
+    # ==================== Binance Exchange Info ====================
+
+    async def get_binance_symbols(
+        self,
+        quote_asset: str = "USDT",
+        limit: int = 200,
+        search: Optional[str] = None,
+    ) -> BinanceSymbolListResponse:
+        """Get top trading pairs from Binance by volume, excluding stablecoins.
+
+        Args:
+            quote_asset: Quote asset filter (default: USDT)
+            limit: Max number of symbols to return (default: 200)
+            search: Optional search term to filter by base asset
+
+        Returns:
+            List of top trading pairs sorted by 24h volume
+        """
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                # Get exchange info for symbol details
+                exchange_info_resp = await client.get(
+                    "https://api.binance.com/api/v3/exchangeInfo"
+                )
+                exchange_info = exchange_info_resp.json()
+
+                # Get 24h ticker for volume data
+                ticker_resp = await client.get(
+                    "https://api.binance.com/api/v3/ticker/24hr"
+                )
+                tickers = ticker_resp.json()
+
+            # Build symbol info map
+            symbol_info_map = {}
+            for s in exchange_info.get("symbols", []):
+                if s.get("status") == "TRADING" and s.get("quoteAsset") == quote_asset:
+                    base_asset = s.get("baseAsset", "")
+                    # Exclude stablecoins
+                    if base_asset not in STABLECOINS:
+                        symbol_info_map[s["symbol"]] = {
+                            "symbol": s["symbol"],
+                            "base_asset": base_asset,
+                            "quote_asset": s.get("quoteAsset", ""),
+                            "status": s.get("status", ""),
+                        }
+
+            # Get volume data and merge
+            symbols_with_volume = []
+            for ticker in tickers:
+                symbol = ticker.get("symbol", "")
+                if symbol in symbol_info_map:
+                    info = symbol_info_map[symbol]
+                    # Calculate USD volume (quoteVolume for USDT pairs)
+                    volume_24h = float(ticker.get("quoteVolume", 0))
+                    symbols_with_volume.append({
+                        **info,
+                        "volume_24h_usd": volume_24h,
+                    })
+
+            # Sort by volume descending
+            symbols_with_volume.sort(key=lambda x: x["volume_24h_usd"], reverse=True)
+
+            # Apply search filter if provided
+            if search:
+                search_upper = search.upper()
+                symbols_with_volume = [
+                    s for s in symbols_with_volume
+                    if search_upper in s["base_asset"] or search_upper in s["symbol"]
+                ]
+
+            # Take top N and add rank
+            top_symbols = []
+            for i, s in enumerate(symbols_with_volume[:limit]):
+                top_symbols.append(BinanceSymbolInfo(
+                    symbol=s["symbol"],
+                    base_asset=s["base_asset"],
+                    quote_asset=s["quote_asset"],
+                    status=s["status"],
+                    rank=i + 1,
+                    volume_24h_usd=s["volume_24h_usd"],
+                ))
+
+            return BinanceSymbolListResponse(
+                symbols=top_symbols,
+                total=len(top_symbols),
+                updated_at=datetime.now(timezone.utc),
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to fetch Binance symbols: {e}")
+            return BinanceSymbolListResponse(
+                symbols=[],
+                total=0,
+                updated_at=datetime.now(timezone.utc),
+            )
 
 
 # Dependency injection

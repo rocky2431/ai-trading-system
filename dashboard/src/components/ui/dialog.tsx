@@ -62,7 +62,7 @@ export function DialogContent({
   return (
     <div
       className={cn(
-        'relative bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-2xl w-full max-h-[90vh] overflow-y-auto',
+        'relative bg-background rounded-lg border shadow-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto',
         className
       )}
       onClick={(e) => e.stopPropagation()}
@@ -87,7 +87,7 @@ export function DialogHeader({
   return (
     <div
       className={cn(
-        'flex items-center justify-between px-6 py-4 border-b border-gray-200 dark:border-gray-700',
+        'flex items-center justify-between px-6 py-4 border-b',
         className
       )}
       {...props}
@@ -96,9 +96,9 @@ export function DialogHeader({
       {onClose && (
         <button
           onClick={onClose}
-          className="ml-4 p-1 rounded-full hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
+          className="ml-4 p-1 rounded-full hover:bg-accent transition-colors"
         >
-          <X className="h-5 w-5 text-gray-500" />
+          <X className="h-5 w-5 text-muted-foreground" />
         </button>
       )}
     </div>
@@ -116,7 +116,7 @@ export function DialogTitle({
 }: DialogTitleProps) {
   return (
     <h2
-      className={cn('text-lg font-semibold text-gray-900 dark:text-gray-100', className)}
+      className={cn('text-lg font-semibold', className)}
       {...props}
     >
       {children}
@@ -148,7 +148,7 @@ export function DialogFooter({
   return (
     <div
       className={cn(
-        'flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200 dark:border-gray-700',
+        'flex items-center justify-end gap-3 px-6 py-4 border-t',
         className
       )}
       {...props}

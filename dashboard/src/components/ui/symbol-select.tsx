@@ -142,9 +142,9 @@ export function SymbolSelect({
 
       {/* Dropdown */}
       {isOpen && (
-        <div className="absolute z-50 mt-1 w-full rounded-md border bg-white dark:bg-zinc-900 shadow-lg">
+        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover text-popover-foreground shadow-lg">
           {/* Search input */}
-          <div className="p-2 border-b bg-white dark:bg-zinc-900">
+          <div className="p-2 border-b">
             <div className="relative">
               <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
               <Input
@@ -195,7 +195,7 @@ export function SymbolSelect({
           </div>
 
           {/* Footer info */}
-          <div className="p-2 border-t text-xs text-muted-foreground text-center bg-white dark:bg-zinc-900">
+          <div className="p-2 border-t text-xs text-muted-foreground text-center">
             {filteredSymbols.length} symbols (sorted by 24h volume)
           </div>
         </div>

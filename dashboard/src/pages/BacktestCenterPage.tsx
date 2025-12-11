@@ -408,7 +408,8 @@ export function BacktestCenterPage() {
                 <div className="space-y-2">
                   <Label>Start Date</Label>
                   <Input
-                    type="date"
+                    type="text"
+                    placeholder="YYYY-MM-DD"
                     value={startDate}
                     onChange={(e) => setStartDate(e.target.value)}
                   />
@@ -416,7 +417,8 @@ export function BacktestCenterPage() {
                 <div className="space-y-2">
                   <Label>End Date</Label>
                   <Input
-                    type="date"
+                    type="text"
+                    placeholder="YYYY-MM-DD"
                     value={endDate}
                     onChange={(e) => setEndDate(e.target.value)}
                   />

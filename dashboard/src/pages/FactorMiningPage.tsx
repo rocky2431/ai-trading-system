@@ -2,7 +2,7 @@
  * Factor Mining Page - 因子挖掘任务管理
  */
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -238,10 +238,34 @@ export function FactorMiningPage() {
     endDate: '',
     symbols: [] as string[],
     timeframes: ['1h', '4h', '1d'] as string[],
-    trainRatio: 0.6,
-    validRatio: 0.2,
-    testRatio: 0.2,
+    trainRatio: 60,
+    validRatio: 20,
+    testRatio: 20,
   })
+
+  // 当 validDateRange 变化时，自动同步到 dataConfig
+  useEffect(() => {
+    if (validDateRange.start && validDateRange.end) {
+      setDataConfig(prev => ({
+        ...prev,
+        startDate: validDateRange.start!.slice(0, 10),
+        endDate: validDateRange.end!.slice(0, 10),
+      }))
+    }
+  }, [validDateRange.start, validDateRange.end])
+
+  // 验证日期格式 YYYY-MM-DD
+  const isValidDate = (dateStr: string) => {
+    if (!dateStr) return true
+    const regex = /^\d{4}-\d{2}-\d{2}$/
+    if (!regex.test(dateStr)) return false
+    const date = new Date(dateStr)
+    return !isNaN(date.getTime())
+  }
+
+  // 计算 Split 总和是否为 100
+  const splitTotal = dataConfig.trainRatio + dataConfig.validRatio + dataConfig.testRatio
+  const isSplitValid = Math.abs(splitTotal - 100) < 0.01
 
   // Benchmark Config
   const [benchmarkConfig, setBenchmarkConfig] = useState({
@@ -289,9 +313,9 @@ export function FactorMiningPage() {
             ...baseDataConfig,
             start_date: dataConfig.startDate || baseDataConfig.start_date,
             end_date: dataConfig.endDate || baseDataConfig.end_date,
-            train_ratio: dataConfig.trainRatio,
-            valid_ratio: dataConfig.validRatio,
-            test_ratio: dataConfig.testRatio,
+            train_ratio: dataConfig.trainRatio / 100,
+            valid_ratio: dataConfig.validRatio / 100,
+            test_ratio: dataConfig.testRatio / 100,
           },
           benchmark_config: {
             benchmark_set: benchmarkConfig.benchmarkSet,
@@ -694,67 +718,83 @@ export function FactorMiningPage() {
                         <Label htmlFor="start-date">Start Date</Label>
                         <Input
                           id="start-date"
-                          type="date"
+                          type="text"
+                          placeholder="YYYY-MM-DD"
                           value={dataConfig.startDate}
                           onChange={(e) =>
                             setDataConfig({ ...dataConfig, startDate: e.target.value })
                           }
+                          className={!isValidDate(dataConfig.startDate) ? 'border-red-500' : ''}
                         />
+                        {!isValidDate(dataConfig.startDate) && (
+                          <p className="text-xs text-red-500">格式: YYYY-MM-DD</p>
+                        )}
                       </div>
                       <div className="space-y-2">
                         <Label htmlFor="end-date">End Date</Label>
                         <Input
                           id="end-date"
-                          type="date"
+                          type="text"
+                          placeholder="YYYY-MM-DD"
                           value={dataConfig.endDate}
                           onChange={(e) =>
                             setDataConfig({ ...dataConfig, endDate: e.target.value })
                           }
+                          className={!isValidDate(dataConfig.endDate) ? 'border-red-500' : ''}
                         />
+                        {!isValidDate(dataConfig.endDate) && (
+                          <p className="text-xs text-red-500">格式: YYYY-MM-DD</p>
+                        )}
                       </div>
                     </div>
                     <div className="space-y-2">
-                      <Label>Train / Valid / Test Split</Label>
-                      <div className="flex items-center gap-4">
-                        <div className="flex-1">
-                          <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                            Train: {(dataConfig.trainRatio * 100).toFixed(0)}%
-                          </div>
-                          <Slider
-                            value={dataConfig.trainRatio * 100}
-                            onValueChange={(v) =>
-                              setDataConfig({
-                                ...dataConfig,
-                                trainRatio: v / 100,
-                                validRatio: Math.max(0, (100 - v - dataConfig.testRatio * 100) / 100),
-                              })
+                      <div className="flex items-center justify-between">
+                        <Label>Train / Valid / Test Split</Label>
+                        {!isSplitValid && (
+                          <span className="text-xs text-red-500">
+                            总和需为 100%（当前: {splitTotal}%）
+                          </span>
+                        )}
+                      </div>
+                      <div className="grid grid-cols-3 gap-4">
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">Train (%)</Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={dataConfig.trainRatio}
+                            onChange={(e) =>
+                              setDataConfig({ ...dataConfig, trainRatio: Number(e.target.value) || 0 })
                             }
-                            min={40}
-                            max={80}
-                            step={5}
+                            className={!isSplitValid ? 'border-amber-500' : ''}
                           />
                         </div>
-                        <div className="flex-1">
-                          <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">
-                            Valid: {(dataConfig.validRatio * 100).toFixed(0)}%
-                          </div>
-                          <Slider
-                            value={dataConfig.validRatio * 100}
-                            onValueChange={(v) =>
-                              setDataConfig({
-                                ...dataConfig,
-                                validRatio: v / 100,
-                                testRatio: Math.max(0, (100 - dataConfig.trainRatio * 100 - v) / 100),
-                              })
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">Valid (%)</Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={dataConfig.validRatio}
+                            onChange={(e) =>
+                              setDataConfig({ ...dataConfig, validRatio: Number(e.target.value) || 0 })
                             }
-                            min={10}
-                            max={30}
-                            step={5}
+                            className={!isSplitValid ? 'border-amber-500' : ''}
                           />
                         </div>
-                        <div className="w-16 text-center">
-                          <div className="text-xs text-gray-500 dark:text-gray-400 mb-1">Test</div>
-                          <div className="font-medium">{(dataConfig.testRatio * 100).toFixed(0)}%</div>
+                        <div className="space-y-1">
+                          <Label className="text-xs text-muted-foreground">Test (%)</Label>
+                          <Input
+                            type="number"
+                            min={0}
+                            max={100}
+                            value={dataConfig.testRatio}
+                            onChange={(e) =>
+                              setDataConfig({ ...dataConfig, testRatio: Number(e.target.value) || 0 })
+                            }
+                            className={!isSplitValid ? 'border-amber-500' : ''}
+                          />
                         </div>
                       </div>
                     </div>

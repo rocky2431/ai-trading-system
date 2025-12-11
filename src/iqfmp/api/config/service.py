@@ -61,44 +61,44 @@ class ConfigService:
         {
             "agent_id": "factor_generation",
             "agent_name": "Factor Generation Agent",
-            "description": "LLM 驱动的因子代码生成",
+            "description": "LLM-driven factor code generation",
             "default_model": "deepseek/deepseek-coder-v3",  # Best for code
         },
         {
             "agent_id": "factor_evaluation",
             "agent_name": "Factor Evaluation Agent",
-            "description": "多维度验证 + 防过拟合",
+            "description": "Multi-dimensional validation + Anti-overfitting",
             "default_model": "deepseek/deepseek-r1",  # Best for reasoning
         },
         {
             "agent_id": "strategy_assembly",
             "agent_name": "Strategy Assembly Agent",
-            "description": "策略组装与优化",
+            "description": "Strategy assembly and optimization",
             "default_model": "anthropic/claude-sonnet-4",  # Latest Claude
         },
         {
             "agent_id": "backtest_optimization",
             "agent_name": "Backtest Optimization Agent",
-            "description": "回测参数优化",
+            "description": "Backtest parameter optimization",
             "default_model": "openai/gpt-4.1",  # Latest GPT
         },
         {
             "agent_id": "risk_check",
             "agent_name": "Risk Check Agent",
-            "description": "风险检查与控制",
+            "description": "Risk check and control",
             "default_model": "google/gemini-2.5-flash",  # Fast + 1M context
         },
     ]
 
     # Factor families (from architecture.md)
     FACTOR_FAMILIES = [
-        {"id": "momentum", "name": "Momentum", "description": "趋势动量因子"},
-        {"id": "value", "name": "Value", "description": "价值因子"},
-        {"id": "volatility", "name": "Volatility", "description": "波动率因子"},
-        {"id": "liquidity", "name": "Liquidity", "description": "流动性因子"},
-        {"id": "sentiment", "name": "Sentiment", "description": "情绪因子"},
-        {"id": "funding", "name": "Funding Rate", "description": "资金费率因子"},
-        {"id": "orderbook", "name": "Order Book", "description": "订单簿因子"},
+        {"id": "momentum", "name": "Momentum", "description": "Trend momentum factors"},
+        {"id": "value", "name": "Value", "description": "Value factors"},
+        {"id": "volatility", "name": "Volatility", "description": "Volatility factors"},
+        {"id": "liquidity", "name": "Liquidity", "description": "Liquidity factors"},
+        {"id": "sentiment", "name": "Sentiment", "description": "Sentiment factors"},
+        {"id": "funding", "name": "Funding Rate", "description": "Funding rate factors"},
+        {"id": "orderbook", "name": "Order Book", "description": "Order book factors"},
     ]
 
     def __init__(self) -> None:
@@ -721,12 +721,12 @@ class ConfigService:
         data_config = self._config.get("data", {})
 
         frequency_options = [
-            FrequencyOption(id="1m", name="1 Minute", description="1分钟K线"),
-            FrequencyOption(id="5m", name="5 Minutes", description="5分钟K线"),
-            FrequencyOption(id="15m", name="15 Minutes", description="15分钟K线"),
-            FrequencyOption(id="1h", name="1 Hour", description="1小时K线"),
-            FrequencyOption(id="4h", name="4 Hours", description="4小时K线"),
-            FrequencyOption(id="1d", name="Daily", description="日K线"),
+            FrequencyOption(id="1m", name="1 Minute", description="1-minute candlestick"),
+            FrequencyOption(id="5m", name="5 Minutes", description="5-minute candlestick"),
+            FrequencyOption(id="15m", name="15 Minutes", description="15-minute candlestick"),
+            FrequencyOption(id="1h", name="1 Hour", description="1-hour candlestick"),
+            FrequencyOption(id="4h", name="4 Hours", description="4-hour candlestick"),
+            FrequencyOption(id="1d", name="Daily", description="Daily candlestick"),
         ]
 
         return DataConfigResponse(

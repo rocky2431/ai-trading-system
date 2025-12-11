@@ -63,56 +63,56 @@ TIMEFRAMES = [
 DATA_TYPES = [
     {
         "id": "ohlcv",
-        "name": "K线数据 (OHLCV)",
-        "description": "开盘价、最高价、最低价、收盘价、成交量",
+        "name": "OHLCV Candlestick",
+        "description": "Open, High, Low, Close, Volume",
         "requires_futures": False,
         "min_interval": "1m",
         "supported": True,  # Implemented via CCXT
     },
     {
         "id": "agg_trades",
-        "name": "聚合成交数据",
-        "description": "按价格聚合的成交记录，包含买卖方向",
+        "name": "Aggregated Trades",
+        "description": "Trade records aggregated by price, including buy/sell direction",
         "requires_futures": False,
         "min_interval": "tick",
         "supported": False,  # TODO: Implement
     },
     {
         "id": "trades",
-        "name": "逐笔成交数据",
-        "description": "每一笔成交的详细记录",
+        "name": "Tick Trades",
+        "description": "Detailed record of each trade",
         "requires_futures": False,
         "min_interval": "tick",
         "supported": False,  # TODO: Implement
     },
     {
         "id": "depth",
-        "name": "深度数据快照",
-        "description": "订单簿买卖盘口快照",
+        "name": "Order Book Snapshot",
+        "description": "Order book bid/ask snapshot",
         "requires_futures": False,
         "min_interval": "snapshot",
         "supported": False,  # TODO: Implement
     },
     {
         "id": "funding_rate",
-        "name": "资金费率",
-        "description": "永续合约资金费率历史",
+        "name": "Funding Rate",
+        "description": "Perpetual contract funding rate history",
         "requires_futures": True,
         "min_interval": "8h",
         "supported": False,  # TODO: Implement for futures
     },
     {
         "id": "open_interest",
-        "name": "持仓量",
-        "description": "合约未平仓合约数量",
+        "name": "Open Interest",
+        "description": "Contract open interest quantity",
         "requires_futures": True,
         "min_interval": "5m",
         "supported": False,  # TODO: Implement for futures
     },
     {
         "id": "long_short_ratio",
-        "name": "多空比",
-        "description": "大户/散户多空持仓比例",
+        "name": "Long/Short Ratio",
+        "description": "Large/retail trader long/short position ratio",
         "requires_futures": True,
         "min_interval": "5m",
         "supported": False,  # TODO: Implement for futures
@@ -123,13 +123,13 @@ DATA_TYPES = [
 MARKET_TYPES = [
     {
         "id": "spot",
-        "name": "现货 (Spot)",
-        "description": "现货市场交易对，支持所有基础数据类型",
+        "name": "Spot",
+        "description": "Spot market trading pairs, supports all basic data types",
     },
     {
         "id": "futures",
-        "name": "合约 (USDT-M Futures)",
-        "description": "USDT 本位永续合约，支持资金费率、持仓量等衍生品数据",
+        "name": "USDT-M Futures",
+        "description": "USDT-margined perpetual contracts, supports funding rate, open interest, etc.",
     },
 ]
 

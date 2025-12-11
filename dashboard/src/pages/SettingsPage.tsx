@@ -19,7 +19,6 @@ import {
   useAPIKeys,
   useTestConnections,
   useAgentConfig,
-  useDataConfig,
   useFactorMiningConfig,
   useRiskControlConfig,
 } from '@/hooks/useConfig'
@@ -98,7 +97,7 @@ export function SettingsPage() {
         </TabsContent>
 
         <TabsContent value="data">
-          <DataConfigSection />
+          <DataInfoSection />
         </TabsContent>
 
         <TabsContent value="factor">
@@ -633,127 +632,50 @@ function AgentConfigSection() {
   )
 }
 
-// ============== Data Config Section ==============
+// ============== Data Info Section ==============
 
-function DataConfigSection() {
-  const { config, loading, saving, saveConfig } = useDataConfig()
-
-  const [frequency, setFrequency] = useState('')
-  const [dataSource, setDataSource] = useState('')
-  const [symbolsInput, setSymbolsInput] = useState('')
-
-  const handleSave = async () => {
-    const data: Record<string, unknown> = {}
-    if (frequency) data.data_frequency = frequency
-    if (dataSource) data.data_source = dataSource
-    if (symbolsInput) {
-      data.symbols = symbolsInput.split(',').map(s => s.trim().toUpperCase())
-    }
-    await saveConfig(data)
-  }
-
-  const frequencyOptions = config?.frequency_options.map(f => ({
-    value: f.id,
-    label: `${f.name} - ${f.description}`
-  })) || []
-
-  const sourceOptions = [
-    { value: 'timescaledb', label: 'TimescaleDB' },
-    { value: 'ccxt', label: 'CCXT (Exchange)' },
-    { value: 'file', label: 'Local File' },
-  ]
-
-  if (loading) {
-    return <LoadingCard title="Data Configuration" />
-  }
-
+function DataInfoSection() {
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Database className="h-5 w-5" />
-          默认数据配置
+          数据管理
         </CardTitle>
         <CardDescription>
-          系统默认数据源和监控列表，创建任务时可单独覆盖
+          数据下载和管理在 Data Center 进行
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Info Box */}
-        <div className="p-4 bg-blue-500/10 rounded-lg text-sm">
-          <p className="font-medium text-blue-600 mb-2">说明</p>
-          <ul className="list-disc list-inside space-y-1 text-muted-foreground">
-            <li>这些是系统<strong>默认配置</strong>，适用于所有新建任务</li>
-            <li>创建 Factor Mining 任务时，可以选择使用默认值或自定义</li>
-            <li>交易对列表用于全局监控和快速选择</li>
-          </ul>
-        </div>
-
-        {/* Current Config */}
-        <div className="p-4 bg-muted rounded-lg">
-          <h4 className="font-medium mb-2">当前默认配置</h4>
-          <div className="grid grid-cols-3 gap-4 text-sm">
-            <div>
-              <span className="text-muted-foreground">默认频率:</span>{' '}
-              {config?.data_frequency || 'Not set'}
-            </div>
-            <div>
-              <span className="text-muted-foreground">默认数据源:</span>{' '}
-              {config?.data_source || 'Not set'}
-            </div>
-            <div>
-              <span className="text-muted-foreground">监控交易对:</span>{' '}
-              {config?.symbols.length || 0} 个
-            </div>
-          </div>
-          {config?.symbols && config.symbols.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-1">
-              {config.symbols.slice(0, 10).map(s => (
-                <Badge key={s} variant="outline">{s}</Badge>
-              ))}
-              {config.symbols.length > 10 && (
-                <Badge variant="outline">+{config.symbols.length - 10} more</Badge>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Settings */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label>默认数据频率</Label>
-            <Select
-              options={[{ value: '', label: '选择频率...' }, ...frequencyOptions]}
-              value={frequency || config?.data_frequency || ''}
-              onChange={(e) => setFrequency(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>默认数据源</Label>
-            <Select
-              options={sourceOptions}
-              value={dataSource || config?.data_source || ''}
-              onChange={(e) => setDataSource(e.target.value)}
-            />
+        <div className="p-4 bg-blue-500/10 rounded-lg">
+          <h4 className="font-medium text-blue-600 mb-3">数据管理说明</h4>
+          <div className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              <strong>数据下载和管理</strong>请前往 <span className="font-medium text-foreground">Data Center</span> 页面：
+            </p>
+            <ul className="list-disc list-inside space-y-1 ml-2">
+              <li>查看可用交易对和数据时间范围</li>
+              <li>下载历史 K 线数据（现货/合约）</li>
+              <li>管理数据下载任务</li>
+            </ul>
+            <p className="mt-4">
+              <strong>创建 Factor Mining 任务时</strong>，您需要在任务创建界面选择：
+            </p>
+            <ul className="list-disc list-inside space-y-1 ml-2">
+              <li>市场类型（现货/合约）</li>
+              <li>交易对（支持多选）</li>
+              <li>时间级别（1m/5m/1h/1d）</li>
+              <li>数据时间范围</li>
+            </ul>
           </div>
         </div>
 
-        <div className="space-y-2">
-          <Label>默认监控交易对 (逗号分隔)</Label>
-          <Input
-            placeholder="BTC/USDT, ETH/USDT, SOL/USDT..."
-            value={symbolsInput || config?.symbols.join(', ') || ''}
-            onChange={(e) => setSymbolsInput(e.target.value)}
-          />
-          <p className="text-xs text-muted-foreground">
-            这些交易对会在 Data Center 监控，并作为新任务的默认选项
-          </p>
+        <div className="flex gap-4">
+          <Button variant="outline" onClick={() => window.location.href = '/data-center'}>
+            <Database className="h-4 w-4 mr-2" />
+            前往 Data Center
+          </Button>
         </div>
-
-        <Button onClick={handleSave} disabled={saving}>
-          {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-          保存默认配置
-        </Button>
       </CardContent>
     </Card>
   )

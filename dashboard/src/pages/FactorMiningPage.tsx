@@ -2,7 +2,7 @@
  * Factor Mining Page - 因子挖掘任务管理
  */
 
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -12,12 +12,13 @@ import { Slider } from '@/components/ui/slider'
 import { Switch } from '@/components/ui/switch'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { useMiningTasks, useFactorLibraryStats } from '@/hooks/useMining'
+import { useDataRanges } from '@/hooks/useData'
 import type { MiningTaskStatus } from '@/api/factors'
+import type { DataRangeInfo } from '@/api/data'
 import {
   Pickaxe,
   Play,
   Pause,
-  Trash2,
   Loader2,
   CheckCircle2,
   XCircle,
@@ -164,7 +165,8 @@ function MiningTaskCard({
 
 export function FactorMiningPage() {
   const { tasks, loading, creating, createTask, cancelTask, refetch } = useMiningTasks()
-  const { stats, loading: statsLoading } = useFactorLibraryStats()
+  const { stats } = useFactorLibraryStats()
+  const { data: rangesData, loading: rangesLoading } = useDataRanges()
 
   // Tab state
   const [activeTab, setActiveTab] = useState('create')
@@ -175,6 +177,57 @@ export function FactorMiningPage() {
   const [targetCount, setTargetCount] = useState(10)
   const [autoEvaluate, setAutoEvaluate] = useState(true)
   const [selectedFamilies, setSelectedFamilies] = useState<string[]>(['momentum', 'volatility'])
+
+  // Data selection state
+  const [selectedMarketType, setSelectedMarketType] = useState<'spot' | 'futures'>('spot')
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([])
+  const [selectedTimeframe, setSelectedTimeframe] = useState('1h')
+
+  // Get available symbols for selected market type
+  const availableSymbols = useMemo(() => {
+    if (!rangesData?.ranges) return []
+    // Filter by market type and group by symbol
+    const symbolMap = new Map<string, DataRangeInfo>()
+    rangesData.ranges
+      .filter(r => r.market_type === selectedMarketType && r.timeframe === selectedTimeframe)
+      .forEach(r => {
+        if (!symbolMap.has(r.symbol) || (r.start_date && r.end_date)) {
+          symbolMap.set(r.symbol, r)
+        }
+      })
+    return Array.from(symbolMap.values()).sort((a, b) => a.symbol.localeCompare(b.symbol))
+  }, [rangesData, selectedMarketType, selectedTimeframe])
+
+  // Calculate valid date range based on selected symbols
+  const validDateRange = useMemo(() => {
+    if (selectedSymbols.length === 0 || !rangesData?.ranges) {
+      return { start: null, end: null }
+    }
+    const selectedRanges = rangesData.ranges.filter(
+      r => selectedSymbols.includes(r.symbol) &&
+           r.market_type === selectedMarketType &&
+           r.timeframe === selectedTimeframe
+    )
+    if (selectedRanges.length === 0) return { start: null, end: null }
+
+    // Find the intersection of all date ranges
+    const starts = selectedRanges.map(r => r.start_date).filter(Boolean) as string[]
+    const ends = selectedRanges.map(r => r.end_date).filter(Boolean) as string[]
+
+    return {
+      start: starts.length > 0 ? starts.reduce((a, b) => a > b ? a : b) : null,
+      end: ends.length > 0 ? ends.reduce((a, b) => a < b ? a : b) : null,
+    }
+  }, [selectedSymbols, rangesData, selectedMarketType, selectedTimeframe])
+
+  // Toggle symbol selection
+  const toggleSymbol = (symbol: string) => {
+    setSelectedSymbols(prev =>
+      prev.includes(symbol)
+        ? prev.filter(s => s !== symbol)
+        : [...prev, symbol]
+    )
+  }
 
   // Advanced config expansion state
   const [showAdvanced, setShowAdvanced] = useState(false)
@@ -218,16 +271,24 @@ export function FactorMiningPage() {
   })
 
   const handleCreateTask = async () => {
-    if (!taskName.trim()) return
+    if (!taskName.trim() || selectedSymbols.length === 0) return
+
+    // Build data config from selection
+    const baseDataConfig = {
+      symbols: selectedSymbols,
+      timeframes: [selectedTimeframe],
+      market_type: selectedMarketType,
+      start_date: validDateRange.start || undefined,
+      end_date: validDateRange.end || undefined,
+    }
 
     // Build advanced config if expanded
     const advancedConfig = showAdvanced
       ? {
           data_config: {
-            start_date: dataConfig.startDate || undefined,
-            end_date: dataConfig.endDate || undefined,
-            symbols: dataConfig.symbols.length > 0 ? dataConfig.symbols : undefined,
-            timeframes: dataConfig.timeframes,
+            ...baseDataConfig,
+            start_date: dataConfig.startDate || baseDataConfig.start_date,
+            end_date: dataConfig.endDate || baseDataConfig.end_date,
             train_ratio: dataConfig.trainRatio,
             valid_ratio: dataConfig.validRatio,
             test_ratio: dataConfig.testRatio,
@@ -254,7 +315,9 @@ export function FactorMiningPage() {
             redundancy_threshold: robustnessConfig.redundancyThreshold,
           },
         }
-      : {}
+      : {
+          data_config: baseDataConfig,
+        }
 
     await createTask({
       name: taskName,
@@ -411,6 +474,138 @@ export function FactorMiningPage() {
                   value={taskDescription}
                   onChange={(e) => setTaskDescription(e.target.value)}
                 />
+              </div>
+
+              {/* Data Selection Section */}
+              <div className="border rounded-lg p-4 space-y-4 bg-muted/30">
+                <h4 className="font-medium flex items-center gap-2">
+                  <Database className="h-4 w-4 text-blue-500" />
+                  数据选择 *
+                </h4>
+
+                {/* Market Type */}
+                <div className="space-y-2">
+                  <Label>市场类型</Label>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant={selectedMarketType === 'spot' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => {
+                        setSelectedMarketType('spot')
+                        setSelectedSymbols([])
+                      }}
+                    >
+                      现货 (Spot)
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={selectedMarketType === 'futures' ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => {
+                        setSelectedMarketType('futures')
+                        setSelectedSymbols([])
+                      }}
+                    >
+                      合约 (Futures)
+                    </Button>
+                  </div>
+                </div>
+
+                {/* Timeframe */}
+                <div className="space-y-2">
+                  <Label>时间级别</Label>
+                  <div className="flex gap-2">
+                    {['1m', '5m', '15m', '1h', '4h', '1d'].map(tf => (
+                      <Button
+                        key={tf}
+                        type="button"
+                        variant={selectedTimeframe === tf ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => {
+                          setSelectedTimeframe(tf)
+                          setSelectedSymbols([])
+                        }}
+                      >
+                        {tf}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Symbol Selection */}
+                <div className="space-y-2">
+                  <div className="flex justify-between items-center">
+                    <Label>选择交易对</Label>
+                    <span className="text-xs text-muted-foreground">
+                      已选择 {selectedSymbols.length} 个
+                    </span>
+                  </div>
+
+                  {rangesLoading ? (
+                    <div className="flex items-center justify-center p-4">
+                      <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                      加载可用数据...
+                    </div>
+                  ) : availableSymbols.length === 0 ? (
+                    <div className="p-4 bg-amber-500/10 rounded text-sm text-amber-600">
+                      没有找到 {selectedMarketType === 'spot' ? '现货' : '合约'} {selectedTimeframe} 数据。
+                      请先在 Data Center 下载数据。
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2 max-h-48 overflow-y-auto p-2 border rounded">
+                      {availableSymbols.map(range => (
+                        <Button
+                          key={range.symbol}
+                          type="button"
+                          variant={selectedSymbols.includes(range.symbol) ? 'default' : 'outline'}
+                          size="sm"
+                          className="justify-start text-xs h-auto py-2"
+                          onClick={() => toggleSymbol(range.symbol)}
+                        >
+                          <div className="flex flex-col items-start">
+                            <span>{range.symbol}</span>
+                            <span className="text-[10px] opacity-70">
+                              {range.start_date?.slice(0, 10)} ~ {range.end_date?.slice(0, 10)}
+                            </span>
+                          </div>
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Quick select buttons */}
+                  {availableSymbols.length > 0 && (
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedSymbols(availableSymbols.map(s => s.symbol))}
+                      >
+                        全选
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => setSelectedSymbols([])}
+                      >
+                        清空
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Valid Date Range Info */}
+                {selectedSymbols.length > 0 && validDateRange.start && validDateRange.end && (
+                  <div className="p-3 bg-green-500/10 rounded text-sm">
+                    <span className="text-green-600 font-medium">可用数据范围：</span>
+                    <span className="ml-2">
+                      {validDateRange.start.slice(0, 10)} ~ {validDateRange.end.slice(0, 10)}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Factor Families */}
@@ -806,7 +1001,7 @@ export function FactorMiningPage() {
                 className="w-full"
                 size="lg"
                 onClick={handleCreateTask}
-                disabled={creating || !taskName.trim() || selectedFamilies.length === 0}
+                disabled={creating || !taskName.trim() || selectedFamilies.length === 0 || selectedSymbols.length === 0}
               >
                 {creating ? (
                   <>

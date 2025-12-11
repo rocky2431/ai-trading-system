@@ -19,7 +19,7 @@ const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
         <div className="relative h-2 w-full grow overflow-hidden rounded-full bg-secondary">
           {/* Filled track */}
           <div
-            className="absolute h-full bg-primary transition-all"
+            className="absolute h-full bg-blue-500 transition-all"
             style={{ width: `${percentage}%` }}
           />
         </div>
@@ -37,7 +37,7 @@ const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
         />
         {/* Thumb */}
         <div
-          className="absolute h-5 w-5 rounded-full border-2 border-primary bg-background shadow-md transition-all hover:scale-110"
+          className="absolute h-5 w-5 rounded-full border-2 border-blue-500 bg-background shadow-md transition-all hover:scale-110"
           style={{ left: `calc(${percentage}% - 10px)` }}
         />
       </div>

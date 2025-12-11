@@ -42,22 +42,22 @@ export function DataTypeSelect({
             key={option.id}
             onClick={() => toggleOption(option.id, isSupported)}
             className={cn(
-              "flex items-start gap-3 p-3 rounded-lg border transition-colors bg-card",
+              "flex items-start gap-3 p-3 rounded-lg border transition-colors bg-white dark:bg-gray-900",
               isSupported
-                ? "cursor-pointer hover:bg-muted"
+                ? "cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-800"
                 : "cursor-not-allowed opacity-60",
               isSelected && isSupported
-                ? "border-primary bg-primary/5"
-                : "border-input"
+                ? "border-blue-600 bg-blue-50 dark:bg-blue-900/20"
+                : "border-gray-300 dark:border-gray-600"
             )}
           >
             <div
               className={cn(
                 "flex h-5 w-5 shrink-0 items-center justify-center rounded border mt-0.5",
                 isSelected && isSupported
-                  ? "border-primary bg-primary text-primary-foreground"
-                  : "border-input",
-                !isSupported && "bg-muted"
+                  ? "border-blue-600 bg-blue-600 text-white"
+                  : "border-gray-300 dark:border-gray-600",
+                !isSupported && "bg-gray-100 dark:bg-gray-800"
               )}
             >
               {isSelected && isSupported && <Check className="h-3 w-3" />}
@@ -66,7 +66,7 @@ export function DataTypeSelect({
               <div className="flex items-center gap-2 flex-wrap">
                 <span className={cn(
                   "font-medium text-sm",
-                  !isSupported && "text-muted-foreground"
+                  !isSupported && "text-gray-500 dark:text-gray-400"
                 )}>{option.name}</span>
                 {option.requires_futures && (
                   <span className="text-xs px-1.5 py-0.5 rounded bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400">
@@ -74,14 +74,14 @@ export function DataTypeSelect({
                   </span>
                 )}
                 {!isSupported && (
-                  <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400">
                     Coming Soon
                   </span>
                 )}
               </div>
               <p className={cn(
                 "text-xs mt-0.5",
-                isSupported ? "text-muted-foreground" : "text-muted-foreground/60"
+                isSupported ? "text-gray-500 dark:text-gray-400" : "text-gray-400 dark:text-gray-500"
               )}>
                 {option.description}
               </p>

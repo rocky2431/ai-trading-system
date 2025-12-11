@@ -101,13 +101,13 @@ export function SymbolSelect({
         onClick={() => !disabled && setIsOpen(!isOpen)}
         disabled={disabled}
         className={cn(
-          "flex h-9 w-full items-center justify-between rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors",
-          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          "flex h-9 w-full items-center justify-between rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 px-3 py-1 text-sm shadow-sm transition-colors",
+          "focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-blue-500",
           "disabled:cursor-not-allowed disabled:opacity-50",
-          isOpen && "ring-1 ring-ring"
+          isOpen && "ring-1 ring-blue-500"
         )}
       >
-        <span className={cn(!value && "text-muted-foreground")}>
+        <span className={cn(!value && "text-gray-500 dark:text-gray-400")}>
           {loading ? (
             <span className="flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -116,7 +116,7 @@ export function SymbolSelect({
           ) : selectedSymbol ? (
             <span className="flex items-center gap-2">
               <span className="font-medium">{selectedSymbol.base_asset}</span>
-              <span className="text-muted-foreground text-xs">
+              <span className="text-gray-500 dark:text-gray-400 text-xs">
                 #{selectedSymbol.rank}
               </span>
             </span>
@@ -142,11 +142,11 @@ export function SymbolSelect({
 
       {/* Dropdown */}
       {isOpen && (
-        <div className="absolute z-50 mt-1 w-full rounded-md border bg-popover text-popover-foreground shadow-lg">
+        <div className="absolute z-50 mt-1 w-full rounded-md border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-lg">
           {/* Search input */}
           <div className="p-2 border-b">
             <div className="relative">
-              <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+              <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-500 dark:text-gray-400" />
               <Input
                 ref={inputRef}
                 type="text"
@@ -161,7 +161,7 @@ export function SymbolSelect({
           {/* Symbol list */}
           <div className="max-h-[300px] overflow-y-auto">
             {filteredSymbols.length === 0 ? (
-              <div className="p-4 text-center text-sm text-muted-foreground">
+              <div className="p-4 text-center text-sm text-gray-500 dark:text-gray-400">
                 No symbols found
               </div>
             ) : (
@@ -171,22 +171,22 @@ export function SymbolSelect({
                   type="button"
                   onClick={() => handleSelect(symbol.symbol)}
                   className={cn(
-                    "flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-accent",
-                    value === symbol.symbol && "bg-accent"
+                    "flex w-full items-center justify-between px-3 py-2 text-sm hover:bg-gray-100 dark:hover:bg-gray-800",
+                    value === symbol.symbol && "bg-gray-100 dark:bg-gray-800"
                   )}
                 >
                   <div className="flex items-center gap-3">
-                    <span className="w-8 text-xs text-muted-foreground">
+                    <span className="w-8 text-xs text-gray-500 dark:text-gray-400">
                       #{symbol.rank}
                     </span>
                     <div className="flex flex-col items-start">
                       <span className="font-medium">{symbol.base_asset}</span>
-                      <span className="text-xs text-muted-foreground">
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
                         {symbol.symbol}
                       </span>
                     </div>
                   </div>
-                  <span className="text-xs text-muted-foreground">
+                  <span className="text-xs text-gray-500 dark:text-gray-400">
                     {formatVolume(symbol.volume_24h_usd)}
                   </span>
                 </button>
@@ -195,7 +195,7 @@ export function SymbolSelect({
           </div>
 
           {/* Footer info */}
-          <div className="p-2 border-t text-xs text-muted-foreground text-center">
+          <div className="p-2 border-t text-xs text-gray-500 dark:text-gray-400 text-center">
             {filteredSymbols.length} symbols (sorted by 24h volume)
           </div>
         </div>

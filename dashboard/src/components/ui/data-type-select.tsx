@@ -75,7 +75,7 @@ export function DataTypeSelect({
                 )}
                 {!isSupported && (
                   <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
-                    即将支持
+                    Coming Soon
                   </span>
                 )}
               </div>
@@ -90,7 +90,7 @@ export function DataTypeSelect({
                   "text-xs mt-0.5",
                   isSupported ? "text-blue-600 dark:text-blue-400" : "text-blue-400/60 dark:text-blue-500/60"
                 )}>
-                  最小间隔: {option.min_interval}
+                  Min interval: {option.min_interval}
                 </p>
               )}
             </div>

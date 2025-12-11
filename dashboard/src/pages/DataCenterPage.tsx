@@ -279,8 +279,8 @@ function DownloadManagementSection() {
     value: m.id,
     label: m.name
   })) || [
-    { value: 'spot', label: '现货 (Spot)' },
-    { value: 'futures', label: '合约 (USDT-M Futures)' },
+    { value: 'spot', label: 'Spot' },
+    { value: 'futures', label: 'USDT-M Futures' },
   ]
 
   const timeframeOptions = extendedOptions?.timeframes.map(t => ({
@@ -418,7 +418,7 @@ function DownloadManagementSection() {
                     <Badge variant="outline">{task.timeframe}</Badge>
                     <Badge variant="secondary">{task.data_type || 'ohlcv'}</Badge>
                     <Badge variant="outline" className="text-xs">
-                      {task.market_type === 'futures' ? '合约' : '现货'}
+                      {task.market_type === 'futures' ? 'Futures' : 'Spot'}
                     </Badge>
                     <Badge variant={getStatusVariant(task.status)}>
                       {task.status}
@@ -517,7 +517,7 @@ function DataRangesSection() {
                 <div className="font-medium">{range.symbol}</div>
                 <div>
                   <Badge variant="outline" className="text-xs">
-                    {range.market_type === 'futures' ? '合约' : '现货'}
+                    {range.market_type === 'futures' ? 'Futures' : 'Spot'}
                   </Badge>
                 </div>
                 <div>

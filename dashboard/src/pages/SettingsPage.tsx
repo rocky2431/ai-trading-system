@@ -232,7 +232,7 @@ function LLMConfigSection() {
   }
 
   const handleDelete = async () => {
-    if (!confirm('确定要删除 OpenRouter API Key 配置吗？')) {
+    if (!confirm('Are you sure you want to delete OpenRouter API Key configuration?')) {
       return
     }
     setDeleteResult(null)
@@ -251,10 +251,10 @@ function LLMConfigSection() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Key className="h-5 w-5" />
-          OpenRouter API 配置
+          OpenRouter API Configuration
         </CardTitle>
         <CardDescription>
-          配置 OpenRouter API Key，用于访问各种 LLM 模型
+          Configure OpenRouter API Key to access various LLM models
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
@@ -269,7 +269,7 @@ function LLMConfigSection() {
               )}
               <div>
                 <h4 className="font-medium">
-                  {hasConfig ? 'API Key 已配置' : 'API Key 未配置'}
+                  {hasConfig ? 'API Key Configured' : 'API Key Not Configured'}
                 </h4>
                 {hasConfig && (
                   <p className="text-sm text-muted-foreground">
@@ -330,21 +330,20 @@ function LLMConfigSection() {
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            从{' '}
+            Get API Key from{' '}
             <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
               openrouter.ai/keys
             </a>
-            {' '}获取 API Key
           </p>
         </div>
 
         {/* Info Box */}
         <div className="p-4 bg-blue-500/10 rounded-lg text-sm">
-          <p className="font-medium text-blue-600 mb-2">说明</p>
+          <p className="font-medium text-blue-600 mb-2">Notes</p>
           <ul className="list-disc list-inside space-y-1 text-muted-foreground">
-            <li>此处只需配置 API Key，用于验证 OpenRouter 连接</li>
-            <li>各 Agent 的 Chat Model 在 <strong>Agents</strong> 标签页中单独配置</li>
-            <li>Embedding Model 在 <strong>Factor</strong> 标签页中配置</li>
+            <li>Only need to configure API Key here for verifying OpenRouter connection</li>
+            <li>Each Agent's Chat Model is configured separately in the <strong>Agents</strong> tab</li>
+            <li>Embedding Model is configured in the <strong>Factor</strong> tab</li>
           </ul>
         </div>
 
@@ -352,11 +351,11 @@ function LLMConfigSection() {
         <div className="flex items-center gap-4">
           <Button onClick={handleSave} disabled={saving || !apiKey}>
             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            保存 API Key
+            Save API Key
           </Button>
           <Button variant="outline" onClick={testLLM} disabled={testingLLM || !hasConfig}>
             {testingLLM && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            测试连接
+            Test Connection
           </Button>
         </div>
 
@@ -454,7 +453,7 @@ function ExchangeConfigSection() {
               )}
               <div>
                 <h4 className="font-medium">
-                  {hasConfig ? 'Exchange 已配置' : 'Exchange 未配置'}
+                  {hasConfig ? 'Exchange Configured' : 'Exchange Not Configured'}
                 </h4>
                 {hasConfig && (
                   <div className="text-sm text-muted-foreground mt-1">
@@ -640,32 +639,32 @@ function DataInfoSection() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Database className="h-5 w-5" />
-          数据管理
+          Data Management
         </CardTitle>
         <CardDescription>
-          数据下载和管理在 Data Center 进行
+          Data download and management is done in Data Center
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         <div className="p-4 bg-blue-500/10 rounded-lg">
-          <h4 className="font-medium text-blue-600 mb-3">数据管理说明</h4>
+          <h4 className="font-medium text-blue-600 mb-3">Data Management Guide</h4>
           <div className="space-y-3 text-sm text-muted-foreground">
             <p>
-              <strong>数据下载和管理</strong>请前往 <span className="font-medium text-foreground">Data Center</span> 页面：
+              <strong>Data download and management</strong> - please go to the <span className="font-medium text-foreground">Data Center</span> page:
             </p>
             <ul className="list-disc list-inside space-y-1 ml-2">
-              <li>查看可用交易对和数据时间范围</li>
-              <li>下载历史 K 线数据（现货/合约）</li>
-              <li>管理数据下载任务</li>
+              <li>View available trading pairs and data time ranges</li>
+              <li>Download historical candlestick data (spot/futures)</li>
+              <li>Manage data download tasks</li>
             </ul>
             <p className="mt-4">
-              <strong>创建 Factor Mining 任务时</strong>，您需要在任务创建界面选择：
+              <strong>When creating Factor Mining tasks</strong>, you need to select in the task creation interface:
             </p>
             <ul className="list-disc list-inside space-y-1 ml-2">
-              <li>市场类型（现货/合约）</li>
-              <li>交易对（支持多选）</li>
-              <li>时间级别（1m/5m/1h/1d）</li>
-              <li>数据时间范围</li>
+              <li>Market type (spot/futures)</li>
+              <li>Trading pairs (supports multi-select)</li>
+              <li>Timeframe (1m/5m/1h/1d)</li>
+              <li>Data time range</li>
             </ul>
           </div>
         </div>
@@ -673,7 +672,7 @@ function DataInfoSection() {
         <div className="flex gap-4">
           <Button variant="outline" onClick={() => window.location.href = '/data-center'}>
             <Database className="h-4 w-4 mr-2" />
-            前往 Data Center
+            Go to Data Center
           </Button>
         </div>
       </CardContent>
@@ -724,7 +723,7 @@ function FactorMiningConfigSection() {
   }
 
   if (loading) {
-    return <LoadingCard title="Factor Mining 系统配置" />
+    return <LoadingCard title="Factor Mining System Configuration" />
   }
 
   return (
@@ -732,55 +731,55 @@ function FactorMiningConfigSection() {
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <TrendingUp className="h-5 w-5" />
-          Factor Mining 系统配置
+          Factor Mining System Configuration
         </CardTitle>
         <CardDescription>
-          全局系统配置，任务级配置（因子家族、评估阈值等）在创建任务时设置
+          Global system configuration, task-level configuration (factor families, evaluation thresholds, etc.) is set when creating tasks
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
         {/* Info Box */}
         <div className="p-4 bg-blue-500/10 rounded-lg text-sm">
-          <p className="font-medium text-blue-600 mb-2">配置说明</p>
+          <p className="font-medium text-blue-600 mb-2">Configuration Guide</p>
           <ul className="list-disc list-inside space-y-1 text-muted-foreground">
-            <li><strong>系统配置</strong>（本页面）：Embedding 模型、并发数、超时时间</li>
-            <li><strong>任务配置</strong>（创建任务时）：因子家族、评估阈值、时间范围、数据集划分</li>
+            <li><strong>System Configuration</strong> (this page): Embedding model, concurrency, timeout</li>
+            <li><strong>Task Configuration</strong> (when creating tasks): Factor families, evaluation thresholds, time range, dataset split</li>
           </ul>
         </div>
 
         {/* Embedding Model Selection */}
         <div className="p-4 bg-muted rounded-lg">
-          <h4 className="font-medium mb-3">Embedding Model (向量化模型)</h4>
+          <h4 className="font-medium mb-3">Embedding Model (Vectorization Model)</h4>
           <p className="text-sm text-muted-foreground mb-3">
-            用于因子代码的向量化表示，支持相似因子搜索和去重
+            Used for vectorized representation of factor code, supports similar factor search and deduplication
           </p>
           <div className="flex gap-4 items-end">
             <div className="flex-1 space-y-2">
-              <Label>选择 Embedding Model</Label>
+              <Label>Select Embedding Model</Label>
               <Select
-                options={[{ value: '', label: '选择模型...' }, ...embeddingOptions]}
+                options={[{ value: '', label: 'Select model...' }, ...embeddingOptions]}
                 value={selectedEmbedding}
                 onChange={(e) => setSelectedEmbedding(e.target.value)}
               />
             </div>
             <Button onClick={handleSaveEmbedding} disabled={!selectedEmbedding || selectedEmbedding === keys?.embedding_model}>
-              保存
+              Save
             </Button>
           </div>
           {keys?.embedding_model && (
             <p className="text-xs text-muted-foreground mt-2">
-              当前配置: <span className="font-medium">{keys.embedding_model}</span>
+              Current configuration: <span className="font-medium">{keys.embedding_model}</span>
             </p>
           )}
         </div>
 
         {/* System Settings */}
         <div className="p-4 bg-muted rounded-lg">
-          <h4 className="font-medium mb-3">系统运行配置</h4>
+          <h4 className="font-medium mb-3">System Runtime Configuration</h4>
           <div className="grid grid-cols-2 gap-6">
             <div className="space-y-2">
               <div className="flex justify-between">
-                <Label>最大并发生成数</Label>
+                <Label>Max Concurrent Generation</Label>
                 <span className="text-sm font-medium">{maxConcurrent}</span>
               </div>
               <Slider
@@ -791,12 +790,12 @@ function FactorMiningConfigSection() {
                 step={1}
               />
               <p className="text-xs text-muted-foreground">
-                同时生成因子的最大数量，影响系统负载
+                Maximum number of factors to generate simultaneously, affects system load
               </p>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between">
-                <Label>代码执行超时 (秒)</Label>
+                <Label>Code Execution Timeout (seconds)</Label>
                 <span className="text-sm font-medium">{codeTimeout}s</span>
               </div>
               <Slider
@@ -807,13 +806,13 @@ function FactorMiningConfigSection() {
                 step={5}
               />
               <p className="text-xs text-muted-foreground">
-                单个因子代码执行的最大时间
+                Maximum time for executing a single factor code
               </p>
             </div>
           </div>
           <Button onClick={handleSaveSystem} disabled={saving} className="mt-4">
             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            保存系统配置
+            Save System Configuration
           </Button>
         </div>
       </CardContent>

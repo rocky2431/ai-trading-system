@@ -52,6 +52,22 @@ from iqfmp.evaluation.stability_analyzer import (
     StabilityConfig,
     StabilityReport as FullStabilityReport,
 )
+# New evaluation modules
+from iqfmp.evaluation.walk_forward_validator import (
+    WalkForwardValidator,
+    WalkForwardConfig,
+    WalkForwardResult,
+)
+from iqfmp.evaluation.ic_decomposition import (
+    ICDecompositionAnalyzer,
+    ICDecompositionConfig,
+    ICDecompositionResult,
+)
+from iqfmp.evaluation.redundancy_detector import (
+    RedundancyDetector,
+    RedundancyConfig,
+    RedundancyResult,
+)
 
 # Vector store imports
 from iqfmp.vector.store import FactorVectorStore
@@ -521,16 +537,19 @@ class FactorService:
         if not factor:
             raise FactorNotFoundError(f"Factor {factor_id} not found")
 
-        # Use Qlib-based factor engine
-        from iqfmp.core.factor_engine import (
-            FactorEngine,
-            get_default_data_path,
-        )
+        # Use Qlib-based factor engine with TimescaleDB data
+        from iqfmp.core.factor_engine import FactorEngine
+        from iqfmp.core.data_provider import DataProvider
 
         try:
-            # Load real market data
-            data_path = get_default_data_path()
-            engine = FactorEngine(data_path=data_path)
+            # Load real market data from TimescaleDB (primary) or CSV (fallback)
+            provider = DataProvider(session=self.session)
+            df = await provider.load_ohlcv(
+                symbol="ETH/USDT",
+                timeframe="1d",
+            )
+
+            engine = FactorEngine(df=df)
 
             # Compute factor values using actual code
             factor_values = engine.compute_factor(factor.code, factor.name)
@@ -679,8 +698,8 @@ class FactorService:
                 regime_stability=stability_dict.get("regime_stability", {}),
             )
 
-        except FileNotFoundError:
-            print("Warning: Sample data not found, using fallback evaluation")
+        except (ValueError, FileNotFoundError) as e:
+            print(f"Warning: Data not found, using fallback evaluation: {e}")
             metrics = FactorMetrics(
                 ic_mean=0.0, ic_std=0.0, ir=0.0, sharpe=0.0,
                 max_drawdown=0.0, turnover=0.0,
@@ -755,6 +774,196 @@ class FactorService:
             print(f"Warning: Failed to broadcast evaluation completion: {e}")
 
         return metrics, stability, passed, trial_number
+
+    async def evaluate_factor_extended(
+        self,
+        factor_id: str,
+        splits: list[str],
+        include_walk_forward: bool = True,
+        include_ic_decomposition: bool = True,
+        walk_forward_config: Optional[dict] = None,
+    ) -> dict:
+        """Run extended factor evaluation with Walk-Forward and IC decomposition.
+
+        This method provides comprehensive robustness analysis beyond basic metrics.
+
+        Args:
+            factor_id: Factor ID
+            splits: Data splits to evaluate
+            include_walk_forward: Run Walk-Forward validation
+            include_ic_decomposition: Run IC decomposition analysis
+            walk_forward_config: Optional Walk-Forward configuration
+
+        Returns:
+            Dictionary with all evaluation results
+        """
+        # First run basic evaluation
+        metrics, stability, passed, trial_number = await self.evaluate_factor(
+            factor_id=factor_id,
+            splits=splits,
+            include_cv=True,
+            include_stability=True,
+        )
+
+        result = {
+            "factor_id": factor_id,
+            "metrics": {
+                "ic_mean": metrics.ic_mean,
+                "ic_std": metrics.ic_std,
+                "ir": metrics.ir,
+                "sharpe": metrics.sharpe,
+                "max_drawdown": metrics.max_drawdown,
+                "turnover": metrics.turnover,
+            },
+            "passed_threshold": passed,
+            "experiment_number": trial_number,
+            "stability": {
+                "time_stability": stability.time_stability,
+                "market_stability": stability.market_stability,
+                "regime_stability": stability.regime_stability,
+            },
+        }
+
+        # Get factor and compute values for extended analysis
+        factor = await self.factor_repo.get_by_id(factor_id)
+        if not factor:
+            return result
+
+        try:
+            from iqfmp.core.factor_engine import FactorEngine
+            from iqfmp.core.data_provider import DataProvider
+
+            provider = DataProvider(session=self.session)
+            df = await provider.load_ohlcv(symbol="ETH/USDT", timeframe="1d")
+            engine = FactorEngine(df=df)
+            factor_values = engine.compute_factor(factor.code, factor.name)
+            eval_df = self._prepare_evaluation_data(engine.data, factor_values)
+
+            # Walk-Forward Validation
+            if include_walk_forward:
+                try:
+                    wf_config_dict = walk_forward_config or {}
+                    wf_config = WalkForwardConfig(
+                        window_size=wf_config_dict.get("window_size", 252),
+                        step_size=wf_config_dict.get("step_size", 63),
+                        min_train_samples=wf_config_dict.get("min_train_samples", 126),
+                        date_column="date",
+                        factor_column="factor_value",
+                        return_column="forward_return",
+                    )
+                    wf_validator = WalkForwardValidator(config=wf_config)
+                    wf_result = wf_validator.validate(eval_df)
+
+                    result["walk_forward"] = {
+                        "avg_train_ic": wf_result.avg_train_ic,
+                        "avg_oos_ic": wf_result.avg_oos_ic,
+                        "ic_degradation": wf_result.ic_degradation,
+                        "oos_ir": wf_result.oos_ir,
+                        "min_oos_ic": wf_result.min_oos_ic,
+                        "max_oos_ic": wf_result.max_oos_ic,
+                        "oos_ic_std": wf_result.oos_ic_std,
+                        "ic_consistency": wf_result.ic_consistency,
+                        "passes_robustness": wf_result.passes_robustness,
+                        "ic_decay_rate": wf_result.ic_decay_rate,
+                        "predicted_half_life": wf_result.predicted_half_life,
+                        "raw_sharpe": wf_result.raw_sharpe,
+                        "deflated_sharpe": wf_result.deflated_sharpe,
+                        "n_windows": wf_result.n_windows,
+                        "window_results": [w.to_dict() for w in wf_result.window_results[:10]],
+                    }
+                except Exception as e:
+                    result["walk_forward"] = {"error": str(e)}
+
+            # IC Decomposition
+            if include_ic_decomposition:
+                try:
+                    ic_config = ICDecompositionConfig(
+                        date_column="date",
+                        factor_column="factor_value",
+                        return_column="forward_return",
+                    )
+                    ic_analyzer = ICDecompositionAnalyzer(config=ic_config)
+                    ic_result = ic_analyzer.analyze(eval_df)
+
+                    result["ic_decomposition"] = {
+                        "total_ic": ic_result.total_ic,
+                        "ic_by_month": dict(list(ic_result.ic_by_month.items())[-12:]),  # Last 12 months
+                        "ic_by_quarter": ic_result.ic_by_quarter,
+                        "large_cap_ic": ic_result.large_cap_ic,
+                        "mid_cap_ic": ic_result.mid_cap_ic,
+                        "small_cap_ic": ic_result.small_cap_ic,
+                        "high_vol_ic": ic_result.high_vol_ic,
+                        "low_vol_ic": ic_result.low_vol_ic,
+                        "ic_hit_rate": ic_result.ic_hit_rate,
+                        "ic_stability": ic_result.ic_stability,
+                        "regime_shift_detected": ic_result.regime_shift_detected,
+                        "ic_decay_rate": ic_result.ic_decay_rate,
+                        "predicted_half_life": ic_result.predicted_half_life,
+                        "diagnosis": ic_result.diagnosis,
+                        "recommendations": ic_result.recommendations,
+                    }
+                except Exception as e:
+                    result["ic_decomposition"] = {"error": str(e)}
+
+            # Calculate overall verdict
+            wf_passed = result.get("walk_forward", {}).get("passes_robustness", True)
+            ic_stable = result.get("ic_decomposition", {}).get("ic_stability", 0) > 0.3
+            overall_score = self._calculate_overall_score(result)
+
+            if passed and wf_passed and ic_stable:
+                verdict = "pass"
+            elif passed or (wf_passed and overall_score > 50):
+                verdict = "needs_review"
+            else:
+                verdict = "fail"
+
+            result["overall_score"] = overall_score
+            result["verdict"] = verdict
+
+        except Exception as e:
+            result["extended_analysis_error"] = str(e)
+
+        return result
+
+    def _calculate_overall_score(self, result: dict) -> float:
+        """Calculate composite score from all metrics (0-100)."""
+        score = 0.0
+
+        # Basic metrics contribution (40 points max)
+        metrics = result.get("metrics", {})
+        ic = abs(metrics.get("ic_mean", 0))
+        ir = metrics.get("ir", 0)
+        sharpe = metrics.get("sharpe", 0)
+
+        score += min(15, ic * 300)  # IC: max 15 points
+        score += min(15, ir * 7.5)  # IR: max 15 points
+        score += min(10, max(0, sharpe) * 5)  # Sharpe: max 10 points
+
+        # Walk-Forward contribution (30 points max)
+        wf = result.get("walk_forward", {})
+        if "error" not in wf:
+            oos_ic = abs(wf.get("avg_oos_ic", 0))
+            consistency = wf.get("ic_consistency", 0)
+            degradation = wf.get("ic_degradation", 1)
+
+            score += min(10, oos_ic * 200)  # OOS IC: max 10 points
+            score += min(10, consistency * 10)  # Consistency: max 10 points
+            score += min(10, max(0, 1 - degradation) * 10)  # Low degradation: max 10 points
+
+        # IC Decomposition contribution (20 points max)
+        ic_dec = result.get("ic_decomposition", {})
+        if "error" not in ic_dec:
+            hit_rate = ic_dec.get("ic_hit_rate", 0)
+            stability = ic_dec.get("ic_stability", 0)
+
+            score += min(10, hit_rate * 10)  # Hit rate: max 10 points
+            score += min(10, stability * 10)  # Stability: max 10 points
+
+        # Stability contribution (10 points max)
+        if result.get("passed_threshold", False):
+            score += 10
+
+        return round(min(100, score), 2)
 
     def _prepare_evaluation_data(
         self, df: pd.DataFrame, factor_values: pd.Series
@@ -1287,16 +1496,18 @@ class FactorService:
             factors.append(factor)
 
         # Calculate real correlation matrix using factor values
-        from iqfmp.core.factor_engine import FactorEngine, get_default_data_path
+        from iqfmp.core.factor_engine import FactorEngine
+        from iqfmp.core.data_provider import DataProvider
         import numpy as np
         from scipy import stats
 
         correlation_matrix: dict[str, dict[str, float]] = {}
 
         try:
-            # Load data and compute factor values
-            data_path = get_default_data_path()
-            engine = FactorEngine(data_path=data_path)
+            # Load data from TimescaleDB (primary) or CSV (fallback)
+            provider = DataProvider(session=self.session)
+            df = await provider.load_ohlcv(symbol="ETH/USDT", timeframe="1d")
+            engine = FactorEngine(df=df)
 
             factor_values_dict = {}
             for factor in factors:

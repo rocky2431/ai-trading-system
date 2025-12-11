@@ -5,7 +5,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { systemApi } from '@/api'
 import type { SystemStatusResponse } from '@/api'
-import type { AgentSystemStatus, Agent, TaskQueueItem, LLMMetrics, ResourceMetrics } from '@/types/agent'
+import type { AgentSystemStatus } from '@/types/agent'
 
 // 将 API 响应转换为前端类型
 function apiToAgentStatus(response: SystemStatusResponse): AgentSystemStatus {

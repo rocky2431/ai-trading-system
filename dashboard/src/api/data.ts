@@ -67,6 +67,8 @@ export interface DownloadTaskStatus {
   symbol: string
   timeframe: string
   exchange: string
+  data_type: string  // ohlcv, agg_trades, etc.
+  market_type: string  // spot, futures
   start_date: string
   end_date: string
   status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -87,6 +89,8 @@ export interface StartDownloadRequest {
   symbol: string
   timeframe: string
   exchange?: string
+  data_type?: string  // ohlcv, agg_trades, etc.
+  market_type?: string  // spot, futures
   start_date: string
   end_date?: string
 }
@@ -121,6 +125,8 @@ export interface OHLCVDataResponse {
 export interface DataRangeInfo {
   symbol: string
   timeframe: string
+  market_type: string  // spot, futures
+  data_type: string  // ohlcv, agg_trades, etc.
   start_date: string | null
   end_date: string | null
   total_rows: number
@@ -147,16 +153,64 @@ export interface DataOptionsResponse {
   timeframes: TimeframeOption[]
 }
 
+// ============== Binance Symbols ==============
+
+export interface BinanceSymbolInfo {
+  symbol: string
+  base_asset: string
+  quote_asset: string
+  status: string
+  rank: number
+  volume_24h_usd: number
+}
+
+export interface BinanceSymbolListResponse {
+  symbols: BinanceSymbolInfo[]
+  total: number
+  updated_at: string | null
+}
+
+// ============== Market Types ==============
+
+export interface MarketTypeOption {
+  id: string
+  name: string
+  description: string
+}
+
+// ============== Data Types ==============
+
+export interface DataTypeOption {
+  id: string
+  name: string
+  description: string
+  requires_futures: boolean
+  min_interval: string
+  supported: boolean  // Whether download is implemented
+}
+
+export interface ExtendedDataOptionsResponse {
+  exchanges: ExchangeOption[]
+  timeframes: TimeframeOption[]
+  data_types: DataTypeOption[]
+  market_types: MarketTypeOption[]
+}
+
 // ============== API ==============
 
 export const dataApi = {
   // Status
   getStatus: () => api.get<DataStatusResponse>('/data/status'),
   getOptions: () => api.get<DataOptionsResponse>('/data/options'),
+  getExtendedOptions: () => api.get<ExtendedDataOptionsResponse>('/data/options/extended'),
+
+  // Binance symbols
+  getBinanceSymbols: (params?: { quote_asset?: string; limit?: number; search?: string }) =>
+    api.get<BinanceSymbolListResponse>('/data/binance/symbols', params),
 
   // Symbols
   listSymbols: (params?: { exchange?: string; page?: number; page_size?: number }) =>
-    api.get<SymbolListResponse>('/data/symbols', { params }),
+    api.get<SymbolListResponse>('/data/symbols', params),
   addSymbol: (data: AddSymbolRequest) =>
     api.post<AddSymbolResponse>('/data/symbols', data),
   removeSymbol: (symbol: string) =>
@@ -164,7 +218,7 @@ export const dataApi = {
 
   // Downloads
   listDownloads: (params?: { status?: string; limit?: number }) =>
-    api.get<DownloadTaskListResponse>('/data/downloads', { params }),
+    api.get<DownloadTaskListResponse>('/data/downloads', params),
   startDownload: (data: StartDownloadRequest) =>
     api.post<StartDownloadResponse>('/data/downloads', data),
   getDownload: (taskId: string) =>
@@ -174,9 +228,9 @@ export const dataApi = {
 
   // OHLCV Data
   getOHLCV: (symbol: string, params: { timeframe: string; start_date: string; end_date?: string; limit?: number }) =>
-    api.get<OHLCVDataResponse>(`/data/ohlcv/${encodeURIComponent(symbol)}`, { params }),
+    api.get<OHLCVDataResponse>(`/data/ohlcv/${encodeURIComponent(symbol)}`, params),
 
   // Data Ranges
   getRanges: (params?: { symbol?: string; timeframe?: string }) =>
-    api.get<DataRangeResponse>('/data/ranges', { params }),
+    api.get<DataRangeResponse>('/data/ranges', params),
 }

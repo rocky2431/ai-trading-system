@@ -1,9 +1,13 @@
 """System API router."""
 
-from fastapi import APIRouter, Depends, WebSocket
+from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from iqfmp.api.system.schemas import (
+    AgentConfigListResponse,
+    AgentConfigOperationResponse,
+    AgentConfigResponse,
+    AgentConfigUpdateRequest,
     AgentResponse,
     LLMMetricsResponse,
     ResourceMetricsResponse,
@@ -96,3 +100,79 @@ async def system_websocket(websocket: WebSocket) -> None:
     - evaluation_complete: Factor evaluation completion events
     """
     await websocket_endpoint(websocket)
+
+
+# ============== Agent Config Endpoints ==============
+
+
+@router.get("/agent-configs", response_model=AgentConfigListResponse)
+async def get_agent_configs(
+    session: AsyncSession = Depends(get_db),
+) -> AgentConfigListResponse:
+    """Get all agent configurations.
+
+    Returns:
+        List of agent configurations with prompts and settings
+    """
+    service = SystemService(session=session)
+    return await service.get_agent_configs()
+
+
+@router.get("/agent-configs/{agent_type}", response_model=AgentConfigResponse)
+async def get_agent_config(
+    agent_type: str,
+    session: AsyncSession = Depends(get_db),
+) -> AgentConfigResponse:
+    """Get agent configuration by type.
+
+    Args:
+        agent_type: Agent type (factor_generation, evaluation, strategy, backtest)
+
+    Returns:
+        Agent configuration with prompts and settings
+    """
+    service = SystemService(session=session)
+    config = await service.get_agent_config(agent_type)
+
+    if not config:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent config for type '{agent_type}' not found",
+        )
+
+    return config
+
+
+@router.put("/agent-configs/{agent_type}", response_model=AgentConfigOperationResponse)
+async def update_agent_config(
+    agent_type: str,
+    request: AgentConfigUpdateRequest,
+    session: AsyncSession = Depends(get_db),
+) -> AgentConfigOperationResponse:
+    """Update agent configuration.
+
+    Args:
+        agent_type: Agent type to update
+        request: Fields to update (only provided fields will be updated)
+
+    Returns:
+        Operation result with updated configuration
+    """
+    service = SystemService(session=session)
+    return await service.update_agent_config(agent_type, request)
+
+
+@router.post("/agent-configs/init", response_model=AgentConfigOperationResponse)
+async def init_agent_configs(
+    session: AsyncSession = Depends(get_db),
+) -> AgentConfigOperationResponse:
+    """Initialize default agent configurations.
+
+    Creates default configurations for all agent types if they don't exist.
+    This is safe to call multiple times - existing configs will not be overwritten.
+
+    Returns:
+        Operation result with number of configs created
+    """
+    service = SystemService(session=session)
+    return await service.init_default_agent_configs()

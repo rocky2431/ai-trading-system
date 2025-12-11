@@ -8,6 +8,17 @@ interface User {
   role: 'admin' | 'user' | 'viewer'
 }
 
+// Helper function to apply theme to DOM
+const applyThemeToDOM = (theme: 'light' | 'dark') => {
+  if (typeof document !== 'undefined') {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark')
+    } else {
+      document.documentElement.classList.remove('dark')
+    }
+  }
+}
+
 interface AppState {
   // Theme
   theme: 'light' | 'dark'
@@ -31,11 +42,16 @@ export const useAppStore = create<AppState>()(
       (set) => ({
         // Theme
         theme: 'light',
-        setTheme: (theme) => set({ theme }),
+        setTheme: (theme) => {
+          applyThemeToDOM(theme)
+          set({ theme })
+        },
         toggleTheme: () =>
-          set((state) => ({
-            theme: state.theme === 'light' ? 'dark' : 'light',
-          })),
+          set((state) => {
+            const newTheme = state.theme === 'light' ? 'dark' : 'light'
+            applyThemeToDOM(newTheme)
+            return { theme: newTheme }
+          }),
 
         // User
         user: null,
@@ -64,6 +80,12 @@ export const useAppStore = create<AppState>()(
           theme: state.theme,
           sidebarCollapsed: state.sidebarCollapsed,
         }),
+        onRehydrateStorage: () => (state) => {
+          // Apply theme to DOM when state is rehydrated from localStorage
+          if (state?.theme) {
+            applyThemeToDOM(state.theme)
+          }
+        },
       }
     )
   )

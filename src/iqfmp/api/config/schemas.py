@@ -44,6 +44,7 @@ class EmbeddingModelInfo(BaseModel):
     id: str
     name: str
     dimensions: int
+    context_length: Optional[int] = None  # Max input tokens
 
 
 class AvailableModelsResponse(BaseModel):

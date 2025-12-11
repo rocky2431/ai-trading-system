@@ -12,7 +12,7 @@ export interface Agent {
   currentTask: string | null
   progress: number
   startedAt: string | null
-  lastActivity: string
+  lastActivity: string | null
 }
 
 export interface TaskQueueItem {

@@ -3,8 +3,10 @@
 import os
 import json
 import time
+import httpx
 from pathlib import Path
 from typing import Optional
+from datetime import datetime, timedelta
 
 from iqfmp.api.config.schemas import (
     AgentConfigResponse,
@@ -35,37 +37,56 @@ from iqfmp.api.config.schemas import (
 class ConfigService:
     """Service for managing IQFMP system configuration."""
 
-    # IQFMP Agents (from architecture.md)
+    # Cache for OpenRouter models (TTL: 5 minutes)
+    _models_cache: list = []
+    _models_cache_time: Optional[datetime] = None
+    _embedding_models_cache: list = []
+    _embedding_models_cache_time: Optional[datetime] = None
+    _cache_ttl = timedelta(minutes=5)
+
+    # Preferred providers to show (filter from 500+ models)
+    PREFERRED_PROVIDERS = [
+        "deepseek",
+        "anthropic",
+        "openai",
+        "google",
+        "x-ai",
+        "z-ai",        # 智谱 GLM
+        "moonshotai",  # Kimi
+        "mistralai",
+    ]
+
+    # IQFMP Agents (from architecture.md) - Updated with latest models 2024-2025
     AGENTS = [
         {
             "agent_id": "factor_generation",
             "agent_name": "Factor Generation Agent",
             "description": "LLM 驱动的因子代码生成",
-            "default_model": "deepseek/deepseek-coder",
+            "default_model": "deepseek/deepseek-coder-v3",  # Best for code
         },
         {
             "agent_id": "factor_evaluation",
             "agent_name": "Factor Evaluation Agent",
             "description": "多维度验证 + 防过拟合",
-            "default_model": "deepseek/deepseek-chat",
+            "default_model": "deepseek/deepseek-r1",  # Best for reasoning
         },
         {
             "agent_id": "strategy_assembly",
             "agent_name": "Strategy Assembly Agent",
             "description": "策略组装与优化",
-            "default_model": "anthropic/claude-3.5-sonnet",
+            "default_model": "anthropic/claude-sonnet-4",  # Latest Claude
         },
         {
             "agent_id": "backtest_optimization",
             "agent_name": "Backtest Optimization Agent",
             "description": "回测参数优化",
-            "default_model": "openai/gpt-4o",
+            "default_model": "openai/gpt-4.1",  # Latest GPT
         },
         {
             "agent_id": "risk_check",
             "agent_name": "Risk Check Agent",
             "description": "风险检查与控制",
-            "default_model": "deepseek/deepseek-chat",
+            "default_model": "google/gemini-2.5-flash",  # Fast + 1M context
         },
     ]
 
@@ -112,8 +133,24 @@ class ConfigService:
 
     def get_status(self) -> ConfigStatusResponse:
         """Get current configuration status."""
-        llm_configured = bool(self._config.get("api_key"))
-        exchange_configured = bool(self._config.get("exchange_api_key"))
+        # Check LLM configuration from multiple sources
+        llm_api_key = (
+            self._config.get("api_key")
+            or os.getenv("OPENROUTER_API_KEY")
+            or os.getenv("LLM_API_KEY")
+        )
+        llm_configured = bool(llm_api_key)
+        llm_provider = self._config.get("provider") or "openrouter" if llm_configured else None
+        llm_model = (
+            self._config.get("model")
+            or os.getenv("OPENROUTER_MODEL")
+            or os.getenv("LLM_MODEL")
+        )
+
+        # Check exchange configuration
+        exchange_api_key = self._config.get("exchange_api_key") or os.getenv("EXCHANGE_API_KEY")
+        exchange_configured = bool(exchange_api_key)
+        exchange_id = self._config.get("exchange_id") or os.getenv("EXCHANGE_ID")
 
         # Check for Qlib availability
         qlib_available = False
@@ -121,14 +158,13 @@ class ConfigService:
             import qlib
             qlib_available = True
         except (ImportError, LookupError, Exception):
-            # ImportError: qlib not installed
-            # LookupError: qlib installed but setuptools-scm version detection failed
-            # Exception: catch any other initialization errors
             pass
 
-        # Check database connections
-        timescaledb_connected = bool(os.getenv("DATABASE_URL"))
-        redis_connected = bool(os.getenv("REDIS_URL"))
+        # Check TimescaleDB connection - support both DATABASE_URL and individual PG* vars
+        timescaledb_connected = self._check_timescaledb_connection()
+
+        # Check Redis connection - support both REDIS_URL and individual vars
+        redis_connected = self._check_redis_connection()
 
         features = FeaturesStatus(
             factor_generation=llm_configured,
@@ -140,75 +176,288 @@ class ConfigService:
 
         return ConfigStatusResponse(
             llm_configured=llm_configured,
-            llm_provider=self._config.get("provider") if llm_configured else None,
-            llm_model=self._config.get("model") if llm_configured else None,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
             exchange_configured=exchange_configured,
-            exchange_id=self._config.get("exchange_id") if exchange_configured else None,
+            exchange_id=exchange_id if exchange_configured else None,
             qlib_available=qlib_available,
             timescaledb_connected=timescaledb_connected,
             redis_connected=redis_connected,
             features=features,
         )
 
-    def get_available_models(self) -> AvailableModelsResponse:
-        """Get available LLM models."""
-        openrouter_models = [
-            ModelInfo(
-                id="deepseek/deepseek-coder",
-                name="DeepSeek Coder",
-                provider="DeepSeek",
-                context_length=64000,
-                use_case="factor_generation",
-            ),
-            ModelInfo(
-                id="deepseek/deepseek-chat-v3-0324",
-                name="DeepSeek Chat V3",
-                provider="DeepSeek",
-                context_length=64000,
-                use_case="general",
-            ),
-            ModelInfo(
-                id="deepseek/deepseek-r1",
-                name="DeepSeek R1",
-                provider="DeepSeek",
-                context_length=64000,
-                use_case="reasoning",
-            ),
-            ModelInfo(
-                id="anthropic/claude-3.5-sonnet",
-                name="Claude 3.5 Sonnet",
-                provider="Anthropic",
-                context_length=200000,
-                use_case="strategy_design",
-            ),
-            ModelInfo(
-                id="openai/gpt-4o",
-                name="GPT-4o",
-                provider="OpenAI",
-                context_length=128000,
-                use_case="code_review",
-            ),
-            ModelInfo(
-                id="google/gemini-2.0-flash-exp",
-                name="Gemini 2.0 Flash",
-                provider="Google",
-                context_length=1000000,
-                use_case="analysis",
-            ),
+    def _check_timescaledb_connection(self) -> bool:
+        """Check TimescaleDB connection status."""
+        # Check if DATABASE_URL or individual PG* env vars exist
+        has_config = bool(
+            os.getenv("DATABASE_URL")
+            or (os.getenv("PGHOST") or os.getenv("PGPORT"))
+        )
+        if not has_config:
+            return False
+
+        # Try actual connection
+        try:
+            import psycopg2
+            conn_params = {}
+            if os.getenv("DATABASE_URL"):
+                # Use DATABASE_URL directly
+                conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+            else:
+                # Use individual PG* environment variables
+                conn = psycopg2.connect(
+                    host=os.getenv("PGHOST", "localhost"),
+                    port=os.getenv("PGPORT", "5432"),
+                    user=os.getenv("PGUSER", "postgres"),
+                    password=os.getenv("PGPASSWORD", ""),
+                    dbname=os.getenv("PGDATABASE", "iqfmp"),
+                    connect_timeout=3,
+                )
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def _check_redis_connection(self) -> bool:
+        """Check Redis connection status."""
+        # Check if REDIS_URL or individual vars exist
+        has_config = bool(
+            os.getenv("REDIS_URL")
+            or os.getenv("REDIS_HOST")
+        )
+        if not has_config:
+            # Default to localhost:6379
+            pass
+
+        # Try actual connection
+        try:
+            import redis
+            redis_url = os.getenv("REDIS_URL")
+            if redis_url:
+                client = redis.from_url(redis_url, socket_timeout=2)
+            else:
+                client = redis.Redis(
+                    host=os.getenv("REDIS_HOST", "localhost"),
+                    port=int(os.getenv("REDIS_PORT", "6379")),
+                    password=os.getenv("REDIS_PASSWORD"),
+                    socket_timeout=2,
+                )
+            client.ping()
+            return True
+        except Exception:
+            return False
+
+    def _fetch_openrouter_models(self) -> list[ModelInfo]:
+        """Fetch models from OpenRouter API with caching.
+
+        Returns filtered list of models from preferred providers.
+        Uses 5-minute cache to avoid excessive API calls.
+        """
+        # Check cache
+        if (
+            self._models_cache
+            and self._models_cache_time
+            and datetime.now() - self._models_cache_time < self._cache_ttl
+        ):
+            return self._models_cache
+
+        try:
+            # Fetch from OpenRouter API
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get("https://openrouter.ai/api/v1/models")
+                response.raise_for_status()
+                data = response.json()
+
+            models = []
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                # Skip free/beta variants and filter by preferred providers
+                if ":free" in model_id or ":beta" in model_id:
+                    continue
+
+                provider = model_id.split("/")[0] if "/" in model_id else ""
+                if provider not in self.PREFERRED_PROVIDERS:
+                    continue
+
+                # Extract context length from pricing info or default
+                context_length = m.get("context_length", 128000)
+
+                # Map provider to display name
+                provider_names = {
+                    "deepseek": "DeepSeek",
+                    "anthropic": "Anthropic",
+                    "openai": "OpenAI",
+                    "google": "Google",
+                    "x-ai": "xAI",
+                    "z-ai": "智谱 GLM",
+                    "moonshotai": "Kimi",
+                    "mistralai": "Mistral",
+                }
+
+                models.append(ModelInfo(
+                    id=model_id,
+                    name=m.get("name", model_id),
+                    provider=provider_names.get(provider, provider.title()),
+                    context_length=context_length,
+                    use_case=self._infer_use_case(model_id, m.get("name", "")),
+                ))
+
+            # Sort by provider, then by name
+            models.sort(key=lambda x: (x.provider, x.name))
+
+            # Update cache
+            ConfigService._models_cache = models
+            ConfigService._models_cache_time = datetime.now()
+
+            return models
+
+        except Exception as e:
+            # Fallback to cached or minimal list
+            if self._models_cache:
+                return self._models_cache
+            return self._get_fallback_models()
+
+    def _infer_use_case(self, model_id: str, name: str) -> str:
+        """Infer use case from model ID and name."""
+        lower_id = model_id.lower()
+        lower_name = name.lower()
+
+        if "coder" in lower_id or "code" in lower_name:
+            return "code_generation"
+        elif "r1" in lower_id or "o1" in lower_id or "o3" in lower_id or "reasoning" in lower_name:
+            return "reasoning"
+        elif "flash" in lower_id or "haiku" in lower_id or "mini" in lower_id:
+            return "fast_tasks"
+        elif "opus" in lower_id or "pro" in lower_id:
+            return "complex_analysis"
+        elif "sonnet" in lower_id:
+            return "strategy_design"
+        else:
+            return "general"
+
+    def _get_fallback_models(self) -> list[ModelInfo]:
+        """Return fallback models if API call fails."""
+        return [
+            ModelInfo(id="deepseek/deepseek-chat", name="DeepSeek Chat", provider="DeepSeek", context_length=64000, use_case="general"),
+            ModelInfo(id="anthropic/claude-sonnet-4", name="Claude Sonnet 4", provider="Anthropic", context_length=200000, use_case="strategy_design"),
+            ModelInfo(id="openai/gpt-4o", name="GPT-4o", provider="OpenAI", context_length=128000, use_case="general"),
+            ModelInfo(id="google/gemini-2.0-flash", name="Gemini 2.0 Flash", provider="Google", context_length=1000000, use_case="fast_tasks"),
         ]
 
-        embedding_models = [
-            EmbeddingModelInfo(
-                id="openai/text-embedding-3-large",
-                name="OpenAI text-embedding-3-large",
-                dimensions=3072,
-            ),
-            EmbeddingModelInfo(
-                id="openai/text-embedding-3-small",
-                name="OpenAI text-embedding-3-small",
-                dimensions=1536,
-            ),
+    def _fetch_openrouter_embedding_models(self) -> list[EmbeddingModelInfo]:
+        """Fetch embedding models from OpenRouter API with caching.
+
+        Returns list of embedding models from /api/v1/embeddings/models.
+        Uses 5-minute cache to avoid excessive API calls.
+        """
+        # Check cache
+        if (
+            self._embedding_models_cache
+            and self._embedding_models_cache_time
+            and datetime.now() - self._embedding_models_cache_time < self._cache_ttl
+        ):
+            return self._embedding_models_cache
+
+        try:
+            # Fetch from OpenRouter API
+            with httpx.Client(timeout=10.0) as client:
+                response = client.get("https://openrouter.ai/api/v1/embeddings/models")
+                response.raise_for_status()
+                data = response.json()
+
+            models = []
+            for m in data.get("data", []):
+                model_id = m.get("id", "")
+                name = m.get("name", model_id)
+                context_length = m.get("context_length", 8192)
+
+                # Extract dimensions from description or use default based on model
+                dimensions = self._infer_embedding_dimensions(model_id, m.get("description", ""))
+
+                models.append(EmbeddingModelInfo(
+                    id=model_id,
+                    name=name,
+                    dimensions=dimensions,
+                    context_length=context_length,
+                ))
+
+            # Sort by name
+            models.sort(key=lambda x: x.name)
+
+            # Update cache
+            ConfigService._embedding_models_cache = models
+            ConfigService._embedding_models_cache_time = datetime.now()
+
+            return models
+
+        except Exception as e:
+            # Fallback to cached or static list
+            if self._embedding_models_cache:
+                return self._embedding_models_cache
+            return self._get_fallback_embedding_models()
+
+    def _infer_embedding_dimensions(self, model_id: str, description: str) -> int:
+        """Infer embedding dimensions from model ID or description."""
+        lower_id = model_id.lower()
+        lower_desc = description.lower()
+
+        # Known dimensions based on model families
+        if "text-embedding-3-large" in lower_id:
+            return 3072
+        elif "text-embedding-3-small" in lower_id:
+            return 1536
+        elif "text-embedding-ada" in lower_id:
+            return 1536
+        elif "qwen3-embedding-8b" in lower_id or "qwen3-embedding-4b" in lower_id:
+            return 4096  # Qwen3 embedding models
+        elif "gemini-embedding" in lower_id:
+            return 768  # Google Gemini
+        elif "mistral-embed" in lower_id or "codestral-embed" in lower_id:
+            return 1024  # Mistral embedding
+        elif "bge-m3" in lower_id or "bge-large" in lower_id:
+            return 1024
+        elif "bge-base" in lower_id:
+            return 768
+        elif "gte-large" in lower_id or "e5-large" in lower_id:
+            return 1024
+        elif "gte-base" in lower_id or "e5-base" in lower_id:
+            return 768
+        elif "minilm" in lower_id:
+            return 384
+        elif "mpnet" in lower_id:
+            return 768
+
+        # Try to extract from description
+        for dim in [3072, 2048, 1536, 1024, 768, 512, 384]:
+            if f"{dim}-dimensional" in lower_desc or f"{dim}d" in lower_desc:
+                return dim
+
+        # Default
+        return 1024
+
+    def _get_fallback_embedding_models(self) -> list[EmbeddingModelInfo]:
+        """Return fallback embedding models if API call fails."""
+        return [
+            EmbeddingModelInfo(id="openai/text-embedding-3-large", name="OpenAI Text Embedding 3 Large", dimensions=3072, context_length=8192),
+            EmbeddingModelInfo(id="openai/text-embedding-3-small", name="OpenAI Text Embedding 3 Small", dimensions=1536, context_length=8192),
+            EmbeddingModelInfo(id="openai/text-embedding-ada-002", name="OpenAI Text Embedding Ada 002", dimensions=1536, context_length=8192),
+            EmbeddingModelInfo(id="google/gemini-embedding-001", name="Google Gemini Embedding 001", dimensions=768, context_length=20000),
+            EmbeddingModelInfo(id="mistralai/mistral-embed-2312", name="Mistral Embed 2312", dimensions=1024, context_length=8192),
         ]
+
+    def get_available_models(self) -> AvailableModelsResponse:
+        """Get available LLM models dynamically from OpenRouter API.
+
+        Models are fetched from https://openrouter.ai/api/v1/models
+        and filtered by preferred providers (DeepSeek, Claude, GPT, Gemini, etc.)
+        Embedding models are fetched from https://openrouter.ai/api/v1/embeddings/models
+        Results are cached for 5 minutes.
+        """
+        # Fetch models dynamically
+        openrouter_models = self._fetch_openrouter_models()
+
+        # Fetch embedding models dynamically from OpenRouter
+        embedding_models = self._fetch_openrouter_embedding_models()
 
         return AvailableModelsResponse(
             models={"openrouter": openrouter_models},
@@ -272,6 +521,66 @@ class ConfigService:
         return SetAPIKeysResponse(
             success=True,
             message=f"Configuration updated: {', '.join(updated)}",
+        )
+
+    def delete_api_keys(
+        self,
+        key_type: str,  # "llm" or "exchange"
+    ) -> SetAPIKeysResponse:
+        """Delete API keys by type.
+
+        Args:
+            key_type: "llm" to delete LLM-related keys, "exchange" for exchange keys
+        """
+        deleted = []
+
+        if key_type == "llm":
+            # Delete LLM-related config
+            if "api_key" in self._config:
+                del self._config["api_key"]
+                deleted.append("api_key")
+                # Also clear from environment
+                if "OPENROUTER_API_KEY" in os.environ:
+                    del os.environ["OPENROUTER_API_KEY"]
+            if "model" in self._config:
+                del self._config["model"]
+                deleted.append("model")
+            if "embedding_model" in self._config:
+                del self._config["embedding_model"]
+                deleted.append("embedding_model")
+            if "provider" in self._config:
+                del self._config["provider"]
+                deleted.append("provider")
+
+        elif key_type == "exchange":
+            # Delete exchange-related config
+            if "exchange_id" in self._config:
+                del self._config["exchange_id"]
+                deleted.append("exchange_id")
+            if "exchange_api_key" in self._config:
+                del self._config["exchange_api_key"]
+                deleted.append("exchange_api_key")
+            if "exchange_secret" in self._config:
+                del self._config["exchange_secret"]
+                deleted.append("exchange_secret")
+
+        else:
+            return SetAPIKeysResponse(
+                success=False,
+                message=f"Unknown key type: {key_type}. Use 'llm' or 'exchange'.",
+            )
+
+        if not deleted:
+            return SetAPIKeysResponse(
+                success=True,
+                message=f"No {key_type} keys to delete.",
+            )
+
+        self._save_config()
+
+        return SetAPIKeysResponse(
+            success=True,
+            message=f"Deleted: {', '.join(deleted)}",
         )
 
     async def test_llm(self) -> TestLLMResponse:

@@ -56,6 +56,8 @@ class BacktestConfig(BaseModel):
 
     start_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
     end_date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
+    symbols: list[str] = Field(default_factory=lambda: ["ETH/USDT"])
+    timeframe: str = Field(default="1d")
     initial_capital: float = Field(default=1000000.0, gt=0)
     commission_rate: float = Field(default=0.001, ge=0, le=0.1)  # 0.1%
     slippage: float = Field(default=0.001, ge=0, le=0.1)  # 0.1%

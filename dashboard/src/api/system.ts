@@ -72,6 +72,44 @@ export interface SystemStatusResponse {
   uptime: number
 }
 
+// Agent Config Types
+export type AgentType = 'factor_generation' | 'evaluation' | 'strategy' | 'backtest'
+
+export interface AgentConfigResponse {
+  id: string
+  agent_type: AgentType
+  name: string
+  description: string | null
+  system_prompt: string | null
+  user_prompt_template: string | null
+  examples: string | null
+  config: Record<string, unknown> | null
+  is_enabled: boolean
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface AgentConfigListResponse {
+  configs: AgentConfigResponse[]
+  total: number
+}
+
+export interface AgentConfigUpdateRequest {
+  name?: string
+  description?: string
+  system_prompt?: string
+  user_prompt_template?: string
+  examples?: string
+  config?: Record<string, unknown>
+  is_enabled?: boolean
+}
+
+export interface AgentConfigOperationResponse {
+  success: boolean
+  message: string
+  config?: AgentConfigResponse
+}
+
 // System API
 export const systemApi = {
   // 获取完整系统状态
@@ -82,4 +120,11 @@ export const systemApi = {
 
   // 获取 LLM 指标
   getLLMMetrics: () => api.get<LLMMetricsResponse>('/system/llm'),
+
+  // Agent Config APIs
+  getAgentConfigs: () => api.get<AgentConfigListResponse>('/system/agent-configs'),
+  getAgentConfig: (agentType: AgentType) => api.get<AgentConfigResponse>(`/system/agent-configs/${agentType}`),
+  updateAgentConfig: (agentType: AgentType, data: AgentConfigUpdateRequest) =>
+    api.put<AgentConfigOperationResponse>(`/system/agent-configs/${agentType}`, data),
+  initAgentConfigs: () => api.post<AgentConfigOperationResponse>('/system/agent-configs/init', {}),
 }

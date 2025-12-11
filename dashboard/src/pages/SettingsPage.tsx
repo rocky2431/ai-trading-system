@@ -2,7 +2,7 @@
  * Settings Page - System Configuration
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -36,6 +36,7 @@ import {
   RefreshCw,
   Eye,
   EyeOff,
+  Trash2,
 } from 'lucide-react'
 
 export function SettingsPage() {
@@ -210,21 +211,19 @@ function StatusItem({ label, connected, detail }: { label: string; connected: bo
 // ============== LLM Config Section ==============
 
 function LLMConfigSection() {
-  const { keys, loading, saving, saveKeys, refetch } = useAPIKeys()
-  const { models } = useAvailableModels()
+  const { keys, loading, saving, deleting, saveKeys, deleteKeys, refetch } = useAPIKeys()
   const { testLLM, testingLLM, llmResult } = useTestConnections()
 
   const [apiKey, setApiKey] = useState('')
-  const [selectedModel, setSelectedModel] = useState('')
-  const [selectedEmbedding, setSelectedEmbedding] = useState('')
   const [showKey, setShowKey] = useState(false)
+  const [deleteResult, setDeleteResult] = useState<{ success: boolean; message: string } | null>(null)
 
   const handleSave = async () => {
-    const data: Record<string, string> = {}
-    if (apiKey) data.api_key = apiKey
-    if (selectedModel) data.model = selectedModel
-    if (selectedEmbedding) data.embedding_model = selectedEmbedding
-    data.provider = 'openrouter'
+    if (!apiKey) return
+    const data: Record<string, string> = {
+      api_key: apiKey,
+      provider: 'openrouter'
+    }
 
     const result = await saveKeys(data)
     if (result.success) {
@@ -233,50 +232,82 @@ function LLMConfigSection() {
     }
   }
 
-  const modelOptions = models?.models?.openrouter?.map(m => ({
-    value: m.id,
-    label: `${m.name} (${m.context_length ? `${m.context_length / 1000}K` : 'N/A'})`
-  })) || []
-
-  const embeddingOptions = models?.embedding_models?.openrouter?.map(m => ({
-    value: m.id,
-    label: `${m.name} (${m.dimensions}d)`
-  })) || []
+  const handleDelete = async () => {
+    if (!confirm('确定要删除 OpenRouter API Key 配置吗？')) {
+      return
+    }
+    setDeleteResult(null)
+    const result = await deleteKeys('llm')
+    setDeleteResult(result)
+  }
 
   if (loading) {
     return <LoadingCard title="LLM Configuration" />
   }
+
+  const hasConfig = !!keys?.api_key
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <Key className="h-5 w-5" />
-          LLM Configuration
+          OpenRouter API 配置
         </CardTitle>
         <CardDescription>
-          Configure OpenRouter API for LLM access
+          配置 OpenRouter API Key，用于访问各种 LLM 模型
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Current Status */}
+        {/* Current Status - 删除按钮在这里 */}
         <div className="p-4 bg-muted rounded-lg">
-          <h4 className="font-medium mb-2">Current Configuration</h4>
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <span className="text-muted-foreground">API Key:</span>{' '}
-              {keys?.api_key || 'Not set'}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {hasConfig ? (
+                <CheckCircle className="h-5 w-5 text-green-500" />
+              ) : (
+                <XCircle className="h-5 w-5 text-red-500" />
+              )}
+              <div>
+                <h4 className="font-medium">
+                  {hasConfig ? 'API Key 已配置' : 'API Key 未配置'}
+                </h4>
+                {hasConfig && (
+                  <p className="text-sm text-muted-foreground">
+                    {keys?.api_key}
+                  </p>
+                )}
+              </div>
             </div>
-            <div>
-              <span className="text-muted-foreground">Model:</span>{' '}
-              {keys?.model || 'Not set'}
-            </div>
-            <div>
-              <span className="text-muted-foreground">Embedding:</span>{' '}
-              {keys?.embedding_model || 'Not set'}
+            <div className="flex items-center gap-2">
+              {hasConfig && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                >
+                  {deleting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                </Button>
+              )}
+              <Badge variant={hasConfig ? 'default' : 'secondary'}>
+                {hasConfig ? 'Configured' : 'Not Configured'}
+              </Badge>
             </div>
           </div>
         </div>
+
+        {/* Delete Result */}
+        {deleteResult && (
+          <div className={`p-3 rounded-lg ${deleteResult.success ? 'bg-green-500/10 text-green-600' : 'bg-red-500/10 text-red-600'}`}>
+            {deleteResult.success ? <CheckCircle className="h-4 w-4 inline mr-2" /> : <XCircle className="h-4 w-4 inline mr-2" />}
+            {deleteResult.message}
+          </div>
+        )}
 
         {/* API Key Input */}
         <div className="space-y-2">
@@ -300,42 +331,33 @@ function LLMConfigSection() {
             </div>
           </div>
           <p className="text-xs text-muted-foreground">
-            Get your API key from{' '}
+            从{' '}
             <a href="https://openrouter.ai/keys" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
               openrouter.ai/keys
             </a>
+            {' '}获取 API Key
           </p>
         </div>
 
-        {/* Model Selection */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <Label>Chat Model</Label>
-            <Select
-              options={[{ value: '', label: 'Select model...' }, ...modelOptions]}
-              value={selectedModel}
-              onChange={(e) => setSelectedModel(e.target.value)}
-            />
-          </div>
-          <div className="space-y-2">
-            <Label>Embedding Model</Label>
-            <Select
-              options={[{ value: '', label: 'Select embedding...' }, ...embeddingOptions]}
-              value={selectedEmbedding}
-              onChange={(e) => setSelectedEmbedding(e.target.value)}
-            />
-          </div>
+        {/* Info Box */}
+        <div className="p-4 bg-blue-500/10 rounded-lg text-sm">
+          <p className="font-medium text-blue-600 mb-2">说明</p>
+          <ul className="list-disc list-inside space-y-1 text-muted-foreground">
+            <li>此处只需配置 API Key，用于验证 OpenRouter 连接</li>
+            <li>各 Agent 的 Chat Model 在 <strong>Agents</strong> 标签页中单独配置</li>
+            <li>Embedding Model 在 <strong>Factor</strong> 标签页中配置</li>
+          </ul>
         </div>
 
         {/* Actions */}
         <div className="flex items-center gap-4">
-          <Button onClick={handleSave} disabled={saving}>
+          <Button onClick={handleSave} disabled={saving || !apiKey}>
             {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Save Configuration
+            保存 API Key
           </Button>
-          <Button variant="outline" onClick={testLLM} disabled={testingLLM}>
+          <Button variant="outline" onClick={testLLM} disabled={testingLLM || !hasConfig}>
             {testingLLM && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-            Test Connection
+            测试连接
           </Button>
         </div>
 
@@ -354,13 +376,21 @@ function LLMConfigSection() {
 // ============== Exchange Config Section ==============
 
 function ExchangeConfigSection() {
-  const { keys, loading, saving, saveKeys, refetch } = useAPIKeys()
+  const { keys, loading, saving, deleting, saveKeys, deleteKeys, refetch } = useAPIKeys()
   const { testExchange, testingExchange, exchangeResult } = useTestConnections()
 
   const [exchangeId, setExchangeId] = useState('binance')
   const [apiKey, setApiKey] = useState('')
   const [apiSecret, setApiSecret] = useState('')
   const [showKeys, setShowKeys] = useState(false)
+  const [deleteResult, setDeleteResult] = useState<{ success: boolean; message: string } | null>(null)
+
+  // 从已保存的配置初始化交易所选择
+  useEffect(() => {
+    if (keys?.exchange_id && exchangeId === 'binance') {
+      setExchangeId(keys.exchange_id)
+    }
+  }, [keys, exchangeId])
 
   const handleSave = async () => {
     const data: Record<string, string> = {
@@ -377,6 +407,18 @@ function ExchangeConfigSection() {
     }
   }
 
+  const handleDelete = async () => {
+    if (!confirm('Are you sure you want to delete all Exchange configuration? This will remove the exchange ID, API key, and secret.')) {
+      return
+    }
+    setDeleteResult(null)
+    const result = await deleteKeys('exchange')
+    setDeleteResult(result)
+    if (result.success) {
+      setExchangeId('binance')
+    }
+  }
+
   const exchangeOptions = [
     { value: 'binance', label: 'Binance' },
     { value: 'okx', label: 'OKX' },
@@ -387,6 +429,8 @@ function ExchangeConfigSection() {
   if (loading) {
     return <LoadingCard title="Exchange Configuration" />
   }
+
+  const hasConfig = keys?.exchange_id || keys?.exchange_api_key
 
   return (
     <Card>
@@ -400,20 +444,58 @@ function ExchangeConfigSection() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        {/* Current Status */}
+        {/* Current Status - 删除按钮在这里 */}
         <div className="p-4 bg-muted rounded-lg">
-          <h4 className="font-medium mb-2">Current Configuration</h4>
-          <div className="grid grid-cols-2 gap-4 text-sm">
-            <div>
-              <span className="text-muted-foreground">Exchange:</span>{' '}
-              {keys?.exchange_id || 'Not set'}
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              {hasConfig ? (
+                <CheckCircle className="h-5 w-5 text-green-500" />
+              ) : (
+                <XCircle className="h-5 w-5 text-red-500" />
+              )}
+              <div>
+                <h4 className="font-medium">
+                  {hasConfig ? 'Exchange 已配置' : 'Exchange 未配置'}
+                </h4>
+                {hasConfig && (
+                  <div className="text-sm text-muted-foreground mt-1">
+                    <span>{keys?.exchange_id || 'Unknown'}</span>
+                    {keys?.exchange_api_key && (
+                      <span className="ml-3">{keys.exchange_api_key}</span>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-            <div>
-              <span className="text-muted-foreground">API Key:</span>{' '}
-              {keys?.exchange_api_key || 'Not set'}
+            <div className="flex items-center gap-2">
+              {hasConfig && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                >
+                  {deleting ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4" />
+                  )}
+                </Button>
+              )}
+              <Badge variant={hasConfig ? 'default' : 'secondary'}>
+                {hasConfig ? 'Configured' : 'Not Configured'}
+              </Badge>
             </div>
           </div>
         </div>
+
+        {/* Delete Result */}
+        {deleteResult && (
+          <div className={`p-3 rounded-lg ${deleteResult.success ? 'bg-green-500/10 text-green-600' : 'bg-red-500/10 text-red-600'}`}>
+            {deleteResult.success ? <CheckCircle className="h-4 w-4 inline mr-2" /> : <XCircle className="h-4 w-4 inline mr-2" />}
+            {deleteResult.message}
+          </div>
+        )}
 
         {/* Exchange Selection */}
         <div className="space-y-2">
@@ -668,7 +750,10 @@ function DataConfigSection() {
 
 function FactorMiningConfigSection() {
   const { config, loading, saving, saveConfig } = useFactorMiningConfig()
+  const { models } = useAvailableModels()
+  const { keys, saveKeys } = useAPIKeys()
 
+  const [selectedEmbedding, setSelectedEmbedding] = useState('')
   const [localConfig, setLocalConfig] = useState<{
     min_ic: number
     min_ir: number
@@ -677,6 +762,23 @@ function FactorMiningConfigSection() {
     cv_folds: number
     max_concurrent: number
   } | null>(null)
+
+  // 初始化 embedding model
+  useEffect(() => {
+    if (keys?.embedding_model && !selectedEmbedding) {
+      setSelectedEmbedding(keys.embedding_model)
+    }
+  }, [keys, selectedEmbedding])
+
+  const embeddingOptions = models?.embedding_models?.openrouter?.map(m => ({
+    value: m.id,
+    label: `${m.name} (${m.dimensions}d)`
+  })) || []
+
+  const handleSaveEmbedding = async () => {
+    if (!selectedEmbedding) return
+    await saveKeys({ embedding_model: selectedEmbedding })
+  }
 
   const handleSave = async () => {
     if (!localConfig) return
@@ -731,6 +833,32 @@ function FactorMiningConfigSection() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
+        {/* Embedding Model Selection */}
+        <div className="p-4 bg-muted rounded-lg">
+          <h4 className="font-medium mb-3">Embedding Model (向量化模型)</h4>
+          <p className="text-sm text-muted-foreground mb-3">
+            用于因子代码的向量化表示，支持相似因子搜索和去重
+          </p>
+          <div className="flex gap-4 items-end">
+            <div className="flex-1 space-y-2">
+              <Label>选择 Embedding Model</Label>
+              <Select
+                options={[{ value: '', label: '选择模型...' }, ...embeddingOptions]}
+                value={selectedEmbedding}
+                onChange={(e) => setSelectedEmbedding(e.target.value)}
+              />
+            </div>
+            <Button onClick={handleSaveEmbedding} disabled={!selectedEmbedding || selectedEmbedding === keys?.embedding_model}>
+              保存
+            </Button>
+          </div>
+          {keys?.embedding_model && (
+            <p className="text-xs text-muted-foreground mt-2">
+              当前配置: <span className="font-medium">{keys.embedding_model}</span>
+            </p>
+          )}
+        </div>
+
         {/* Factor Families */}
         <div>
           <h4 className="font-medium mb-3">Factor Families</h4>

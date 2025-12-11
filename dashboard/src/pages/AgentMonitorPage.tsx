@@ -3,15 +3,18 @@
  * 展示 Agent 运行状态、任务队列、LLM 指标和资源使用
  */
 
+import { useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { AgentStatusCard } from '@/components/agents/AgentStatusCard'
+import { AgentConfigDialog } from '@/components/agents/AgentConfigDialog'
 import { TaskQueueCard } from '@/components/agents/TaskQueueCard'
 import { LLMMetricsCard } from '@/components/agents/LLMMetricsCard'
 import { ResourceUsageCard } from '@/components/agents/ResourceUsageCard'
 import { useAgentStatus } from '@/hooks/useAgentStatus'
 import { Bot, RefreshCw, Loader2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import type { AgentType } from '@/api/system'
 
 function formatUptime(seconds: number): string {
   const days = Math.floor(seconds / 86400)
@@ -31,6 +34,13 @@ const healthConfig = {
 
 export function AgentMonitorPage() {
   const { status, loading, error } = useAgentStatus()
+  const [configDialogOpen, setConfigDialogOpen] = useState(false)
+  const [selectedAgentType, setSelectedAgentType] = useState<AgentType>('factor_generation')
+
+  const handleAgentClick = (agentType: AgentType) => {
+    setSelectedAgentType(agentType)
+    setConfigDialogOpen(true)
+  }
 
   if (loading) {
     return (
@@ -149,12 +159,26 @@ export function AgentMonitorPage() {
       {/* Agent Status Grid */}
       <div>
         <h2 className="text-lg font-semibold mb-4">Agent Status</h2>
+        <p className="text-sm text-muted-foreground mb-4">
+          Click on an agent card to view and edit its configuration
+        </p>
         <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
           {status.agents.map((agent) => (
-            <AgentStatusCard key={agent.id} agent={agent} />
+            <AgentStatusCard
+              key={agent.id}
+              agent={agent}
+              onClick={() => handleAgentClick(agent.type as AgentType)}
+            />
           ))}
         </div>
       </div>
+
+      {/* Agent Config Dialog */}
+      <AgentConfigDialog
+        open={configDialogOpen}
+        onOpenChange={setConfigDialogOpen}
+        agentType={selectedAgentType}
+      />
 
       {/* Bottom Section: Task Queue, LLM Metrics, Resources */}
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">

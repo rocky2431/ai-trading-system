@@ -14,13 +14,16 @@ const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
     const percentage = ((value - min) / (max - min)) * 100
 
     return (
-      <div className={cn("relative flex w-full touch-none select-none items-center", className)}>
-        <div className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-primary/20">
+      <div className={cn("relative flex w-full touch-none select-none items-center h-5", className)}>
+        {/* Track background */}
+        <div className="relative h-2 w-full grow overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+          {/* Filled track */}
           <div
-            className="absolute h-full bg-primary"
+            className="absolute h-full bg-blue-500 dark:bg-blue-400 transition-all"
             style={{ width: `${percentage}%` }}
           />
         </div>
+        {/* Hidden input for accessibility */}
         <input
           type="range"
           ref={ref}
@@ -32,9 +35,10 @@ const Slider = React.forwardRef<HTMLInputElement, SliderProps>(
           className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
           {...props}
         />
+        {/* Thumb */}
         <div
-          className="absolute h-4 w-4 rounded-full border border-primary/50 bg-background shadow transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          style={{ left: `calc(${percentage}% - 8px)` }}
+          className="absolute h-5 w-5 rounded-full border-2 border-blue-500 bg-white dark:bg-gray-900 shadow-md transition-all hover:scale-110"
+          style={{ left: `calc(${percentage}% - 10px)` }}
         />
       </div>
     )

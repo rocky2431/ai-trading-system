@@ -1,16 +1,18 @@
 /**
  * Agent 状态卡片组件
  * 展示单个 Agent 的运行状态、当前任务和进度
+ * 点击可打开配置对话框
  */
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
 import type { Agent, AgentStatus } from '@/types/agent'
-import { Bot, Pause, Play, AlertCircle, Clock } from 'lucide-react'
+import { Bot, Pause, Play, AlertCircle, Clock, Settings } from 'lucide-react'
 
 interface AgentStatusCardProps {
   agent: Agent
+  onClick?: () => void
 }
 
 const statusConfig: Record<AgentStatus, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'success' | 'warning' }> = {
@@ -27,7 +29,8 @@ const typeLabels: Record<Agent['type'], string> = {
   backtest: 'Backtest',
 }
 
-function formatRelativeTime(dateString: string): string {
+function formatRelativeTime(dateString: string | null): string {
+  if (!dateString) return 'N/A'
   const date = new Date(dateString)
   const now = new Date()
   const diffMs = now.getTime() - date.getTime()
@@ -41,17 +44,25 @@ function formatRelativeTime(dateString: string): string {
   return `${Math.floor(diffHour / 24)}d ago`
 }
 
-export function AgentStatusCard({ agent }: AgentStatusCardProps) {
+export function AgentStatusCard({ agent, onClick }: AgentStatusCardProps) {
   const config = statusConfig[agent.status]
 
   return (
-    <Card>
+    <Card
+      className={onClick ? 'cursor-pointer hover:shadow-md hover:border-blue-300 dark:hover:border-blue-600 transition-all' : ''}
+      onClick={onClick}
+    >
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="text-sm font-medium flex items-center gap-2">
           <Bot className="h-4 w-4" />
           {agent.name}
         </CardTitle>
-        <Badge variant={config.variant}>{config.label}</Badge>
+        <div className="flex items-center gap-2">
+          {onClick && (
+            <Settings className="h-4 w-4 text-gray-400 hover:text-blue-500 transition-colors" />
+          )}
+          <Badge variant={config.variant}>{config.label}</Badge>
+        </div>
       </CardHeader>
       <CardContent>
         <div className="space-y-3">
@@ -81,9 +92,14 @@ export function AgentStatusCard({ agent }: AgentStatusCardProps) {
           )}
 
           {/* Last Activity */}
-          <div className="flex items-center gap-1 text-xs text-muted-foreground">
-            <Clock className="h-3 w-3" />
-            Last activity: {formatRelativeTime(agent.lastActivity)}
+          <div className="flex items-center justify-between text-xs text-muted-foreground">
+            <div className="flex items-center gap-1">
+              <Clock className="h-3 w-3" />
+              Last activity: {formatRelativeTime(agent.lastActivity)}
+            </div>
+            {onClick && (
+              <span className="text-blue-500 hover:underline">Configure</span>
+            )}
           </div>
         </div>
       </CardContent>

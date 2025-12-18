@@ -317,8 +317,16 @@ class QlibFactorEngine:
         """
         df = self._qlib_data
 
-        # Check if expression is a Python function definition
-        if expression.strip().startswith("def "):
+        # Check if expression is Python code (contains function definition)
+        # This handles both "def func(...)" and "import ...\n\ndef func(...)" formats
+        stripped = expression.strip()
+        is_python_code = (
+            stripped.startswith("def ") or
+            stripped.startswith("import ") or
+            stripped.startswith("from ") or
+            "\ndef " in expression  # Function definition after imports
+        )
+        if is_python_code and "def " in expression:
             return self._execute_python_factor(expression, df)
 
         # Try using CryptoDataHandler pre-computed indicators first
@@ -354,6 +362,18 @@ class QlibFactorEngine:
         """
         import re
 
+        # Preprocess code: remove import statements (np and pd are already available)
+        # This allows LLM-generated code with imports to work in the sandbox
+        code_lines = code.split('\n')
+        filtered_lines = []
+        for line in code_lines:
+            stripped = line.strip()
+            # Skip import statements - np/pd/numpy/pandas are already available
+            if stripped.startswith('import ') or stripped.startswith('from '):
+                continue
+            filtered_lines.append(line)
+        code = '\n'.join(filtered_lines)
+
         # Extract function name
         match = re.search(r"def\s+(\w+)\s*\(", code)
         if not match:
@@ -383,9 +403,12 @@ class QlibFactorEngine:
                 "True": True,
                 "False": False,
                 "None": None,
+                "print": print,  # Allow print for debugging
             },
             "pd": pd,
             "np": np,
+            "numpy": np,  # Also expose as numpy for compatibility
+            "pandas": pd,  # Also expose as pandas for compatibility
         }
 
         local_vars: dict = {}

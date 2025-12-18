@@ -731,7 +731,8 @@ class HypothesisAgent:
         """Count hypotheses by family."""
         counts = {}
         for h in self._hypothesis_history:
-            family = h.family.value
+            # Safely get family value (handle both enum and string)
+            family = h.family.value if hasattr(h.family, 'value') else str(h.family)
             counts[family] = counts.get(family, 0) + 1
         return counts
 

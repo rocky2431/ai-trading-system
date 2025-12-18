@@ -10,6 +10,7 @@ Integrates:
 import asyncio
 import hashlib
 import json
+import os
 import uuid
 from datetime import datetime
 from typing import Optional
@@ -121,8 +122,28 @@ class FactorService:
         self._similarity_searcher: Optional[SimilaritySearcher] = None
 
     def _get_llm_provider(self) -> LLMProvider:
-        """获取或创建 LLM Provider"""
+        """获取或创建 LLM Provider.
+
+        优先从 ConfigService 获取 API key（用户在前端配置的），
+        如果没有则从环境变量获取。
+        """
         if self._llm_provider is None:
+            # 优先从 ConfigService 获取 API key
+            from iqfmp.api.config.service import get_config_service
+            config_service = get_config_service()
+
+            # 从 config 获取 API key（优先）或环境变量（后备）
+            api_key = config_service._config.get("api_key") or os.getenv("OPENROUTER_API_KEY")
+
+            if not api_key:
+                raise ValueError(
+                    "LLM API key not configured. Please configure OpenRouter API key in Settings page."
+                )
+
+            # 确保环境变量也设置了（供 LLMConfig.from_env 使用）
+            os.environ["OPENROUTER_API_KEY"] = api_key
+
+            # 使用 from_env 创建配置（它现在可以从环境变量获取正确的 key）
             config = LLMConfig.from_env()
             self._llm_provider = LLMProvider(config)
         return self._llm_provider
@@ -1216,7 +1237,17 @@ class FactorService:
 
         Returns:
             Task ID
+
+        Raises:
+            ValueError: If LLM API key is not configured
         """
+        # Validate LLM configuration before creating task
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "LLM API key not configured. Please configure OpenRouter API key in Settings page first."
+            )
+
         task_id = str(uuid.uuid4())
 
         # Create task in database (with Redis cache)

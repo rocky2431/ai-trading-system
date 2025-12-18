@@ -22,7 +22,12 @@ from iqfmp.db.database import init_db, close_db
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
-    # Startup: Initialize database connections
+    # Startup: Initialize ConfigService first to restore API keys from config
+    from iqfmp.api.config.service import ConfigService
+    config_service = ConfigService()  # This restores env vars from saved config
+    print(f"Config initialized from {config_service._config_file}")
+
+    # Initialize database connections
     await init_db()
     yield
     # Shutdown: Close database connections

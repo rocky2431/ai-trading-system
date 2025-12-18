@@ -222,8 +222,15 @@ class MockQdrantClient:
         self._collections[collection_name].extend(points)
 
     def search(self, collection_name: str, query_vector: list, limit: int = 10, **kwargs):
-        # 返回模拟结果
+        # 返回模拟结果 (deprecated, 保留向后兼容)
         return []
+
+    def query_points(self, collection_name: str, query: list, limit: int = 10, **kwargs):
+        """qdrant-client v1.7+ 新 API"""
+        # 返回模拟的 QueryResponse 对象
+        class QueryResponse:
+            points = []
+        return QueryResponse()
 
     def close(self):
         pass

@@ -115,6 +115,15 @@ from iqfmp.agents.pipeline_builder import (
     build_research_pipeline,
     build_production_pipeline,
 )
+from iqfmp.agents.model_config import (
+    AgentType,
+    AgentModelConfig,
+    AgentModelRegistry,
+    DEFAULT_AGENT_MODELS,
+    get_model_registry,
+    get_agent_model,
+    get_agent_temperature,
+)
 
 __all__ = [
     # Orchestrator
@@ -212,4 +221,12 @@ __all__ = [
     "build_evaluation_only_pipeline",
     "build_research_pipeline",
     "build_production_pipeline",
+    # Model Configuration
+    "AgentType",
+    "AgentModelConfig",
+    "AgentModelRegistry",
+    "DEFAULT_AGENT_MODELS",
+    "get_model_registry",
+    "get_agent_model",
+    "get_agent_temperature",
 ]

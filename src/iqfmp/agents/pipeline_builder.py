@@ -9,11 +9,25 @@ Builds complete agent pipelines connecting all agents:
 - Risk Check
 
 Implements the full IQFMP workflow as a StateGraph.
+
+IMPORTANT: Production pipelines REQUIRE Qdrant for factor deduplication.
+Factor mining without deduplication leads to redundant factors and wasted compute.
 """
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
+
+# Vector database for factor deduplication
+try:
+    from iqfmp.vector.search import SimilaritySearcher
+    from iqfmp.vector.store import FactorVectorStore
+    VECTOR_AVAILABLE = True
+except ImportError:
+    SimilaritySearcher = None
+    FactorVectorStore = None
+    VECTOR_AVAILABLE = False
 
 from iqfmp.agents.orchestrator import (
     AgentOrchestrator,
@@ -50,6 +64,11 @@ from iqfmp.agents.risk_agent import (
 logger = logging.getLogger(__name__)
 
 
+class VectorDBRequiredError(Exception):
+    """Raised when Qdrant/vector database is required but not available."""
+    pass
+
+
 @dataclass
 class PipelineConfig:
     """Configuration for the complete agent pipeline."""
@@ -62,6 +81,10 @@ class PipelineConfig:
     enable_strategy: bool = True
     enable_backtest: bool = True
     enable_risk_check: bool = True
+
+    # Vector database settings (Qdrant)
+    require_vector_db: bool = False  # If True, pipeline fails if Qdrant unavailable
+    dedup_threshold: float = 0.85  # Similarity threshold for deduplication
 
     # Orchestrator settings
     max_iterations: int = 100
@@ -301,19 +324,64 @@ class PipelineBuilder:
         return state
 
     async def _generate_node(self, state: AgentState) -> AgentState:
-        """Generate factors."""
+        """Generate factors with automatic deduplication.
+
+        Uses vector database (Qdrant) to check for similar existing factors
+        before generation and stores new unique factors after generation.
+
+        IMPORTANT: Production pipelines REQUIRE Qdrant for factor deduplication.
+        Set require_vector_db=True in PipelineConfig for production use.
+        """
         logger.info("Generating factors")
         agent = self._agents.get("factor_generation")
         context = state.context.copy()
         context["pipeline_stage"] = "generate"
+
+        # Initialize vector search for deduplication
+        similarity_searcher = None
+        vector_store = None
+        vector_db_active = False
+
+        if VECTOR_AVAILABLE:
+            try:
+                vector_store = FactorVectorStore()
+                similarity_searcher = SimilaritySearcher(vector_store)
+                vector_db_active = True
+                logger.info("Qdrant vector database connected - deduplication enabled")
+            except Exception as e:
+                error_msg = f"Failed to initialize Qdrant vector search: {e}"
+                if self.config.require_vector_db:
+                    raise VectorDBRequiredError(
+                        f"{error_msg}. "
+                        "Production pipelines require Qdrant for factor deduplication. "
+                        "Please start Qdrant (docker compose up -d qdrant) or set require_vector_db=False."
+                    )
+                logger.warning(error_msg)
+        else:
+            error_msg = "Qdrant vector module not available (import failed)"
+            if self.config.require_vector_db:
+                raise VectorDBRequiredError(
+                    f"{error_msg}. "
+                    "Production pipelines require Qdrant for factor deduplication. "
+                    "Please install qdrant-client or set require_vector_db=False."
+                )
+            logger.warning(error_msg)
+
+        # Record vector DB status in context
+        context["vector_db_active"] = vector_db_active
 
         # Get prompts from hypotheses or context
         prompts = context.get("factor_prompts", [])
         if not prompts and "hypotheses" in context:
             prompts = [h.get("description", "") for h in context["hypotheses"]]
 
-        # Generate factors
+        # Deduplication threshold from context or default
+        dedup_threshold = context.get("dedup_threshold", 0.85)
+
+        # Generate factors with deduplication
         generated_factors = []
+        skipped_duplicates = []
+
         for prompt in prompts[:5]:  # Limit to 5
             try:
                 result = await agent.generate(
@@ -321,16 +389,73 @@ class PipelineBuilder:
                     factor_family=context.get("factor_family", "momentum"),
                 )
                 if result.success:
-                    generated_factors.append({
+                    factor_data = {
                         "name": result.factor.name,
                         "family": result.factor.family,
                         "code": result.factor.code,
                         "description": result.factor.description,
-                    })
+                    }
+
+                    # Check for duplicates using vector similarity
+                    is_duplicate = False
+                    similar_factor = None
+
+                    if similarity_searcher:
+                        try:
+                            is_duplicate, similar_result = similarity_searcher.check_duplicate(
+                                code=result.factor.code,
+                                name=result.factor.name,
+                                hypothesis=result.factor.description or "",
+                                threshold=dedup_threshold,
+                            )
+                            if is_duplicate and similar_result:
+                                similar_factor = similar_result.factor_name
+                                logger.info(
+                                    f"Factor '{result.factor.name}' is duplicate of "
+                                    f"'{similar_factor}' (similarity: {similar_result.score:.2f})"
+                                )
+                        except Exception as e:
+                            logger.warning(f"Duplicate check failed: {e}")
+
+                    if is_duplicate:
+                        skipped_duplicates.append({
+                            "name": result.factor.name,
+                            "similar_to": similar_factor,
+                        })
+                    else:
+                        generated_factors.append(factor_data)
+
+                        # Store new factor in vector database
+                        if vector_store:
+                            try:
+                                factor_id = str(uuid.uuid4())
+                                vector_store.store_factor(
+                                    factor_id=factor_id,
+                                    name=result.factor.name,
+                                    code=result.factor.code,
+                                    hypothesis=result.factor.description or "",
+                                    family=result.factor.family,
+                                )
+                                logger.info(f"Stored factor '{result.factor.name}' in vector DB")
+                            except Exception as e:
+                                logger.warning(f"Failed to store factor in vector DB: {e}")
+
             except Exception as e:
                 logger.warning(f"Factor generation failed: {e}")
 
         context["generated_factors"] = generated_factors
+        context["skipped_duplicates"] = skipped_duplicates
+        context["dedup_stats"] = {
+            "total_generated": len(generated_factors),
+            "duplicates_skipped": len(skipped_duplicates),
+            "dedup_threshold": dedup_threshold,
+        }
+
+        logger.info(
+            f"Factor generation complete: {len(generated_factors)} unique, "
+            f"{len(skipped_duplicates)} duplicates skipped"
+        )
+
         return state.update(context=context)
 
     async def _finish_node(self, state: AgentState) -> AgentState:
@@ -449,11 +574,19 @@ def build_production_pipeline(
 ) -> AgentOrchestrator:
     """Build a full production pipeline with all checks.
 
+    IMPORTANT: Production pipelines REQUIRE:
+    - Qdrant for factor deduplication (require_vector_db=True)
+    - Qlib for backtesting (automatically enforced in BacktestOptimizationAgent)
+    - All quality checks enabled
+
     Args:
         checkpoint_saver: Optional checkpoint persistence
 
     Returns:
         Configured AgentOrchestrator
+
+    Raises:
+        VectorDBRequiredError: If Qdrant is not available
     """
     config = PipelineConfig(
         name="production_pipeline",
@@ -462,6 +595,8 @@ def build_production_pipeline(
         enable_strategy=True,
         enable_backtest=True,
         enable_risk_check=True,
+        require_vector_db=True,  # MANDATORY for production
+        dedup_threshold=0.85,
         checkpoint_enabled=True,
     )
     builder = PipelineBuilder(config)

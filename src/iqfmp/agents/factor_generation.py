@@ -520,9 +520,22 @@ class LLMProviderProtocol(Protocol):
 
 @dataclass
 class FactorGenerationConfig:
-    """Configuration for factor generation agent."""
+    """Configuration for factor generation agent.
+
+    Attributes:
+        name: Agent name for logging
+        model: LLM model to use (defaults from AgentModelRegistry)
+        temperature: Sampling temperature (lower = more deterministic)
+        security_check_enabled: Enable AST security checking
+        field_constraint_enabled: Enable field constraint validation
+        max_retries: Maximum LLM call retries
+        timeout_seconds: LLM call timeout
+        include_examples: Include few-shot examples in prompt
+    """
 
     name: str
+    model: Optional[str] = None  # ModelType.value, None = use registry default
+    temperature: Optional[float] = None  # None = use registry default
     security_check_enabled: bool = True
     field_constraint_enabled: bool = True
     max_retries: int = 3
@@ -771,13 +784,32 @@ class FactorGenerationAgent:
             include_examples=self.config.include_examples,
             include_field_constraints=self.config.field_constraint_enabled,
         )
-        system_prompt = self.template.get_system_prompt()
+        default_system_prompt = self.template.get_system_prompt()
 
-        # Call LLM
+        # Call LLM with agent-specific model configuration
         try:
+            # Use configured model or fall back to registry defaults
+            # model_config now loads from ConfigService (frontend-configured OpenRouter models)
+            from iqfmp.agents.model_config import get_agent_full_config
+
+            # Get model_id, temperature, and custom system_prompt from ConfigService
+            # This returns OpenRouter model ID string (e.g., "deepseek/deepseek-coder-v3")
+            model_id, config_temperature, custom_system_prompt = get_agent_full_config(
+                "factor_generation"
+            )
+
+            # Override with explicit config if provided
+            model = self.config.model or model_id
+            temperature = self.config.temperature or config_temperature
+
+            # Use custom system_prompt from frontend if configured, otherwise use default
+            system_prompt = custom_system_prompt if custom_system_prompt else default_system_prompt
+
             response = await self.llm_provider.complete(
                 prompt=prompt,
                 system_prompt=system_prompt,
+                model=model,  # Can be string (OpenRouter ID) or ModelType enum
+                temperature=temperature,
             )
             raw_content = response.content if hasattr(response, "content") else str(response)
             # Debug: Log the actual LLM response

@@ -231,7 +231,7 @@ class LLMProvider:
     async def complete(
         self,
         prompt: str,
-        model: Optional[ModelType] = None,
+        model: Optional[ModelType | str] = None,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
@@ -241,7 +241,8 @@ class LLMProvider:
 
         Args:
             prompt: The input prompt.
-            model: Optional model to use (defaults to config default).
+            model: Optional model to use - can be ModelType enum or OpenRouter model ID string
+                   (e.g., "deepseek/deepseek-coder-v3"). Defaults to config default.
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
             system_prompt: Optional system prompt to guide the model.
@@ -272,7 +273,7 @@ class LLMProvider:
     async def chat(
         self,
         messages: list[dict[str, str]],
-        model: Optional[ModelType] = None,
+        model: Optional[ModelType | str] = None,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         **kwargs: Any,
@@ -281,7 +282,7 @@ class LLMProvider:
 
         Args:
             messages: List of chat messages.
-            model: Optional model to use.
+            model: Optional model to use - can be ModelType enum or OpenRouter model ID string.
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
 
@@ -299,26 +300,38 @@ class LLMProvider:
     async def _execute_with_fallback(
         self,
         messages: list[dict[str, str]],
-        model: Optional[ModelType] = None,
+        model: Optional[ModelType | str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Execute request with fallback chain if configured."""
-        target_model = model or self._config.default_model
+        """Execute request with fallback chain if configured.
+
+        Args:
+            messages: Chat messages.
+            model: Model to use - can be ModelType enum or OpenRouter model ID string.
+        """
+        # Determine target model (string ID or ModelType)
+        target_model: ModelType | str = model or self._config.default_model
 
         # Check cache first
         if self._config.cache_enabled:
+            # For cache key, convert to string representation
+            model_str = target_model.value if isinstance(target_model, ModelType) else target_model
             cache_key = self._generate_cache_key(
                 str(messages),
-                target_model,
+                model_str,
                 kwargs.get("max_tokens"),
             )
             cached = self._get_from_cache(cache_key)
             if cached:
                 return cached
 
-        # Build fallback chain
-        if self._config.fallback_chain:
-            models_to_try = self._config.fallback_chain.get_models()
+        # Build fallback chain - only for ModelType models
+        # String model IDs (from frontend config) don't use fallback
+        if isinstance(target_model, str):
+            # Direct OpenRouter model ID - no fallback chain
+            models_to_try: list[ModelType | str] = [target_model]
+        elif self._config.fallback_chain:
+            models_to_try = list(self._config.fallback_chain.get_models())
             if target_model not in models_to_try:
                 models_to_try.insert(0, target_model)
         else:
@@ -357,21 +370,27 @@ class LLMProvider:
                 break
 
         # All models failed
-        if self._config.fallback_chain:
+        if self._config.fallback_chain and isinstance(target_model, ModelType):
             raise LLMError(f"All fallback models failed: {last_error}")
         raise last_error or LLMError("Unknown error")
 
     async def _call_api(
         self,
         messages: list[dict[str, str]],
-        model: ModelType,
+        model: ModelType | str,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Make actual API call to OpenRouter."""
+        """Make actual API call to OpenRouter.
+
+        Args:
+            messages: Chat messages.
+            model: Model to use - can be ModelType enum or direct OpenRouter model ID string.
+        """
         await self._rate_limiter.acquire()
 
+        # Get model ID - either from enum mapping or use string directly
         model_id = self.get_model_id(model)
         payload: dict[str, Any] = {
             "model": model_id,
@@ -429,8 +448,20 @@ class LLMProvider:
         except ConnectionError:
             raise LLMError("Network: Connection failed")
 
-    def get_model_id(self, model: ModelType) -> str:
-        """Get OpenRouter model ID for model type."""
+    def get_model_id(self, model: ModelType | str) -> str:
+        """Get OpenRouter model ID for model type.
+
+        Args:
+            model: Either a ModelType enum or a direct OpenRouter model ID string.
+                   String model IDs are returned as-is (for frontend-configured models).
+
+        Returns:
+            OpenRouter model ID string.
+        """
+        # If string, return as-is (direct OpenRouter model ID from frontend config)
+        if isinstance(model, str):
+            return model
+        # If ModelType enum, look up in mapping
         return MODEL_ID_MAP.get(model, MODEL_ID_MAP[ModelType.DEEPSEEK_V3])
 
     def supported_models(self) -> list[ModelType]:
@@ -440,11 +471,12 @@ class LLMProvider:
     def _generate_cache_key(
         self,
         content: str,
-        model: ModelType,
+        model: ModelType | str,
         max_tokens: Optional[int],
     ) -> str:
         """Generate cache key for request."""
-        key_data = f"{content}:{model.value}:{max_tokens}"
+        model_str = model.value if isinstance(model, ModelType) else model
+        key_data = f"{content}:{model_str}:{max_tokens}"
         return hashlib.sha256(key_data.encode()).hexdigest()
 
     def _get_from_cache(self, key: str) -> Optional[LLMResponse]:

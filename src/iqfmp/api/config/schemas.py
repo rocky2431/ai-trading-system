@@ -104,12 +104,24 @@ class TestExchangeResponse(BaseModel):
 # ============== Agent Configuration ==============
 
 class AgentModelConfig(BaseModel):
-    """Agent-specific model configuration."""
+    """Agent-specific model configuration.
+
+    Attributes:
+        agent_id: Unique agent identifier (e.g., "factor_generation")
+        agent_name: Display name (e.g., "Factor Generation")
+        description: Agent description
+        model_id: OpenRouter model ID (e.g., "deepseek/deepseek-coder-v3")
+        enabled: Whether the agent is enabled
+        temperature: Sampling temperature (0.0-2.0, lower = more deterministic)
+        system_prompt: Custom system prompt override (None = use default)
+    """
     agent_id: str
     agent_name: str
     description: str
     model_id: str
     enabled: bool = True
+    temperature: float = 0.7
+    system_prompt: Optional[str] = None  # Custom system prompt (None = use default)
 
 
 class AgentConfigResponse(BaseModel):
@@ -118,10 +130,20 @@ class AgentConfigResponse(BaseModel):
 
 
 class SetAgentConfigRequest(BaseModel):
-    """Set agent configuration request."""
+    """Set agent configuration request.
+
+    Attributes:
+        agent_id: Agent to configure
+        model_id: OpenRouter model ID (optional)
+        enabled: Enable/disable agent (optional)
+        temperature: Sampling temperature (optional)
+        system_prompt: Custom system prompt (optional, empty string = reset to default)
+    """
     agent_id: str
     model_id: Optional[str] = None
     enabled: Optional[bool] = None
+    temperature: Optional[float] = None
+    system_prompt: Optional[str] = None  # Custom system prompt
 
 
 # ============== Data Config (Qlib/TimescaleDB) ==============

@@ -1,8 +1,13 @@
 """Factor Evaluation Agent for IQFMP.
 
-Wraps FactorEvaluator as a StateGraph-compatible agent node.
+Wraps FactorEvaluator as a StateGraph-compatible agent node with LLM support.
 Performs comprehensive factor evaluation with IC/IR/Sharpe metrics,
 CV validation, and stability analysis.
+
+LLM Integration:
+- Uses frontend-configured model from ConfigService via model_config.py
+- LLM generates intelligent evaluation insights and recommendations
+- Falls back to template-based reports if LLM is unavailable
 
 Six-dimensional coverage:
 1. Functional: Factor evaluation, metrics calculation, report generation
@@ -15,9 +20,48 @@ Six-dimensional coverage:
 
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
+import json
 import logging
+import re
 
 import pandas as pd
+
+
+# =============================================================================
+# LLM Integration Protocol and System Prompts
+# =============================================================================
+
+class LLMProviderProtocol(Protocol):
+    """Protocol for LLM provider interface."""
+
+    async def complete(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Any:
+        """Generate completion from the LLM."""
+        ...
+
+
+EVALUATION_SYSTEM_PROMPT = """You are an expert quantitative analyst specializing in factor evaluation and performance analysis.
+
+Your task is to analyze factor performance metrics and provide actionable insights:
+1. Explain why a factor succeeded or failed based on the metrics
+2. Identify patterns and anomalies in the evaluation results
+3. Suggest improvements to the factor formula or parameters
+4. Provide recommendations for factor combination or refinement
+
+Focus on:
+- Information Coefficient (IC) - predictive power, should be > 0.03 for significance
+- Information Ratio (IR) - IC consistency, should be > 1.0 for reliability
+- Sharpe Ratio - risk-adjusted returns
+- Max Drawdown - downside risk
+- Stability across different market regimes
+
+Provide specific, actionable recommendations."""
 
 from iqfmp.agents.orchestrator import AgentState
 from iqfmp.evaluation.factor_evaluator import (
@@ -117,20 +161,25 @@ class EvaluationAgentResult:
 
 
 class FactorEvaluationAgent:
-    """Agent for evaluating generated factors.
+    """Agent for evaluating generated factors with LLM-powered insights.
 
     This agent wraps the FactorEvaluator to work within the
-    StateGraph orchestration framework.
+    StateGraph orchestration framework with LLM-powered analysis.
 
     Responsibilities:
     - Extract factor data from agent state
     - Run comprehensive evaluation (IC, IR, Sharpe, etc.)
     - Perform CV validation and stability analysis
-    - Generate evaluation reports
+    - Generate LLM-powered evaluation reports and insights
     - Update state with results
 
+    LLM Integration:
+    - Uses frontend-configured model via get_agent_full_config("factor_evaluation")
+    - Generates intelligent insights about factor performance
+    - Provides actionable recommendations for improvement
+
     Usage:
-        agent = FactorEvaluationAgent(config)
+        agent = FactorEvaluationAgent(config, llm_provider=llm)
         new_state = await agent.evaluate(state)
     """
 
@@ -138,15 +187,18 @@ class FactorEvaluationAgent:
         self,
         config: Optional[EvaluationAgentConfig] = None,
         ledger: Optional[ResearchLedger] = None,
+        llm_provider: Optional[LLMProviderProtocol] = None,
     ) -> None:
-        """Initialize the evaluation agent.
+        """Initialize the evaluation agent with LLM support.
 
         Args:
             config: Agent configuration
             ledger: Research ledger for trial tracking
+            llm_provider: LLM provider for AI-powered analysis
         """
         self.config = config or EvaluationAgentConfig()
         self.ledger = ledger or ResearchLedger(storage=MemoryStorage())
+        self.llm_provider = llm_provider
 
         # Create evaluator with config
         eval_config = EvaluationConfig(
@@ -158,6 +210,134 @@ class FactorEvaluationAgent:
         )
         self.evaluator = FactorEvaluator(ledger=self.ledger, config=eval_config)
         self.pipeline = EvaluationPipeline(ledger=self.ledger, config=eval_config)
+
+    async def generate_llm_insights(
+        self,
+        factor_name: str,
+        factor_family: str,
+        metrics: dict[str, Any],
+        passes_threshold: bool,
+    ) -> dict[str, Any]:
+        """Generate LLM-powered insights for factor evaluation.
+
+        Args:
+            factor_name: Name of the factor
+            factor_family: Factor family/category
+            metrics: Evaluation metrics
+            passes_threshold: Whether factor passed evaluation threshold
+
+        Returns:
+            Dict with insights and recommendations
+        """
+        if self.llm_provider is None:
+            return self._generate_template_insights(factor_name, metrics, passes_threshold)
+
+        # Get model configuration from ConfigService
+        from iqfmp.agents.model_config import get_agent_full_config
+        model_id, temperature, custom_system_prompt = get_agent_full_config("factor_evaluation")
+
+        # Build analysis prompt
+        status = "PASSED" if passes_threshold else "FAILED"
+        prompt = f"""Analyze the following factor evaluation results:
+
+Factor: {factor_name}
+Family: {factor_family}
+Status: {status}
+
+Metrics:
+- IC (Information Coefficient): {metrics.get('ic', 'N/A')}
+- IR (Information Ratio): {metrics.get('ir', 'N/A')}
+- Sharpe Ratio: {metrics.get('sharpe_ratio', 'N/A')}
+- Max Drawdown: {metrics.get('max_drawdown', 'N/A')}
+- Turnover: {metrics.get('turnover', 'N/A')}
+
+Stability Analysis:
+{json.dumps(metrics.get('stability', {}), indent=2)}
+
+Provide:
+1. A brief analysis of why this factor {"succeeded" if passes_threshold else "failed"} (2-3 sentences)
+2. Key insights about the factor's predictive power and consistency
+3. 2-3 specific recommendations for improvement
+
+Format as JSON:
+```json
+{{
+    "analysis": "Your analysis...",
+    "insights": ["Insight 1", "Insight 2"],
+    "recommendations": ["Recommendation 1", "Recommendation 2"]
+}}
+```"""
+
+        try:
+            system_prompt = custom_system_prompt or EVALUATION_SYSTEM_PROMPT
+
+            response = await self.llm_provider.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=1024,
+            )
+
+            # Parse LLM response
+            return self._parse_llm_insights(response.content)
+
+        except Exception as e:
+            logger.error(f"LLM insights generation failed: {e}. Using template.")
+            return self._generate_template_insights(factor_name, metrics, passes_threshold)
+
+    def _parse_llm_insights(self, response_text: str) -> dict[str, Any]:
+        """Parse LLM insights response."""
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+        return {
+            "analysis": response_text[:300],
+            "insights": [],
+            "recommendations": [],
+        }
+
+    def _generate_template_insights(
+        self,
+        factor_name: str,
+        metrics: dict[str, Any],
+        passes_threshold: bool,
+    ) -> dict[str, Any]:
+        """Generate template-based insights when LLM is unavailable."""
+        ic = abs(metrics.get("ic", 0))
+        ir = metrics.get("ir", 0)
+
+        if passes_threshold:
+            analysis = f"Factor {factor_name} passed evaluation with IC={ic:.4f} and IR={ir:.2f}, showing significant predictive power."
+            insights = [
+                f"IC of {ic:.4f} exceeds threshold, indicating meaningful signal",
+                f"IR of {ir:.2f} suggests consistent performance over time",
+            ]
+            recommendations = [
+                "Consider combining with complementary factors",
+                "Monitor performance in different market regimes",
+            ]
+        else:
+            analysis = f"Factor {factor_name} failed evaluation with IC={ic:.4f} and IR={ir:.2f}, below required thresholds."
+            insights = [
+                f"IC of {ic:.4f} is below minimum threshold",
+                "Factor may be capturing noise rather than signal",
+            ]
+            recommendations = [
+                "Try different lookback periods",
+                "Consider adding filters for market conditions",
+                "Test alternative normalization methods",
+            ]
+
+        return {
+            "analysis": analysis,
+            "insights": insights,
+            "recommendations": recommendations,
+        }
 
     async def evaluate(self, state: AgentState) -> AgentState:
         """Evaluate factors from state.

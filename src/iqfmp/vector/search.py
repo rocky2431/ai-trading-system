@@ -109,14 +109,18 @@ class SimilaritySearcher:
 
         # 执行搜索
         try:
-            results = self.qdrant.client.search(
+            # qdrant-client v1.7+ 使用 query_points 替代 search
+            response = self.qdrant.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_vector,
+                query=query_vector,
                 limit=limit,
                 score_threshold=score_threshold or self.similarity_threshold,
                 query_filter=query_filter,
                 with_payload=True,
             )
+
+            # query_points 返回 QueryResponse 对象，需要访问 .points 属性
+            results = response.points if hasattr(response, 'points') else response
 
             return [
                 SearchResult(
@@ -222,12 +226,15 @@ class SimilaritySearcher:
         query_vector = self.embedding.generate(hypothesis)
 
         try:
-            results = self.qdrant.client.search(
+            # qdrant-client v1.7+ 使用 query_points 替代 search
+            response = self.qdrant.client.query_points(
                 collection_name=self.collection_name,
-                query_vector=query_vector,
+                query=query_vector,
                 limit=limit,
                 with_payload=True,
             )
+
+            results = response.points if hasattr(response, 'points') else response
 
             return [
                 SearchResult(

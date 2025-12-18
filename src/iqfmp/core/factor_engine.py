@@ -313,8 +313,13 @@ class QlibFactorEngine:
 
         This method parses Qlib expression syntax and computes on the local DataFrame.
         Uses Qlib's native Ops module when available, falls back to local implementation.
+        Also supports Python function definitions (def ...).
         """
         df = self._qlib_data
+
+        # Check if expression is a Python function definition
+        if expression.strip().startswith("def "):
+            return self._execute_python_factor(expression, df)
 
         # Try using CryptoDataHandler pre-computed indicators first
         if self._crypto_handler and expression in self._get_crypto_precomputed_fields():
@@ -333,6 +338,90 @@ class QlibFactorEngine:
         # Fall back to local implementation (always works)
         result = self._evaluate_expression(expression, df)
         return result
+
+    def _execute_python_factor(self, code: str, df: pd.DataFrame) -> pd.Series:
+        """Execute Python function code to compute factor.
+
+        Args:
+            code: Python code containing a function definition
+            df: DataFrame with price data
+
+        Returns:
+            Computed factor series
+
+        Raises:
+            ValueError: If code execution fails
+        """
+        import re
+
+        # Extract function name
+        match = re.search(r"def\s+(\w+)\s*\(", code)
+        if not match:
+            raise ValueError("No function definition found in code")
+
+        func_name = match.group(1)
+
+        # Prepare safe execution environment
+        safe_globals = {
+            "__builtins__": {
+                "range": range,
+                "len": len,
+                "min": min,
+                "max": max,
+                "sum": sum,
+                "abs": abs,
+                "round": round,
+                "float": float,
+                "int": int,
+                "list": list,
+                "dict": dict,
+                "tuple": tuple,
+                "zip": zip,
+                "enumerate": enumerate,
+                "sorted": sorted,
+                "reversed": reversed,
+                "True": True,
+                "False": False,
+                "None": None,
+            },
+            "pd": pd,
+            "np": np,
+        }
+
+        local_vars: dict = {}
+
+        try:
+            # Execute the function definition
+            exec(code, safe_globals, local_vars)
+
+            # Get the function
+            if func_name not in local_vars:
+                raise ValueError(f"Function {func_name} not found after execution")
+
+            factor_func = local_vars[func_name]
+
+            # Prepare DataFrame with lowercase columns for compatibility
+            df_copy = df.copy()
+            # Map $column to column for compatibility
+            col_mapping = {}
+            for col in df_copy.columns:
+                if col.startswith("$"):
+                    col_mapping[col] = col[1:]  # Remove $ prefix
+            if col_mapping:
+                df_copy = df_copy.rename(columns=col_mapping)
+
+            # Execute the factor function
+            result = factor_func(df_copy)
+
+            if isinstance(result, pd.Series):
+                return result
+            elif isinstance(result, pd.DataFrame):
+                return result.iloc[:, 0]
+            else:
+                return pd.Series(result, index=df.index)
+
+        except Exception as e:
+            raise ValueError(f"Python factor execution failed: {e}")
 
     def _get_crypto_precomputed_fields(self) -> set[str]:
         """Get set of pre-computed crypto indicator field names."""

@@ -258,17 +258,38 @@ class TelegramNotifier:
         if not self.enabled:
             return True
 
-        # In production, use aiohttp to call Telegram API
-        # For now, just return True (mock implementation)
+        if not self.bot_token or not self.chat_id:
+            return False
+
         try:
-            # import aiohttp
-            # async with aiohttp.ClientSession() as session:
-            #     url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-            #     data = {"chat_id": self.chat_id, "text": message, "parse_mode": "HTML"}
-            #     async with session.post(url, json=data) as resp:
-            #         return resp.status == 200
-            return True
-        except Exception:
+            import httpx
+
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            data = {
+                "chat_id": self.chat_id,
+                "text": message,
+                "parse_mode": "HTML",
+            }
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(url, json=data)
+                if response.status_code == 200:
+                    return True
+                else:
+                    # Log error but don't raise
+                    import logging
+                    logging.getLogger(__name__).warning(
+                        f"Telegram API error: {response.status_code} - {response.text}"
+                    )
+                    return False
+        except ImportError:
+            # httpx not installed, try with standard library
+            import logging
+            logging.getLogger(__name__).warning("httpx not installed for Telegram")
+            return False
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to send Telegram message: {e}")
             return False
 
     def _format_close_request(

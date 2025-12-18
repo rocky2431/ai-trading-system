@@ -576,6 +576,175 @@ class AgentConfigORM(Base):
         }
 
 
+# =============================================================================
+# Derivative Data Models (Crypto Futures/Perpetuals)
+# =============================================================================
+
+
+class FundingRateORM(Base):
+    """Funding rate data table - stores perpetual futures funding rates (TimescaleDB hypertable)."""
+
+    __tablename__ = "funding_rates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", index=True)
+
+    # Funding rate data
+    funding_rate: Mapped[float] = mapped_column(Float, nullable=False)  # Current funding rate
+    funding_rate_interval: Mapped[int] = mapped_column(Integer, default=8)  # Hours between payments (usually 8)
+    mark_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Mark price at funding
+    index_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Index price at funding
+
+    # Timestamp - funding payment time
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_funding_rates_symbol_timestamp", "symbol", "timestamp"),
+        Index("ix_funding_rates_exchange_symbol", "exchange", "symbol"),
+    )
+
+
+class OpenInterestORM(Base):
+    """Open interest data table - stores futures/perpetuals open interest (TimescaleDB hypertable)."""
+
+    __tablename__ = "open_interest"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", index=True)
+
+    # Open interest data
+    open_interest: Mapped[float] = mapped_column(Float, nullable=False)  # OI in contracts
+    open_interest_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # OI in USD
+    contract_type: Mapped[str] = mapped_column(String(20), default="perpetual")  # perpetual, quarterly, etc.
+
+    # Timestamp
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_open_interest_symbol_timestamp", "symbol", "timestamp"),
+        Index("ix_open_interest_exchange_symbol", "exchange", "symbol"),
+    )
+
+
+class LiquidationORM(Base):
+    """Liquidation data table - stores liquidation events (TimescaleDB hypertable)."""
+
+    __tablename__ = "liquidations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", index=True)
+
+    # Liquidation data
+    side: Mapped[str] = mapped_column(String(10), nullable=False)  # buy (short liq), sell (long liq)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)  # Quantity liquidated
+    price: Mapped[float] = mapped_column(Float, nullable=False)  # Liquidation price
+    value_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Value in USD
+
+    # Timestamp
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_liquidations_symbol_timestamp", "symbol", "timestamp"),
+        Index("ix_liquidations_symbol_side", "symbol", "side"),
+    )
+
+
+class LongShortRatioORM(Base):
+    """Long/Short ratio data table - stores trader position ratios (TimescaleDB hypertable)."""
+
+    __tablename__ = "long_short_ratios"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", index=True)
+
+    # Ratio type
+    ratio_type: Mapped[str] = mapped_column(String(30), nullable=False)  # global, top_trader_accounts, top_trader_positions
+
+    # Ratio data
+    long_ratio: Mapped[float] = mapped_column(Float, nullable=False)  # % of longs (0-1)
+    short_ratio: Mapped[float] = mapped_column(Float, nullable=False)  # % of shorts (0-1)
+    long_short_ratio: Mapped[float] = mapped_column(Float, nullable=False)  # long/short
+
+    # Timestamp
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_long_short_symbol_timestamp", "symbol", "timestamp"),
+        Index("ix_long_short_type", "ratio_type"),
+    )
+
+
+class MarkPriceORM(Base):
+    """Mark price data table - stores mark/index prices for derivatives (TimescaleDB hypertable)."""
+
+    __tablename__ = "mark_prices"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", index=True)
+
+    # Price data
+    mark_price: Mapped[float] = mapped_column(Float, nullable=False)
+    index_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Basis/Premium
+    basis: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # mark - index
+    basis_rate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # (mark - index) / index
+
+    # Timestamp
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_mark_prices_symbol_timestamp", "symbol", "timestamp"),
+    )
+
+
+class TakerBuySellORM(Base):
+    """Taker buy/sell volume data - tracks aggressive order flow (TimescaleDB hypertable)."""
+
+    __tablename__ = "taker_buy_sell"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance", index=True)
+    timeframe: Mapped[str] = mapped_column(String(10), nullable=False, default="5m")  # 5m, 15m, 1h, etc.
+
+    # Volume data
+    buy_volume: Mapped[float] = mapped_column(Float, nullable=False)  # Taker buy volume
+    sell_volume: Mapped[float] = mapped_column(Float, nullable=False)  # Taker sell volume
+    buy_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Buy volume * price
+    sell_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Sell volume * price
+
+    # Derived
+    buy_sell_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # buy / (buy + sell)
+    net_volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # buy - sell
+
+    # Timestamp
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_taker_buy_sell_symbol_timestamp", "symbol", "timestamp"),
+        Index("ix_taker_buy_sell_timeframe", "timeframe"),
+    )
+
+
 # SQL to create TimescaleDB hypertable (run after creating tables)
 CREATE_HYPERTABLE_SQL = """
 -- Enable TimescaleDB extension
@@ -590,10 +759,24 @@ SELECT create_hypertable('ohlcv_data', 'timestamp', if_not_exists => TRUE);
 -- Convert factor_values table to hypertable
 SELECT create_hypertable('factor_values', 'timestamp', if_not_exists => TRUE);
 
+-- Derivative data hypertables
+SELECT create_hypertable('funding_rates', 'timestamp', if_not_exists => TRUE);
+SELECT create_hypertable('open_interest', 'timestamp', if_not_exists => TRUE);
+SELECT create_hypertable('liquidations', 'timestamp', if_not_exists => TRUE);
+SELECT create_hypertable('long_short_ratios', 'timestamp', if_not_exists => TRUE);
+SELECT create_hypertable('mark_prices', 'timestamp', if_not_exists => TRUE);
+SELECT create_hypertable('taker_buy_sell', 'timestamp', if_not_exists => TRUE);
+
 -- Add compression policy (compress chunks older than 7 days)
 SELECT add_compression_policy('trades', INTERVAL '7 days', if_not_exists => TRUE);
 SELECT add_compression_policy('ohlcv_data', INTERVAL '7 days', if_not_exists => TRUE);
 SELECT add_compression_policy('factor_values', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('funding_rates', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('open_interest', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('liquidations', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('long_short_ratios', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('mark_prices', INTERVAL '7 days', if_not_exists => TRUE);
+SELECT add_compression_policy('taker_buy_sell', INTERVAL '7 days', if_not_exists => TRUE);
 
 -- Add retention policy (drop chunks older than 1 year)
 SELECT add_retention_policy('trades', INTERVAL '1 year', if_not_exists => TRUE);
@@ -601,4 +784,11 @@ SELECT add_retention_policy('trades', INTERVAL '1 year', if_not_exists => TRUE);
 SELECT add_retention_policy('ohlcv_data', INTERVAL '3 years', if_not_exists => TRUE);
 -- Keep factor values for 2 years
 SELECT add_retention_policy('factor_values', INTERVAL '2 years', if_not_exists => TRUE);
+-- Keep derivative data for 2 years
+SELECT add_retention_policy('funding_rates', INTERVAL '2 years', if_not_exists => TRUE);
+SELECT add_retention_policy('open_interest', INTERVAL '2 years', if_not_exists => TRUE);
+SELECT add_retention_policy('liquidations', INTERVAL '1 year', if_not_exists => TRUE);
+SELECT add_retention_policy('long_short_ratios', INTERVAL '2 years', if_not_exists => TRUE);
+SELECT add_retention_policy('mark_prices', INTERVAL '1 year', if_not_exists => TRUE);
+SELECT add_retention_policy('taker_buy_sell', INTERVAL '2 years', if_not_exists => TRUE);
 """

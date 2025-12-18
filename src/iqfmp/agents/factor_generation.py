@@ -52,8 +52,12 @@ class FieldConstraintViolationError(FactorGenerationError):
 
 
 class FactorFamily(Enum):
-    """Factor family definitions with allowed fields."""
+    """Factor family definitions with allowed fields.
 
+    Extended for cryptocurrency markets with crypto-specific families.
+    """
+
+    # Traditional factor families
     MOMENTUM = "momentum"
     VALUE = "value"
     VOLATILITY = "volatility"
@@ -61,17 +65,30 @@ class FactorFamily(Enum):
     SENTIMENT = "sentiment"
     LIQUIDITY = "liquidity"
 
+    # Crypto-specific factor families
+    FUNDING = "funding"  # Perpetual futures funding rate factors
+    OPEN_INTEREST = "open_interest"  # Open interest dynamics
+    LIQUIDATION = "liquidation"  # Liquidation-based factors
+    ORDERBOOK = "orderbook"  # Market microstructure factors
+    ONCHAIN = "onchain"  # On-chain metrics (for major coins)
+
     def get_allowed_fields(self) -> list[str]:
-        """Get allowed data fields for this factor family."""
-        base_fields = ["open", "high", "low", "close", "volume"]
+        """Get allowed data fields for this factor family.
+
+        Includes both traditional and crypto-specific fields.
+        """
+        # Core OHLCV fields available to all families
+        base_fields = ["open", "high", "low", "close", "volume", "quote_volume"]
 
         family_specific = {
+            # Traditional factor families
             FactorFamily.MOMENTUM: [
                 "close",
                 "returns",
                 "price_change",
                 "momentum",
                 "roc",
+                "funding_rate",  # Crypto: funding momentum
             ],
             FactorFamily.VALUE: [
                 "close",
@@ -100,6 +117,8 @@ class FactorFamily(Enum):
                 "volume",
                 "sentiment_score",
                 "news_count",
+                "long_short_ratio",  # Crypto: positioning sentiment
+                "taker_buy_ratio",  # Crypto: aggressive buying
             ],
             FactorFamily.LIQUIDITY: [
                 "close",
@@ -107,6 +126,48 @@ class FactorFamily(Enum):
                 "bid_ask_spread",
                 "turnover",
                 "amihud",
+                "spread",  # Crypto: bid-ask spread
+                "depth_imbalance",  # Crypto: orderbook imbalance
+            ],
+            # Crypto-specific factor families
+            FactorFamily.FUNDING: [
+                "close",
+                "funding_rate",
+                "funding_rate_predicted",
+                "mark_price",
+                "index_price",
+            ],
+            FactorFamily.OPEN_INTEREST: [
+                "close",
+                "volume",
+                "open_interest",
+                "open_interest_change",
+            ],
+            FactorFamily.LIQUIDATION: [
+                "close",
+                "volume",
+                "liquidation_long",
+                "liquidation_short",
+                "liquidation_total",
+                "open_interest",
+            ],
+            FactorFamily.ORDERBOOK: [
+                "close",
+                "bid_price",
+                "ask_price",
+                "bid_volume",
+                "ask_volume",
+                "spread",
+                "depth_imbalance",
+            ],
+            FactorFamily.ONCHAIN: [
+                "close",
+                "volume",
+                "exchange_inflow",
+                "exchange_outflow",
+                "exchange_netflow",
+                "whale_transactions",
+                "active_addresses",
             ],
         }
 
@@ -117,21 +178,26 @@ class FactorFamily(Enum):
 
         Returns:
             Dictionary mapping field names to descriptions
+
+        Includes crypto-specific fields with detailed descriptions.
         """
         base_descriptions = {
             "open": "Opening price of the period",
             "high": "Highest price during the period",
             "low": "Lowest price during the period",
             "close": "Closing price of the period",
-            "volume": "Trading volume during the period",
+            "volume": "Trading volume in base currency",
+            "quote_volume": "Trading volume in quote currency (USDT) - better for cross-asset comparison",
         }
 
         family_descriptions = {
+            # Traditional factor families
             FactorFamily.MOMENTUM: {
                 "returns": "Price returns over a period",
                 "price_change": "Absolute price change",
                 "momentum": "Price momentum indicator",
                 "roc": "Rate of change indicator",
+                "funding_rate": "Perpetual funding rate (positive = longs pay shorts)",
             },
             FactorFamily.VALUE: {
                 "book_value": "Book value per share",
@@ -152,11 +218,47 @@ class FactorFamily(Enum):
             FactorFamily.SENTIMENT: {
                 "sentiment_score": "Aggregate sentiment score",
                 "news_count": "Number of news articles",
+                "long_short_ratio": "Ratio of long to short accounts (>1 = more longs)",
+                "taker_buy_ratio": "Taker buy volume / (buy + sell), >0.5 = net buying",
             },
             FactorFamily.LIQUIDITY: {
                 "bid_ask_spread": "Bid-ask spread",
                 "turnover": "Trading turnover rate",
                 "amihud": "Amihud illiquidity measure",
+                "spread": "Current bid-ask spread as percentage",
+                "depth_imbalance": "Orderbook imbalance: (bid - ask) / (bid + ask)",
+            },
+            # Crypto-specific factor families
+            FactorFamily.FUNDING: {
+                "funding_rate": "8-hour funding rate (positive = longs pay shorts)",
+                "funding_rate_predicted": "Predicted next funding rate",
+                "mark_price": "Mark price used for liquidation calculations",
+                "index_price": "Underlying spot index price",
+            },
+            FactorFamily.OPEN_INTEREST: {
+                "open_interest": "Total open interest in USD",
+                "open_interest_change": "Change in open interest over period",
+            },
+            FactorFamily.LIQUIDATION: {
+                "liquidation_long": "Long position liquidation volume",
+                "liquidation_short": "Short position liquidation volume",
+                "liquidation_total": "Total liquidation volume",
+                "open_interest": "Open interest for context",
+            },
+            FactorFamily.ORDERBOOK: {
+                "bid_price": "Best bid price",
+                "ask_price": "Best ask price",
+                "bid_volume": "Total bid depth near best bid",
+                "ask_volume": "Total ask depth near best ask",
+                "spread": "Bid-ask spread as percentage",
+                "depth_imbalance": "Orderbook imbalance: (bid - ask) / (bid + ask)",
+            },
+            FactorFamily.ONCHAIN: {
+                "exchange_inflow": "Tokens flowing into exchanges (potential sell pressure)",
+                "exchange_outflow": "Tokens flowing out of exchanges (accumulation)",
+                "exchange_netflow": "Net token flow to exchanges",
+                "whale_transactions": "Count of large transactions (>$100k)",
+                "active_addresses": "Number of active addresses on-chain",
             },
         }
 
@@ -214,64 +316,141 @@ class FieldValidationResult:
 
 
 class FactorPromptTemplate:
-    """Template for generating factor prompts."""
+    """Template for generating factor prompts.
 
-    def __init__(self) -> None:
-        """Initialize prompt template."""
+    This class now delegates to the modular crypto-optimized prompts
+    in iqfmp.llm.prompts for comprehensive few-shot examples and
+    crypto-specific context.
+
+    For direct access to the enhanced prompts, use:
+        from iqfmp.llm.prompts import FactorGenerationPrompt
+    """
+
+    def __init__(self, use_crypto_prompts: bool = True) -> None:
+        """Initialize prompt template.
+
+        Args:
+            use_crypto_prompts: If True, use crypto-optimized prompts from
+                iqfmp.llm.prompts module. If False, use legacy prompts.
+        """
+        self._use_crypto = use_crypto_prompts
+        self._crypto_prompt = None
+
+        if use_crypto_prompts:
+            try:
+                from iqfmp.llm.prompts import FactorGenerationPrompt
+                self._crypto_prompt = FactorGenerationPrompt()
+            except ImportError:
+                self._use_crypto = False
+
+        # Legacy prompts as fallback
         self._system_prompt = self._build_system_prompt()
         self._examples = self._build_examples()
 
     def _build_system_prompt(self) -> str:
-        """Build the system prompt for factor generation."""
-        return """You are an expert quantitative factor developer specializing in Qlib-compatible factors.
+        """Build the system prompt for factor generation.
 
-Your task is to generate Python factor code based on user requirements.
+        Returns crypto-optimized prompt if available, otherwise legacy.
+        """
+        if self._crypto_prompt:
+            return self._crypto_prompt.get_system_prompt()
 
-Guidelines:
+        # Legacy prompt (fallback)
+        return """You are an expert quantitative factor developer specializing in cryptocurrency markets.
+
+Your task is to generate Python factor code for the Qlib-compatible IQFMP system.
+
+## Crypto Market Context
+- 24/7 trading (no market close)
+- High leverage available (up to 125x)
+- Funding rate mechanism in perpetuals
+- Typical daily volatility: ~5%
+
+## Guidelines
 1. Generate clean, well-documented Python code
 2. Use pandas and numpy for calculations
-3. Ensure the factor function takes a DataFrame and returns a Series
-4. Follow Qlib naming conventions
-5. Include docstrings explaining the factor logic
-6. Handle edge cases (NaN values, empty data)
+3. Function signature: def factor_name(df: pd.DataFrame) -> pd.Series
+4. Handle edge cases (NaN values, empty data)
+5. Z-score normalize the output: (x - x.rolling(60).mean()) / (x.rolling(60).std() + 1e-10)
+
+## Available Crypto Fields
+- Core: open, high, low, close, volume, quote_volume
+- Perpetual: funding_rate, mark_price, open_interest
+- Sentiment: long_short_ratio, taker_buy_ratio
+- Liquidation: liquidation_long, liquidation_short
 
 Output format:
 - Return ONLY the Python code in a ```python code block
-- The function should be named descriptively
-- Include type hints where appropriate"""
+- Include detailed docstring explaining the crypto-specific logic"""
 
     def _build_examples(self) -> str:
         """Build example factors for few-shot learning."""
+        if self._crypto_prompt:
+            # Get examples from crypto prompt and format them
+            examples = self._crypto_prompt.get_examples()
+            parts = []
+            for i, ex in enumerate(examples, 1):
+                if ex.get("role") == "assistant":
+                    parts.append(f"Example {i}:\n{ex.get('content', '')}")
+            return "\n\n".join(parts[:3])  # Limit to 3 examples
+
+        # Legacy examples (fallback)
         return '''
-Example 1 - Momentum Factor:
+Example 1 - Funding Rate Momentum:
 ```python
-def momentum_20d(df):
-    """20-day momentum factor based on price returns.
+def funding_momentum(df):
+    """Funding rate momentum factor for crypto perpetuals.
+
+    Crypto-specific: Positive funding = longs pay shorts.
+    Rising funding indicates increasing bullish sentiment.
 
     Args:
-        df: DataFrame with 'close' column
+        df: DataFrame with 'funding_rate' column
 
     Returns:
-        Series with momentum values
+        Z-scored funding rate momentum
     """
-    returns = df['close'].pct_change(20)
-    return returns.fillna(0)
+    if 'funding_rate' not in df.columns:
+        return pd.Series(0, index=df.index)
+
+    funding = df['funding_rate']
+    momentum = funding.diff(3)
+
+    mean = momentum.rolling(30).mean()
+    std = momentum.rolling(30).std()
+    z_score = (momentum - mean) / (std + 1e-10)
+
+    return z_score.fillna(0)
 ```
 
-Example 2 - Volatility Factor:
+Example 2 - Crypto Volatility Regime:
 ```python
-def volatility_20d(df):
-    """20-day rolling volatility factor.
+def volatility_regime(df):
+    """Volatility regime factor for crypto markets.
+
+    Crypto-specific: Vol is 5-10x higher than equities.
+    Low vol periods often precede explosive moves.
 
     Args:
         df: DataFrame with 'close' column
 
     Returns:
-        Series with volatility values
+        Normalized volatility regime indicator
     """
+    import numpy as np
+
     returns = df['close'].pct_change()
-    volatility = returns.rolling(window=20).std()
-    return volatility.fillna(0)
+    vol_20 = returns.rolling(20).std() * np.sqrt(365 * 24)
+    vol_60 = returns.rolling(60).std() * np.sqrt(365 * 24)
+
+    vol_ratio = vol_20 / (vol_60 + 1e-10)
+    log_ratio = np.log(vol_ratio + 1e-10)
+
+    mean = log_ratio.rolling(120).mean()
+    std = log_ratio.rolling(120).std()
+    z_score = (log_ratio - mean) / (std + 1e-10)
+
+    return z_score.fillna(0)
 ```
 '''
 

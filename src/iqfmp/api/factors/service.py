@@ -32,6 +32,7 @@ from iqfmp.db.repositories import (
     FactorValueRepository,
     MiningTaskRepository,
 )
+from iqfmp.db.database import get_async_session
 from iqfmp.api.factors.schemas import (
     MiningTaskStatus,
     FactorLibraryStats,
@@ -1231,6 +1232,7 @@ class FactorService:
         """Run mining task in background.
 
         Uses MiningTaskRepository for persistent progress tracking.
+        Creates its own database session to avoid using the closed request session.
 
         Args:
             task_id: Task ID
@@ -1240,87 +1242,92 @@ class FactorService:
         passed_count = 0
         failed_count = 0
 
-        try:
-            # Mark as started
-            await self.mining_task_repo.set_started(task_id)
+        # Create independent session for background task
+        # This avoids using the request-scoped session which gets closed after HTTP response
+        async with get_async_session() as bg_session:
+            bg_mining_repo = MiningTaskRepository(bg_session, self.redis_client)
 
-            target_count = task_data["target_count"]
-            families = task_data.get("factor_families") or ["momentum", "volatility"]
-            auto_evaluate = task_data.get("auto_evaluate", True)
+            try:
+                # Mark as started
+                await bg_mining_repo.set_started(task_id)
 
-            for i in range(target_count):
-                if await self._is_task_cancelled(task_id):
-                    await self.mining_task_repo.set_completed(task_id, status="cancelled")
-                    return
+                target_count = task_data["target_count"]
+                families = task_data.get("factor_families") or ["momentum", "volatility"]
+                auto_evaluate = task_data.get("auto_evaluate", True)
 
-                # Generate factor
-                family = families[i % len(families)]
-                description = f"Auto-generated {family} factor #{i+1} for mining task {task_data['name']}"
+                for i in range(target_count):
+                    if await self._is_task_cancelled(task_id):
+                        await bg_mining_repo.set_completed(task_id, status="cancelled")
+                        return
 
-                try:
-                    factor = await self.generate_factor(
-                        description=description,
-                        family=[family],
-                        target_task="price_prediction",
-                    )
-                    generated_count += 1
+                    # Generate factor
+                    family = families[i % len(families)]
+                    description = f"Auto-generated {family} factor #{i+1} for mining task {task_data['name']}"
 
-                    # Auto-evaluate if enabled
-                    if auto_evaluate:
-                        try:
-                            _, _, passed, _ = await self.evaluate_factor(
-                                factor_id=factor.id,
-                                splits=["train", "valid", "test"],
-                            )
-                            if passed:
-                                passed_count += 1
-                            else:
+                    try:
+                        factor = await self.generate_factor(
+                            description=description,
+                            family=[family],
+                            target_task="price_prediction",
+                        )
+                        generated_count += 1
+
+                        # Auto-evaluate if enabled
+                        if auto_evaluate:
+                            try:
+                                _, _, passed, _ = await self.evaluate_factor(
+                                    factor_id=factor.id,
+                                    splits=["train", "valid", "test"],
+                                )
+                                if passed:
+                                    passed_count += 1
+                                else:
+                                    failed_count += 1
+                            except Exception:
                                 failed_count += 1
-                        except Exception:
-                            failed_count += 1
-                except Exception as e:
-                    failed_count += 1
-                    print(f"Mining task error: {e}")
+                    except Exception as e:
+                        failed_count += 1
+                        print(f"Mining task error: {e}")
 
-                # Update progress in database
-                progress = ((i + 1) / target_count) * 100
-                await self.mining_task_repo.update_progress(
-                    task_id=task_id,
-                    generated_count=generated_count,
-                    passed_count=passed_count,
-                    failed_count=failed_count,
-                    progress=progress,
-                )
-
-                # P1.2: Broadcast mining progress via WebSocket
-                try:
-                    await broadcast_task_update(
+                    # Update progress in database
+                    progress = ((i + 1) / target_count) * 100
+                    await bg_mining_repo.update_progress(
                         task_id=task_id,
-                        task_type="mining",
-                        status="running",
+                        generated_count=generated_count,
+                        passed_count=passed_count,
+                        failed_count=failed_count,
                         progress=progress,
-                        result={
-                            "generated": generated_count,
-                            "passed": passed_count,
-                            "failed": failed_count,
-                        },
                     )
-                except Exception:
-                    pass  # Non-critical, continue execution
 
-                # Small delay to avoid overwhelming LLM
-                await asyncio.sleep(0.5)
+                    # P1.2: Broadcast mining progress via WebSocket
+                    try:
+                        await broadcast_task_update(
+                            task_id=task_id,
+                            task_type="mining",
+                            status="running",
+                            progress=progress,
+                            result={
+                                "generated": generated_count,
+                                "passed": passed_count,
+                                "failed": failed_count,
+                            },
+                        )
+                    except Exception:
+                        pass  # Non-critical, continue execution
 
-            # Mark as completed
-            await self.mining_task_repo.set_completed(task_id, status="completed")
+                    # Small delay to avoid overwhelming LLM
+                    await asyncio.sleep(0.5)
 
-        except Exception as e:
-            # Mark as failed
-            await self.mining_task_repo.set_completed(
-                task_id=task_id,
-                status="failed",
-                error_message=str(e),
-            )
+                # Mark as completed
+                await bg_mining_repo.set_completed(task_id, status="completed")
+
+            except Exception as e:
+                # Mark as failed
+                await bg_mining_repo.set_completed(
+                    task_id=task_id,
+                    status="failed",
+                    error_message=str(e),
+                )
 
     async def _is_task_cancelled(self, task_id: str) -> bool:
         """Check if task has been cancelled."""

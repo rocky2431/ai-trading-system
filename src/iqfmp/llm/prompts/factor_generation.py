@@ -362,6 +362,387 @@ def volatility_regime(df: pd.DataFrame) -> pd.Series:
     return z_score.fillna(0)
 ```"""
             },
+            # === NEW CRYPTO-SPECIFIC EXAMPLES ===
+            {
+                "role": "user",
+                "content": "Create an orderbook depth imbalance factor"
+            },
+            {
+                "role": "assistant",
+                "content": """```python
+def orderbook_imbalance(df: pd.DataFrame) -> pd.Series:
+    \"\"\"Orderbook Depth Imbalance Factor.
+
+    Measures the bid-ask imbalance in the orderbook.
+
+    Crypto-specific insight:
+    - Crypto orderbooks are thinner than equity markets
+    - Imbalance often predicts short-term price direction
+    - Large bid walls can be spoofed (use with caution)
+    - Combine with volume for confirmation
+
+    Signal interpretation:
+    - Positive = more bids than asks (bullish pressure)
+    - Negative = more asks than bids (bearish pressure)
+    - Extreme readings often precede moves in that direction
+
+    Args:
+        df: DataFrame with 'bid_volume' and 'ask_volume' columns
+
+    Returns:
+        Z-scored orderbook imbalance
+    \"\"\"
+    if 'bid_volume' not in df.columns or 'ask_volume' not in df.columns:
+        # Fallback to depth_imbalance if available
+        if 'depth_imbalance' in df.columns:
+            imbalance = df['depth_imbalance']
+        else:
+            return pd.Series(0, index=df.index)
+    else:
+        bid_vol = df['bid_volume'].fillna(0)
+        ask_vol = df['ask_volume'].fillna(0)
+        total = bid_vol + ask_vol + 1e-10
+
+        # Imbalance: (bid - ask) / (bid + ask)
+        imbalance = (bid_vol - ask_vol) / total
+
+    # Smooth to reduce noise (orderbooks are noisy)
+    smoothed = imbalance.rolling(5).mean()
+
+    # Z-score normalization
+    mean = smoothed.rolling(60).mean()
+    std = smoothed.rolling(60).std()
+    z_score = (smoothed - mean) / (std + 1e-10)
+
+    return z_score.fillna(0)
+```"""
+            },
+            {
+                "role": "user",
+                "content": "Create a taker buy ratio sentiment factor"
+            },
+            {
+                "role": "assistant",
+                "content": """```python
+def taker_sentiment(df: pd.DataFrame) -> pd.Series:
+    \"\"\"Taker Buy/Sell Ratio Sentiment Factor.
+
+    Measures aggressive buying vs selling pressure.
+
+    Crypto-specific insight:
+    - Taker = market order that crosses the spread
+    - Taker buy ratio > 0.5 = net aggressive buying
+    - Taker buy ratio < 0.5 = net aggressive selling
+    - Extreme readings (> 0.65 or < 0.35) often reverse
+    - More reliable than passive orderbook analysis
+
+    Signal interpretation:
+    - Use as momentum (follow the flow) at moderate levels
+    - Use as contrarian at extreme levels
+    - This factor uses z-score, so it auto-adjusts
+
+    Args:
+        df: DataFrame with 'taker_buy_ratio' column
+
+    Returns:
+        Z-scored taker sentiment signal
+    \"\"\"
+    if 'taker_buy_ratio' not in df.columns:
+        return pd.Series(0, index=df.index)
+
+    taker = df['taker_buy_ratio'].fillna(0.5)
+
+    # Center around 0 (0.5 is neutral)
+    centered = taker - 0.5
+
+    # Rolling momentum of taker flow
+    momentum = centered.diff(3)
+
+    # Z-score
+    mean = momentum.rolling(48).mean()
+    std = momentum.rolling(48).std()
+    z_score = (momentum - mean) / (std + 1e-10)
+
+    return z_score.fillna(0)
+```"""
+            },
+            {
+                "role": "user",
+                "content": "Create a funding rate extreme mean reversion factor"
+            },
+            {
+                "role": "assistant",
+                "content": """```python
+def funding_extreme_reversal(df: pd.DataFrame) -> pd.Series:
+    \"\"\"Funding Rate Extreme Mean Reversion Factor.
+
+    Captures mean reversion opportunities from extreme funding rates.
+
+    Crypto-specific insight:
+    - Normal funding: -0.01% to +0.01% per 8h
+    - Elevated: ±0.01% to ±0.05%
+    - Extreme: > ±0.05% per 8h
+    - Extreme positive funding = crowded longs = SHORT signal
+    - Extreme negative funding = crowded shorts = LONG signal
+
+    This factor is CONTRARIAN:
+    - Positive value = extreme positive funding = signal to SHORT
+    - Negative value = extreme negative funding = signal to LONG
+
+    Args:
+        df: DataFrame with 'funding_rate' column
+
+    Returns:
+        Contrarian signal based on funding extremes
+    \"\"\"
+    import numpy as np
+
+    if 'funding_rate' not in df.columns:
+        return pd.Series(0, index=df.index)
+
+    funding = df['funding_rate']
+
+    # Z-score of funding rate
+    mean = funding.rolling(90).mean()  # 30 days of 8h data
+    std = funding.rolling(90).std()
+    z_score = (funding - mean) / (std + 1e-10)
+
+    # Contrarian signal: extreme positive funding → negative signal
+    # Apply sigmoid-like transformation for stronger extremes
+    signal = -np.tanh(z_score)  # Negative because contrarian
+
+    # Only trade extremes: dampen signal near zero
+    extreme_mask = np.abs(z_score) > 1.5
+    dampened = signal * extreme_mask.astype(float)
+
+    # Smooth for stability
+    smoothed = dampened.rolling(3).mean()
+
+    return smoothed.fillna(0)
+```"""
+            },
+            {
+                "role": "user",
+                "content": "Create an exchange netflow on-chain factor"
+            },
+            {
+                "role": "assistant",
+                "content": """```python
+def exchange_flow_signal(df: pd.DataFrame) -> pd.Series:
+    \"\"\"Exchange Net Flow On-Chain Factor.
+
+    Tracks tokens flowing into/out of exchanges.
+
+    Crypto-specific insight (on-chain data):
+    - Inflow to exchange = potential sell pressure (coins ready to sell)
+    - Outflow from exchange = accumulation (coins moving to cold storage)
+    - Works best for major coins (BTC, ETH) with reliable on-chain data
+    - Has lead time of hours to days over price
+
+    Signal interpretation:
+    - Negative netflow (outflow > inflow) = bullish (accumulation)
+    - Positive netflow (inflow > outflow) = bearish (distribution)
+    - We INVERT the sign so positive signal = bullish
+
+    Args:
+        df: DataFrame with 'exchange_netflow' or 'exchange_inflow'/'exchange_outflow'
+
+    Returns:
+        Z-scored exchange flow signal (positive = bullish)
+    \"\"\"
+    import numpy as np
+
+    # Try netflow column first
+    if 'exchange_netflow' in df.columns:
+        netflow = df['exchange_netflow']
+    elif 'exchange_inflow' in df.columns and 'exchange_outflow' in df.columns:
+        netflow = df['exchange_inflow'] - df['exchange_outflow']
+    else:
+        return pd.Series(0, index=df.index)
+
+    netflow = netflow.fillna(0)
+
+    # Cumulative flow over rolling window (7 days = 168 hours)
+    rolling_flow = netflow.rolling(168).sum()
+
+    # Z-score (long window due to on-chain data noise)
+    mean = rolling_flow.rolling(720).mean()  # 30 days
+    std = rolling_flow.rolling(720).std()
+    z_score = (rolling_flow - mean) / (std + 1e-10)
+
+    # INVERT: negative netflow (outflow) is bullish
+    signal = -z_score
+
+    return signal.fillna(0)
+```"""
+            },
+            {
+                "role": "user",
+                "content": "Create a long/short ratio contrarian factor"
+            },
+            {
+                "role": "assistant",
+                "content": """```python
+def long_short_contrarian(df: pd.DataFrame) -> pd.Series:
+    \"\"\"Long/Short Ratio Contrarian Factor.
+
+    Uses retail positioning as a contrarian indicator.
+
+    Crypto-specific insight:
+    - Long/short ratio > 1 = more accounts are long
+    - Long/short ratio < 1 = more accounts are short
+    - Retail is often wrong at extremes
+    - Extreme long positioning = bearish contrarian signal
+    - Extreme short positioning = bullish contrarian signal
+
+    Signal interpretation:
+    - Positive value = extreme long positioning = potential SHORT
+    - Negative value = extreme short positioning = potential LONG
+    - Works best at extremes, neutral signal near average
+
+    Args:
+        df: DataFrame with 'long_short_ratio' column
+
+    Returns:
+        Contrarian positioning signal
+    \"\"\"
+    import numpy as np
+
+    if 'long_short_ratio' not in df.columns:
+        return pd.Series(0, index=df.index)
+
+    ls_ratio = df['long_short_ratio'].fillna(1.0)
+
+    # Log transform (ratio of 2 = -ratio of 0.5)
+    log_ratio = np.log(ls_ratio + 1e-10)
+
+    # Z-score
+    mean = log_ratio.rolling(72).mean()  # 3 days
+    std = log_ratio.rolling(72).std()
+    z_score = (log_ratio - mean) / (std + 1e-10)
+
+    # Contrarian signal (extreme longs = short signal)
+    # But only at extremes (|z| > 1.5)
+    contrarian = -np.tanh(z_score * 0.5)
+
+    # Dampen non-extreme signals
+    extreme_weight = np.minimum(np.abs(z_score) / 1.5, 1.0)
+    signal = contrarian * extreme_weight
+
+    return signal.fillna(0)
+```"""
+            },
+            {
+                "role": "user",
+                "content": "Create a perpetual basis spread factor"
+            },
+            {
+                "role": "assistant",
+                "content": """```python
+def perpetual_basis(df: pd.DataFrame) -> pd.Series:
+    \"\"\"Perpetual Futures Basis Spread Factor.
+
+    Measures the spread between perpetual mark price and spot index.
+
+    Crypto-specific insight:
+    - Mark price = fair price for perpetual futures
+    - Index price = spot price from major exchanges
+    - Positive basis (mark > index) = futures premium = bullish sentiment
+    - Negative basis (mark < index) = futures discount = bearish sentiment
+    - Extreme basis often mean reverts (arbitrage)
+
+    Signal interpretation:
+    - Positive = premium (can be momentum or mean-reversion signal)
+    - This factor uses it as momentum: follow the sentiment
+    - For mean-reversion, negate the output
+
+    Args:
+        df: DataFrame with 'mark_price' and 'index_price' columns
+
+    Returns:
+        Z-scored basis spread signal
+    \"\"\"
+    import numpy as np
+
+    if 'mark_price' not in df.columns or 'index_price' not in df.columns:
+        return pd.Series(0, index=df.index)
+
+    mark = df['mark_price']
+    index = df['index_price']
+
+    # Basis in percentage terms
+    basis = (mark - index) / (index + 1e-10) * 100
+
+    # Annualized basis (funding is 3x daily)
+    annualized_basis = basis * 3 * 365
+
+    # Z-score
+    mean = annualized_basis.rolling(48).mean()
+    std = annualized_basis.rolling(48).std()
+    z_score = (annualized_basis - mean) / (std + 1e-10)
+
+    return z_score.fillna(0)
+```"""
+            },
+            {
+                "role": "user",
+                "content": "Create a whale transaction on-chain factor"
+            },
+            {
+                "role": "assistant",
+                "content": """```python
+def whale_activity(df: pd.DataFrame) -> pd.Series:
+    \"\"\"Whale Transaction Activity Factor.
+
+    Tracks large transactions as a proxy for institutional activity.
+
+    Crypto-specific insight (on-chain data):
+    - Whale = transaction > $100k (or $1M for BTC)
+    - High whale activity during downtrend = accumulation
+    - High whale activity during uptrend = distribution
+    - Combine with price direction for context
+
+    Signal interpretation:
+    - We use whale activity * inverse price direction
+    - High activity + falling price = buying opportunity (accumulation)
+    - High activity + rising price = selling signal (distribution)
+
+    Args:
+        df: DataFrame with 'whale_transactions' and 'close' columns
+
+    Returns:
+        Context-aware whale activity signal
+    \"\"\"
+    import numpy as np
+
+    if 'whale_transactions' not in df.columns:
+        return pd.Series(0, index=df.index)
+
+    whale_tx = df['whale_transactions'].fillna(0)
+    price = df['close']
+
+    # Normalize whale activity
+    whale_mean = whale_tx.rolling(168).mean()  # 7 days
+    whale_std = whale_tx.rolling(168).std()
+    whale_z = (whale_tx - whale_mean) / (whale_std + 1e-10)
+
+    # Price direction (7-day return)
+    price_direction = np.sign(price.pct_change(168))
+
+    # Contrarian signal: high whale activity during downtrend = bullish
+    signal = whale_z * (-price_direction)
+
+    # Smooth for stability
+    smoothed = signal.rolling(24).mean()
+
+    # Final z-score
+    mean = smoothed.rolling(720).mean()
+    std = smoothed.rolling(720).std()
+    z_score = (smoothed - mean) / (std + 1e-10)
+
+    return z_score.fillna(0)
+```"""
+            },
         ]
 
     def render(

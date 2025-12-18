@@ -1,7 +1,12 @@
 """Strategy Assembly Agent for IQFMP.
 
 Assembles multiple factors into trading strategies with weighting,
-combining methods, and portfolio construction rules.
+combining methods, and portfolio construction rules, enhanced with LLM.
+
+LLM Integration:
+- Uses frontend-configured model from ConfigService via model_config.py
+- LLM provides intelligent strategy design recommendations
+- Suggests optimal factor combinations and weighting approaches
 
 Six-dimensional coverage:
 1. Functional: Factor combination, weight optimization, signal generation
@@ -14,13 +19,52 @@ Six-dimensional coverage:
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Protocol
+import json
 import logging
+import re
 
 import numpy as np
 import pandas as pd
 
 from iqfmp.agents.orchestrator import AgentState
+
+
+# =============================================================================
+# LLM Integration Protocol and System Prompts
+# =============================================================================
+
+class LLMProviderProtocol(Protocol):
+    """Protocol for LLM provider interface."""
+
+    async def complete(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Any:
+        """Generate completion from the LLM."""
+        ...
+
+
+STRATEGY_SYSTEM_PROMPT = """You are an expert portfolio manager specializing in multi-factor strategy design.
+
+Your task is to analyze factor combinations and provide strategic recommendations:
+1. Suggest optimal factor weighting approaches based on factor characteristics
+2. Recommend portfolio construction methods suited to the factors
+3. Identify potential risks from factor correlations
+4. Propose risk management overlays
+
+Consider:
+- Factor IC and IR values for quality assessment
+- Factor correlations to avoid redundancy
+- Market regime sensitivity
+- Transaction costs and turnover implications
+- Risk-adjusted return optimization
+
+Provide specific, actionable strategy recommendations."""
 
 
 logger = logging.getLogger(__name__)
@@ -176,10 +220,11 @@ class StrategyResult:
 
 
 class StrategyAssemblyAgent:
-    """Agent for assembling multi-factor trading strategies.
+    """Agent for assembling multi-factor trading strategies with LLM support.
 
     This agent combines evaluated factors into trading strategies
-    using various weighting and portfolio construction methods.
+    using various weighting and portfolio construction methods,
+    enhanced with LLM-powered strategy design recommendations.
 
     Responsibilities:
     - Select best factors from evaluation results
@@ -187,19 +232,139 @@ class StrategyAssemblyAgent:
     - Combine factor signals
     - Generate portfolio positions
     - Apply risk constraints
+    - Generate LLM-powered strategy recommendations
+
+    LLM Integration:
+    - Uses frontend-configured model via get_agent_full_config("strategy_assembly")
+    - Provides intelligent strategy design insights
+    - Recommends optimal factor combinations
 
     Usage:
-        agent = StrategyAssemblyAgent(config)
+        agent = StrategyAssemblyAgent(config, llm_provider=llm)
         new_state = await agent.assemble(state)
     """
 
-    def __init__(self, config: Optional[StrategyConfig] = None) -> None:
-        """Initialize the strategy assembly agent.
+    def __init__(
+        self,
+        config: Optional[StrategyConfig] = None,
+        llm_provider: Optional[LLMProviderProtocol] = None,
+    ) -> None:
+        """Initialize the strategy assembly agent with LLM support.
 
         Args:
             config: Strategy configuration
+            llm_provider: LLM provider for AI-powered recommendations
         """
         self.config = config or StrategyConfig()
+        self.llm_provider = llm_provider
+
+    async def generate_llm_recommendations(
+        self,
+        factor_weights: list[FactorWeight],
+        evaluation_results: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Generate LLM-powered strategy recommendations.
+
+        Args:
+            factor_weights: Calculated factor weights
+            evaluation_results: Evaluation results for each factor
+
+        Returns:
+            Dict with strategy insights and recommendations
+        """
+        if self.llm_provider is None:
+            return self._generate_template_recommendations(factor_weights)
+
+        # Get model configuration from ConfigService
+        from iqfmp.agents.model_config import get_agent_full_config
+        model_id, temperature, custom_system_prompt = get_agent_full_config("strategy_assembly")
+
+        # Build analysis prompt
+        factors_summary = "\n".join([
+            f"- {fw.factor_name}: weight={fw.weight:.2%}, IC={fw.ic:.4f}, IR={fw.ir:.2f}"
+            for fw in factor_weights
+        ])
+
+        prompt = f"""Analyze the following multi-factor strategy configuration:
+
+Factors in Strategy:
+{factors_summary}
+
+Combination Method: {self.config.combination_method.value}
+Portfolio Construction: {self.config.construction_method.value}
+Max Position Size: {self.config.max_position_size:.1%}
+Max Factor Weight: {self.config.max_factor_weight:.1%}
+
+Provide:
+1. Assessment of the factor combination quality (2-3 sentences)
+2. Potential risks from this factor mix
+3. 2-3 specific recommendations for optimization
+
+Format as JSON:
+```json
+{{
+    "assessment": "Your assessment...",
+    "risks": ["Risk 1", "Risk 2"],
+    "recommendations": ["Recommendation 1", "Recommendation 2"]
+}}
+```"""
+
+        try:
+            system_prompt = custom_system_prompt or STRATEGY_SYSTEM_PROMPT
+
+            response = await self.llm_provider.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=1024,
+            )
+
+            return self._parse_llm_recommendations(response.content)
+
+        except Exception as e:
+            logger.error(f"LLM recommendations failed: {e}. Using template.")
+            return self._generate_template_recommendations(factor_weights)
+
+    def _parse_llm_recommendations(self, response_text: str) -> dict[str, Any]:
+        """Parse LLM recommendations response."""
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+        return {
+            "assessment": response_text[:300],
+            "risks": [],
+            "recommendations": [],
+        }
+
+    def _generate_template_recommendations(
+        self,
+        factor_weights: list[FactorWeight],
+    ) -> dict[str, Any]:
+        """Generate template-based recommendations when LLM is unavailable."""
+        n_factors = len(factor_weights)
+        avg_ic = sum(abs(fw.ic) for fw in factor_weights) / n_factors if n_factors > 0 else 0
+
+        assessment = f"Strategy combines {n_factors} factors with average IC of {avg_ic:.4f}."
+        risks = ["Factor correlation may reduce diversification benefit"]
+        recommendations = [
+            "Monitor factor performance stability over time",
+            "Consider adding regime-based factor rotation",
+        ]
+
+        if n_factors < 3:
+            risks.append("Low number of factors increases concentration risk")
+            recommendations.append("Add more uncorrelated factors for diversification")
+
+        return {
+            "assessment": assessment,
+            "risks": risks,
+            "recommendations": recommendations,
+        }
 
     async def assemble(self, state: AgentState) -> AgentState:
         """Assemble strategy from evaluated factors.

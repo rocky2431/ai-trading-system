@@ -696,6 +696,15 @@ class ConfigService:
 
     # ============== Agent Configuration ==============
 
+    # Default temperatures for each agent (used when not customized)
+    AGENT_DEFAULT_TEMPERATURES = {
+        "factor_generation": 0.3,  # Lower for precise code generation
+        "factor_evaluation": 0.5,
+        "strategy_assembly": 0.7,
+        "backtest_optimization": 0.3,
+        "risk_check": 0.4,  # Conservative for risk assessment
+    }
+
     def get_agent_config(self) -> AgentConfigResponse:
         """Get agent configuration."""
         agent_config = self._config.get("agents", {})
@@ -704,12 +713,16 @@ class ConfigService:
         for agent_def in self.AGENTS:
             agent_id = agent_def["agent_id"]
             saved_config = agent_config.get(agent_id, {})
+            default_temp = self.AGENT_DEFAULT_TEMPERATURES.get(agent_id, 0.7)
+
             agents.append(AgentModelConfig(
                 agent_id=agent_id,
                 agent_name=agent_def["agent_name"],
                 description=agent_def["description"],
                 model_id=saved_config.get("model_id", agent_def["default_model"]),
                 enabled=saved_config.get("enabled", True),
+                temperature=saved_config.get("temperature", default_temp),
+                system_prompt=saved_config.get("system_prompt"),  # None = use default
             ))
 
         return AgentConfigResponse(agents=agents)
@@ -731,6 +744,20 @@ class ConfigService:
         if request.enabled is not None:
             self._config["agents"][request.agent_id]["enabled"] = request.enabled
             updated.append("enabled")
+
+        if request.temperature is not None:
+            self._config["agents"][request.agent_id]["temperature"] = request.temperature
+            updated.append("temperature")
+
+        if request.system_prompt is not None:
+            # Empty string means reset to default (remove custom prompt)
+            if request.system_prompt == "":
+                if "system_prompt" in self._config["agents"][request.agent_id]:
+                    del self._config["agents"][request.agent_id]["system_prompt"]
+                updated.append("system_prompt (reset to default)")
+            else:
+                self._config["agents"][request.agent_id]["system_prompt"] = request.system_prompt
+                updated.append("system_prompt")
 
         self._save_config()
 

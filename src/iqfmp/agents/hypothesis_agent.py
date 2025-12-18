@@ -4,22 +4,105 @@ This module implements the core RD-Agent hypothesis-experiment-feedback loop.
 Based on the RD-Agent paper architecture but adapted for cryptocurrency factor mining.
 
 Key components:
-- HypothesisGenerator: Generate trading hypotheses from market analysis
-- HypothesisToCode: Convert hypotheses to executable factor code
-- FeedbackAnalyzer: Analyze experiment results and provide feedback
+- HypothesisGenerator: Generate trading hypotheses from market analysis (LLM-powered)
+- HypothesisToCode: Convert hypotheses to executable factor code (LLM-powered)
+- FeedbackAnalyzer: Analyze experiment results and provide feedback (LLM-powered)
+
+All components use frontend-configured LLM models via OpenRouter API.
+Model configuration is loaded from ConfigService (see model_config.py).
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# LLM Integration Protocol and System Prompts
+# =============================================================================
+
+class LLMProviderProtocol(Protocol):
+    """Protocol for LLM provider interface."""
+
+    async def complete(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Any:
+        """Generate completion from the LLM."""
+        ...
+
+
+HYPOTHESIS_SYSTEM_PROMPT = """You are an expert quantitative researcher specializing in cryptocurrency and financial market factor research.
+
+Your role is to generate creative and testable trading hypotheses based on:
+1. Market microstructure patterns
+2. Behavioral finance insights
+3. Technical analysis principles
+4. Cryptocurrency-specific phenomena (funding rates, liquidations, etc.)
+
+For each hypothesis, you must provide:
+- A clear, testable statement
+- The underlying rationale (why this should work)
+- Expected information coefficient (IC) based on historical patterns
+- Expected direction (long, short, or long_short)
+
+Focus on hypotheses that are:
+1. Actionable - can be converted to trading signals
+2. Testable - can be evaluated with historical data
+3. Novel - not already widely exploited
+4. Robust - likely to work across different market conditions
+
+Output your hypotheses in JSON format."""
+
+CODE_GENERATION_SYSTEM_PROMPT = """You are an expert Python developer specializing in quantitative finance.
+
+Your task is to convert trading hypotheses into executable factor code that works with pandas DataFrames.
+
+Requirements:
+1. The function must accept a DataFrame with OHLCV columns: open, high, low, close, volume
+2. Return a pandas Series of factor values (typically z-scored)
+3. Handle edge cases (NaN, insufficient data)
+4. Use only pandas, numpy - no external dependencies
+5. Apply proper normalization (z-score with rolling mean/std)
+
+Output format:
+```python
+def factor_name(df):
+    \"\"\"Docstring explaining the factor.\"\"\"
+    # Your implementation
+    return factor_values
+```"""
+
+FEEDBACK_SYSTEM_PROMPT = """You are an expert quantitative researcher analyzing factor performance results.
+
+Your task is to:
+1. Explain why a factor succeeded or failed
+2. Identify potential issues in the implementation
+3. Suggest specific improvements or refinements
+4. Recommend whether to continue iterating on this hypothesis
+
+Consider:
+- Information Coefficient (IC) - predictive power
+- Information Ratio (IR) - IC consistency over time
+- Sharpe Ratio - risk-adjusted returns
+- Turnover - trading costs impact
+- Regime stability - performance across market conditions
+
+Provide actionable feedback that can improve the next iteration."""
 
 
 class HypothesisStatus(str, Enum):
@@ -182,17 +265,24 @@ HYPOTHESIS_TEMPLATES: dict[HypothesisFamily, list[dict[str, Any]]] = {
 
 
 class HypothesisGenerator:
-    """Generate trading hypotheses from market analysis."""
+    """Generate trading hypotheses from market analysis using LLM.
+
+    Uses frontend-configured model from ConfigService via model_config.py.
+    Falls back to template-based generation if LLM is unavailable.
+    """
 
     def __init__(
         self,
+        llm_provider: Optional[LLMProviderProtocol] = None,
         templates: Optional[dict[HypothesisFamily, list[dict]]] = None,
     ) -> None:
         """Initialize generator.
 
         Args:
-            templates: Hypothesis templates by family
+            llm_provider: LLM provider for AI-powered generation
+            templates: Hypothesis templates by family (fallback)
         """
+        self.llm_provider = llm_provider
         self.templates = templates or HYPOTHESIS_TEMPLATES
         self._generated_count = 0
 
@@ -227,12 +317,158 @@ class HypothesisGenerator:
             source="template",
         )
 
+    async def generate_with_llm(
+        self,
+        market_data: pd.DataFrame,
+        n_hypotheses: int = 5,
+        focus_family: Optional[HypothesisFamily] = None,
+    ) -> list[Hypothesis]:
+        """Generate hypotheses using LLM based on market data.
+
+        Args:
+            market_data: OHLCV DataFrame for context
+            n_hypotheses: Number of hypotheses to generate
+            focus_family: Optional family to focus on
+
+        Returns:
+            List of LLM-generated hypotheses
+        """
+        if self.llm_provider is None:
+            logger.warning("No LLM provider, falling back to template generation")
+            return self.generate_from_analysis(market_data, focus_family)
+
+        # Get model configuration from ConfigService
+        from iqfmp.agents.model_config import get_agent_full_config
+        model_id, temperature, custom_system_prompt = get_agent_full_config("hypothesis")
+
+        # Prepare market context for LLM
+        conditions = self._analyze_market_conditions(market_data)
+        market_summary = self._create_market_summary(market_data, conditions)
+
+        # Build prompt
+        prompt = f"""Analyze the following market conditions and generate {n_hypotheses} creative trading hypotheses.
+
+Market Summary:
+{market_summary}
+
+{"Focus on " + focus_family.value + " related hypotheses." if focus_family else "Cover diverse hypothesis families."}
+
+Generate exactly {n_hypotheses} hypotheses in the following JSON format:
+```json
+[
+    {{
+        "name": "Hypothesis Name",
+        "description": "Clear description of the hypothesis",
+        "family": "momentum|mean_reversion|volatility|volume|trend|microstructure|funding|sentiment|cross_asset",
+        "rationale": "Why this hypothesis should work",
+        "expected_ic": 0.03,
+        "expected_direction": "long|short|long_short"
+    }}
+]
+```"""
+
+        try:
+            # Use custom system prompt if configured, otherwise use default
+            system_prompt = custom_system_prompt or HYPOTHESIS_SYSTEM_PROMPT
+
+            response = await self.llm_provider.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=2048,
+            )
+
+            # Parse LLM response
+            hypotheses = self._parse_llm_response(response.content)
+            self._generated_count += len(hypotheses)
+
+            logger.info(f"LLM generated {len(hypotheses)} hypotheses using model {model_id}")
+            return hypotheses
+
+        except Exception as e:
+            logger.error(f"LLM hypothesis generation failed: {e}. Falling back to templates.")
+            return self.generate_from_analysis(market_data, focus_family)
+
+    def _parse_llm_response(self, response_text: str) -> list[Hypothesis]:
+        """Parse LLM response to extract hypotheses."""
+        hypotheses = []
+
+        # Extract JSON from response
+        json_match = re.search(r'\[[\s\S]*\]', response_text)
+        if not json_match:
+            logger.warning("No JSON found in LLM response")
+            return hypotheses
+
+        try:
+            data = json.loads(json_match.group())
+            for item in data:
+                family_str = item.get("family", "momentum")
+                try:
+                    family = HypothesisFamily(family_str)
+                except ValueError:
+                    family = HypothesisFamily.MOMENTUM
+
+                hypothesis = Hypothesis(
+                    name=item.get("name", "Unnamed Hypothesis"),
+                    description=item.get("description", ""),
+                    family=family,
+                    rationale=item.get("rationale", ""),
+                    expected_ic=float(item.get("expected_ic", 0.03)),
+                    expected_direction=item.get("expected_direction", "long_short"),
+                    source="llm",
+                )
+                hypotheses.append(hypothesis)
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM JSON: {e}")
+
+        return hypotheses
+
+    def _create_market_summary(
+        self,
+        df: pd.DataFrame,
+        conditions: dict[str, bool],
+    ) -> str:
+        """Create market summary for LLM context."""
+        if len(df) < 20:
+            return "Insufficient data for analysis."
+
+        # Calculate key metrics
+        returns_1d = df["close"].pct_change().iloc[-1] * 100
+        returns_7d = df["close"].pct_change(7).iloc[-1] * 100
+        returns_30d = df["close"].pct_change(30).iloc[-1] * 100 if len(df) >= 30 else 0
+
+        volatility = df["close"].pct_change().rolling(20).std().iloc[-1] * (252 ** 0.5) * 100
+
+        # Volume analysis
+        volume_ratio = 1.0
+        if "volume" in df.columns:
+            volume_ratio = df["volume"].iloc[-1] / df["volume"].rolling(20).mean().iloc[-1]
+
+        summary_parts = [
+            f"- 1-day return: {returns_1d:.2f}%",
+            f"- 7-day return: {returns_7d:.2f}%",
+            f"- 30-day return: {returns_30d:.2f}%",
+            f"- Annualized volatility: {volatility:.1f}%",
+            f"- Volume ratio (vs 20d avg): {volume_ratio:.2f}x",
+            f"- Trending: {'Yes' if conditions['trending'] else 'No'}",
+            f"- High volatility: {'Yes' if conditions['high_volatility'] else 'No'}",
+            f"- Extreme RSI: {'Yes' if conditions['extreme_rsi'] else 'No'}",
+        ]
+
+        if "funding_rate" in df.columns:
+            funding = df["funding_rate"].iloc[-1] * 100
+            summary_parts.append(f"- Current funding rate: {funding:.4f}%")
+
+        return "\n".join(summary_parts)
+
     def generate_from_analysis(
         self,
         market_data: pd.DataFrame,
         focus_family: Optional[HypothesisFamily] = None,
     ) -> list[Hypothesis]:
-        """Generate hypotheses based on market data analysis.
+        """Generate hypotheses based on market data analysis (template fallback).
 
         Args:
             market_data: OHLCV DataFrame
@@ -248,21 +484,16 @@ class HypothesisGenerator:
 
         # Generate hypotheses based on conditions
         if conditions["trending"]:
-            # In trending markets, test momentum hypotheses
             hypotheses.append(self.generate_from_template(HypothesisFamily.MOMENTUM, 0))
 
         if conditions["high_volatility"]:
-            # High volatility: test volatility hypotheses
             hypotheses.append(self.generate_from_template(HypothesisFamily.VOLATILITY, 0))
         else:
-            # Low volatility: test breakout hypothesis
             hypotheses.append(self.generate_from_template(HypothesisFamily.VOLATILITY, 1))
 
         if conditions["extreme_rsi"]:
-            # Extreme RSI: test mean reversion
             hypotheses.append(self.generate_from_template(HypothesisFamily.MEAN_REVERSION, 0))
 
-        # Always add funding hypothesis for crypto
         if "funding_rate" in market_data.columns or focus_family == HypothesisFamily.FUNDING:
             hypotheses.append(self.generate_from_template(HypothesisFamily.FUNDING, 0))
 
@@ -284,11 +515,11 @@ class HypothesisGenerator:
 
         # Check for trend
         returns_20d = df["close"].pct_change(20).iloc[-1]
-        conditions["trending"] = abs(returns_20d) > 0.1  # 10% move in 20 days
+        conditions["trending"] = abs(returns_20d) > 0.1
 
         # Check volatility regime
         volatility = df["close"].pct_change().rolling(20).std().iloc[-1] * (252 ** 0.5)
-        conditions["high_volatility"] = volatility > 0.5  # 50% annualized vol
+        conditions["high_volatility"] = volatility > 0.5
 
         # Check RSI extremes
         delta = df["close"].diff()
@@ -303,9 +534,13 @@ class HypothesisGenerator:
 
 
 class HypothesisToCode:
-    """Convert trading hypotheses to executable factor code."""
+    """Convert trading hypotheses to executable factor code using LLM.
 
-    # Code templates for each family
+    Uses frontend-configured model from ConfigService via model_config.py.
+    Falls back to template-based conversion if LLM is unavailable.
+    """
+
+    # Code templates for each family (fallback)
     CODE_TEMPLATES: dict[str, str] = {
         "Price Momentum": '''
 def {func_name}(df):
@@ -392,9 +627,107 @@ def {func_name}(df):
 ''',
     }
 
-    def __init__(self) -> None:
-        """Initialize converter."""
+    def __init__(
+        self,
+        llm_provider: Optional[LLMProviderProtocol] = None,
+    ) -> None:
+        """Initialize converter.
+
+        Args:
+            llm_provider: LLM provider for AI-powered code generation
+        """
+        self.llm_provider = llm_provider
         self._conversion_count = 0
+
+    async def convert_with_llm(
+        self,
+        hypothesis: Hypothesis,
+        params: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Convert hypothesis to factor code using LLM.
+
+        Args:
+            hypothesis: Hypothesis to convert
+            params: Optional parameters for the factor
+
+        Returns:
+            Executable Python code string
+        """
+        if self.llm_provider is None:
+            logger.warning("No LLM provider, falling back to template conversion")
+            return self.convert(hypothesis, params)
+
+        # Get model configuration from ConfigService
+        from iqfmp.agents.model_config import get_agent_full_config
+        model_id, temperature, custom_system_prompt = get_agent_full_config("factor_generation")
+
+        # Generate function name
+        func_name = self._generate_func_name(hypothesis)
+
+        # Build prompt
+        prompt = f"""Convert the following trading hypothesis into executable Python factor code.
+
+Hypothesis:
+- Name: {hypothesis.name}
+- Description: {hypothesis.description}
+- Family: {hypothesis.family.value}
+- Rationale: {hypothesis.rationale}
+- Expected Direction: {hypothesis.expected_direction}
+
+Requirements:
+1. Function name must be: {func_name}
+2. Input: pandas DataFrame with columns: open, high, low, close, volume
+3. Output: pandas Series of factor values (z-scored for normalization)
+4. Handle edge cases: NaN values, insufficient data
+5. Use only pandas, numpy - no external dependencies
+
+Return ONLY the Python code in a code block:
+```python
+def {func_name}(df):
+    # Your implementation
+    return factor_values
+```"""
+
+        try:
+            # Use custom system prompt if configured, otherwise use default
+            system_prompt = custom_system_prompt or CODE_GENERATION_SYSTEM_PROMPT
+
+            response = await self.llm_provider.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=2048,
+            )
+
+            # Parse code from response
+            code = self._extract_code(response.content, func_name)
+
+            self._conversion_count += 1
+            hypothesis.factor_code = code
+            hypothesis.factor_name = func_name
+
+            logger.info(f"LLM generated code for '{hypothesis.name}' using model {model_id}")
+            return code
+
+        except Exception as e:
+            logger.error(f"LLM code generation failed: {e}. Falling back to template.")
+            return self.convert(hypothesis, params)
+
+    def _extract_code(self, response_text: str, func_name: str) -> str:
+        """Extract Python code from LLM response."""
+        # Try to find code block
+        code_match = re.search(r'```python\s*(.*?)```', response_text, re.DOTALL)
+        if code_match:
+            return code_match.group(1).strip()
+
+        # Try to find function definition directly
+        func_match = re.search(rf'(def {func_name}\(.*?\):.*)', response_text, re.DOTALL)
+        if func_match:
+            return func_match.group(1).strip()
+
+        # Return the whole response as a fallback
+        return response_text.strip()
 
     def convert(
         self,
@@ -475,21 +808,151 @@ def {func_name}(df):
 
 
 class FeedbackAnalyzer:
-    """Analyze experiment results and provide feedback for hypothesis refinement."""
+    """Analyze experiment results and provide feedback for hypothesis refinement using LLM.
+
+    Uses frontend-configured model from ConfigService via model_config.py.
+    Falls back to template-based analysis if LLM is unavailable.
+    """
 
     def __init__(
         self,
+        llm_provider: Optional[LLMProviderProtocol] = None,
         ic_threshold: float = 0.03,
         ir_threshold: float = 1.0,
     ) -> None:
         """Initialize analyzer.
 
         Args:
+            llm_provider: LLM provider for AI-powered analysis
             ic_threshold: Minimum IC for passing
             ir_threshold: Minimum IR for passing
         """
+        self.llm_provider = llm_provider
         self.ic_threshold = ic_threshold
         self.ir_threshold = ir_threshold
+
+    async def analyze_with_llm(
+        self,
+        hypothesis: Hypothesis,
+        experiment_result: dict[str, Any],
+    ) -> Hypothesis:
+        """Analyze experiment results using LLM and update hypothesis with feedback.
+
+        Args:
+            hypothesis: Tested hypothesis
+            experiment_result: Results from evaluation
+
+        Returns:
+            Updated hypothesis with LLM-generated feedback
+        """
+        # First, do the basic analysis
+        metrics = experiment_result.get("metrics", {})
+        hypothesis.experiment_result = experiment_result
+        hypothesis.actual_ic = metrics.get("ic_mean", metrics.get("ic", 0))
+
+        # Check if passed threshold
+        ic = abs(hypothesis.actual_ic or 0)
+        ir = metrics.get("ir", 0)
+        hypothesis.passed_threshold = ic >= self.ic_threshold and ir >= self.ir_threshold
+
+        if hypothesis.passed_threshold:
+            hypothesis.status = HypothesisStatus.VALIDATED
+            hypothesis.feedback = f"Hypothesis validated! IC={ic:.4f}, IR={ir:.2f}"
+            return hypothesis
+
+        # For rejected hypotheses, use LLM for detailed analysis
+        if self.llm_provider is None:
+            hypothesis.status = HypothesisStatus.REJECTED
+            hypothesis.feedback = self._generate_rejection_feedback(hypothesis, metrics)
+            hypothesis.refinement_suggestions = self._generate_suggestions(hypothesis, metrics)
+            return hypothesis
+
+        # Get model configuration from ConfigService
+        from iqfmp.agents.model_config import get_agent_full_config
+        model_id, temperature, custom_system_prompt = get_agent_full_config("factor_evaluation")
+
+        # Build analysis prompt
+        prompt = f"""Analyze the following factor performance results and provide detailed feedback.
+
+Hypothesis:
+- Name: {hypothesis.name}
+- Description: {hypothesis.description}
+- Family: {hypothesis.family.value}
+- Rationale: {hypothesis.rationale}
+- Expected IC: {hypothesis.expected_ic}
+- Expected Direction: {hypothesis.expected_direction}
+
+Experiment Results:
+- Actual IC: {ic:.4f} (threshold: {self.ic_threshold})
+- Information Ratio (IR): {ir:.2f} (threshold: {self.ir_threshold})
+- Sharpe Ratio: {metrics.get('sharpe', 'N/A')}
+- Max Drawdown: {metrics.get('max_drawdown', 'N/A')}
+- Turnover: {metrics.get('turnover', 'N/A')}
+
+Stability Metrics:
+{json.dumps(metrics.get('stability', {}), indent=2)}
+
+Factor Code:
+```python
+{hypothesis.factor_code or 'Not available'}
+```
+
+Provide:
+1. A detailed explanation of why this factor failed (2-3 sentences)
+2. 3-5 specific, actionable improvement suggestions
+
+Format your response as JSON:
+```json
+{{
+    "feedback": "Your detailed analysis...",
+    "suggestions": ["Suggestion 1", "Suggestion 2", "Suggestion 3"]
+}}
+```"""
+
+        try:
+            # Use custom system prompt if configured, otherwise use default
+            system_prompt = custom_system_prompt or FEEDBACK_SYSTEM_PROMPT
+
+            response = await self.llm_provider.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=1024,
+            )
+
+            # Parse LLM response
+            feedback_data = self._parse_feedback_response(response.content)
+
+            hypothesis.status = HypothesisStatus.REJECTED
+            hypothesis.feedback = feedback_data.get("feedback", self._generate_rejection_feedback(hypothesis, metrics))
+            hypothesis.refinement_suggestions = feedback_data.get("suggestions", self._generate_suggestions(hypothesis, metrics))
+
+            logger.info(f"LLM analyzed '{hypothesis.name}' using model {model_id}")
+            return hypothesis
+
+        except Exception as e:
+            logger.error(f"LLM analysis failed: {e}. Falling back to template.")
+            hypothesis.status = HypothesisStatus.REJECTED
+            hypothesis.feedback = self._generate_rejection_feedback(hypothesis, metrics)
+            hypothesis.refinement_suggestions = self._generate_suggestions(hypothesis, metrics)
+            return hypothesis
+
+    def _parse_feedback_response(self, response_text: str) -> dict[str, Any]:
+        """Parse LLM feedback response."""
+        # Try to extract JSON
+        json_match = re.search(r'\{[\s\S]*\}', response_text)
+        if json_match:
+            try:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
+                pass
+
+        # Fallback: extract text manually
+        return {
+            "feedback": response_text[:500],
+            "suggestions": [],
+        }
 
     def analyze(
         self,
@@ -606,35 +1069,112 @@ class FeedbackAnalyzer:
 
 
 class HypothesisAgent:
-    """Main agent for hypothesis-driven factor research.
+    """Main agent for hypothesis-driven factor research using LLM.
 
-    Implements the RD-Agent research loop:
-    1. Generate hypotheses
-    2. Convert to factor code
+    Implements the RD-Agent research loop with LLM-powered components:
+    1. Generate hypotheses (LLM or template-based)
+    2. Convert to factor code (LLM or template-based)
     3. Evaluate factors
-    4. Analyze feedback
+    4. Analyze feedback (LLM or template-based)
     5. Refine or generate new hypotheses
+
+    All LLM-powered components use frontend-configured models via ConfigService.
     """
 
     def __init__(
         self,
+        llm_provider: Optional[LLMProviderProtocol] = None,
         generator: Optional[HypothesisGenerator] = None,
         converter: Optional[HypothesisToCode] = None,
         analyzer: Optional[FeedbackAnalyzer] = None,
     ) -> None:
-        """Initialize agent.
+        """Initialize agent with LLM support.
 
         Args:
-            generator: Hypothesis generator
-            converter: Hypothesis to code converter
-            analyzer: Feedback analyzer
+            llm_provider: LLM provider for AI-powered operations
+            generator: Hypothesis generator (uses llm_provider if not provided)
+            converter: Hypothesis to code converter (uses llm_provider if not provided)
+            analyzer: Feedback analyzer (uses llm_provider if not provided)
         """
-        self.generator = generator or HypothesisGenerator()
-        self.converter = converter or HypothesisToCode()
-        self.analyzer = analyzer or FeedbackAnalyzer()
+        self.llm_provider = llm_provider
+        self.generator = generator or HypothesisGenerator(llm_provider=llm_provider)
+        self.converter = converter or HypothesisToCode(llm_provider=llm_provider)
+        self.analyzer = analyzer or FeedbackAnalyzer(llm_provider=llm_provider)
 
         self._hypothesis_history: list[Hypothesis] = []
         self._iteration_count = 0
+
+    async def generate_hypotheses_with_llm(
+        self,
+        market_data: pd.DataFrame,
+        n_hypotheses: int = 5,
+        focus_family: Optional[HypothesisFamily] = None,
+    ) -> list[Hypothesis]:
+        """Generate hypotheses using LLM.
+
+        Args:
+            market_data: OHLCV DataFrame
+            n_hypotheses: Number of hypotheses to generate
+            focus_family: Optional family to focus on
+
+        Returns:
+            List of LLM-generated hypotheses
+        """
+        hypotheses = await self.generator.generate_with_llm(
+            market_data, n_hypotheses, focus_family
+        )
+
+        # Add more from templates if needed
+        while len(hypotheses) < n_hypotheses:
+            for family in HypothesisFamily:
+                if len(hypotheses) >= n_hypotheses:
+                    break
+                try:
+                    h = self.generator.generate_from_template(
+                        family, variation=len(hypotheses)
+                    )
+                    hypotheses.append(h)
+                except ValueError:
+                    continue
+
+        self._iteration_count += 1
+        return hypotheses[:n_hypotheses]
+
+    async def convert_to_factors_with_llm(
+        self,
+        hypotheses: list[Hypothesis],
+    ) -> list[tuple[Hypothesis, str]]:
+        """Convert hypotheses to factor code using LLM.
+
+        Args:
+            hypotheses: List of hypotheses
+
+        Returns:
+            List of (hypothesis, code) tuples
+        """
+        results = []
+        for h in hypotheses:
+            code = await self.converter.convert_with_llm(h)
+            results.append((h, code))
+        return results
+
+    async def process_results_with_llm(
+        self,
+        hypothesis: Hypothesis,
+        experiment_result: dict[str, Any],
+    ) -> Hypothesis:
+        """Process experiment results using LLM and provide feedback.
+
+        Args:
+            hypothesis: Tested hypothesis
+            experiment_result: Evaluation results
+
+        Returns:
+            Updated hypothesis with LLM-generated feedback
+        """
+        updated = await self.analyzer.analyze_with_llm(hypothesis, experiment_result)
+        self._hypothesis_history.append(updated)
+        return updated
 
     def generate_hypotheses(
         self,

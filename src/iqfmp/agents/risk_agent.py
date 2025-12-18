@@ -1,7 +1,12 @@
 """Risk Check Agent for IQFMP.
 
-Centralized risk management for strategy validation and deployment.
-Performs multi-dimensional risk assessment before strategy approval.
+Centralized risk management for strategy validation and deployment,
+enhanced with LLM-powered risk analysis and recommendations.
+
+LLM Integration:
+- Uses frontend-configured model from ConfigService via model_config.py
+- LLM provides intelligent risk insights and warnings
+- Generates actionable recommendations for risk mitigation
 
 Six-dimensional coverage:
 1. Functional: Risk metrics calculation, limit checking, approval logic
@@ -14,13 +19,53 @@ Six-dimensional coverage:
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Protocol
+import json
 import logging
+import re
 
 import numpy as np
 import pandas as pd
 
 from iqfmp.agents.orchestrator import AgentState
+
+
+# =============================================================================
+# LLM Integration Protocol and System Prompts
+# =============================================================================
+
+class LLMProviderProtocol(Protocol):
+    """Protocol for LLM provider interface."""
+
+    async def complete(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+    ) -> Any:
+        """Generate completion from the LLM."""
+        ...
+
+
+RISK_SYSTEM_PROMPT = """You are an expert risk manager specializing in quantitative trading strategies.
+
+Your task is to analyze risk metrics and provide risk management recommendations:
+1. Identify key risk exposures based on the metrics
+2. Explain why certain limits were breached
+3. Suggest specific risk mitigation actions
+4. Recommend position sizing and hedging strategies
+
+Consider:
+- Maximum drawdown and drawdown duration
+- Value at Risk (VaR) and Expected Shortfall
+- Position concentration and diversification
+- Correlation risks in factor exposures
+- Tail risk and extreme event scenarios
+- Liquidity and turnover constraints
+
+Provide specific, actionable recommendations with clear rationale."""
 
 
 logger = logging.getLogger(__name__)
@@ -352,14 +397,20 @@ class RiskCheckAgent:
         new_state = await agent.check(state)
     """
 
-    def __init__(self, config: Optional[RiskConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[RiskConfig] = None,
+        llm_provider: Optional[LLMProviderProtocol] = None,
+    ) -> None:
         """Initialize the risk check agent.
 
         Args:
             config: Risk configuration
+            llm_provider: LLM provider for intelligent risk analysis
         """
         self.config = config or RiskConfig()
         self.calculator = RiskCalculator()
+        self.llm_provider = llm_provider
 
     async def check(self, state: AgentState) -> AgentState:
         """Perform risk check on strategy.
@@ -791,6 +842,303 @@ class RiskCheckAgent:
             recommendations=self._generate_recommendations(risk_metrics, breached),
         )
 
+    # =========================================================================
+    # LLM-Powered Risk Analysis Methods
+    # =========================================================================
+
+    async def generate_llm_risk_analysis(
+        self,
+        metrics: RiskMetrics,
+        breached_limits: list[str],
+        approval_status: ApprovalStatus,
+    ) -> dict[str, Any]:
+        """Generate intelligent risk analysis using LLM.
+
+        Uses frontend-configured model from ConfigService via model_config.py.
+
+        Args:
+            metrics: Calculated risk metrics
+            breached_limits: List of breached limit names
+            approval_status: Current approval status
+
+        Returns:
+            Dict with keys:
+                - summary: Brief risk summary
+                - key_risks: List of identified key risks
+                - mitigation_actions: Specific actions to mitigate risks
+                - position_recommendations: Position sizing suggestions
+                - hedging_strategies: Suggested hedges
+                - confidence: Confidence level (0-1)
+        """
+        if self.llm_provider is None:
+            return self._generate_template_risk_analysis(metrics, breached_limits)
+
+        from iqfmp.agents.model_config import get_agent_full_config
+
+        model_id, temperature, custom_system_prompt = get_agent_full_config("risk_check")
+
+        # Build analysis prompt
+        prompt = f"""Analyze the following risk metrics and provide risk management recommendations:
+
+## Risk Metrics
+- Maximum Drawdown: {metrics.max_drawdown:.2%}
+- Current Drawdown: {metrics.current_drawdown:.2%}
+- Drawdown Duration: {metrics.drawdown_duration} days
+- Portfolio Volatility: {metrics.portfolio_volatility:.2%}
+- VaR (95%): {metrics.var_95:.2%}
+- VaR (99%): {metrics.var_99:.2%}
+- Expected Shortfall: {metrics.expected_shortfall:.2%}
+- Max Position Size: {metrics.max_position:.2%}
+- Concentration Ratio: {metrics.concentration_ratio:.2%}
+- Average Turnover: {metrics.avg_turnover:.2%}
+
+## Breached Limits
+{chr(10).join(f'- {limit}' for limit in breached_limits) if breached_limits else '- None'}
+
+## Current Approval Status
+{approval_status.value}
+
+Please provide your analysis in the following JSON format:
+{{
+    "summary": "Brief risk summary (2-3 sentences)",
+    "key_risks": ["List of 3-5 key identified risks"],
+    "mitigation_actions": ["List of 3-5 specific mitigation actions"],
+    "position_recommendations": "Specific position sizing recommendations",
+    "hedging_strategies": ["List of 2-3 suggested hedging strategies"],
+    "confidence": 0.8
+}}
+"""
+
+        try:
+            # Use custom system prompt if configured, otherwise use default
+            system_prompt = custom_system_prompt or RISK_SYSTEM_PROMPT
+
+            response = await self.llm_provider.complete(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=model_id,
+                temperature=temperature,
+                max_tokens=2048,
+            )
+
+            # Parse LLM response
+            return self._parse_llm_risk_response(response)
+
+        except Exception as e:
+            logger.warning(f"LLM risk analysis failed: {e}, using template")
+            return self._generate_template_risk_analysis(metrics, breached_limits)
+
+    def _parse_llm_risk_response(self, response: Any) -> dict[str, Any]:
+        """Parse LLM response to extract structured risk analysis.
+
+        Args:
+            response: Raw LLM response
+
+        Returns:
+            Parsed risk analysis dict
+        """
+        # Handle different response formats
+        if hasattr(response, "content"):
+            text = response.content
+        elif isinstance(response, dict) and "content" in response:
+            text = response["content"]
+        else:
+            text = str(response)
+
+        # Try to extract JSON from response
+        try:
+            # Look for JSON block in response
+            json_match = re.search(r"\{[\s\S]*\}", text)
+            if json_match:
+                result = json.loads(json_match.group())
+
+                # Validate required fields
+                required_fields = [
+                    "summary",
+                    "key_risks",
+                    "mitigation_actions",
+                    "position_recommendations",
+                    "hedging_strategies",
+                ]
+
+                for field in required_fields:
+                    if field not in result:
+                        result[field] = (
+                            [] if field.endswith("s") and field != "summary" else ""
+                        )
+
+                if "confidence" not in result:
+                    result["confidence"] = 0.7
+
+                return result
+
+        except json.JSONDecodeError:
+            pass
+
+        # Fallback: Extract what we can from text
+        return {
+            "summary": text[:500] if len(text) > 500 else text,
+            "key_risks": [],
+            "mitigation_actions": [],
+            "position_recommendations": "",
+            "hedging_strategies": [],
+            "confidence": 0.5,
+        }
+
+    def _generate_template_risk_analysis(
+        self,
+        metrics: RiskMetrics,
+        breached_limits: list[str],
+    ) -> dict[str, Any]:
+        """Generate template-based risk analysis when LLM is unavailable.
+
+        Args:
+            metrics: Risk metrics
+            breached_limits: Breached limits
+
+        Returns:
+            Template risk analysis dict
+        """
+        key_risks = []
+        mitigation_actions = []
+        hedging_strategies = []
+
+        # Analyze drawdown
+        if metrics.max_drawdown > 0.1:
+            key_risks.append(
+                f"High drawdown risk: {metrics.max_drawdown:.1%} exceeds 10% threshold"
+            )
+            mitigation_actions.append(
+                "Implement trailing stop-loss at 8% to limit further drawdown"
+            )
+            hedging_strategies.append(
+                "Consider put options for downside protection"
+            )
+
+        # Analyze volatility
+        if metrics.portfolio_volatility > 0.2:
+            key_risks.append(
+                f"Elevated volatility: {metrics.portfolio_volatility:.1%} annualized"
+            )
+            mitigation_actions.append(
+                "Reduce position sizes proportionally to volatility"
+            )
+            hedging_strategies.append(
+                "Add low-correlation assets to reduce portfolio volatility"
+            )
+
+        # Analyze VaR
+        if metrics.var_95 > 0.03:
+            key_risks.append(
+                f"Tail risk exposure: {metrics.var_95:.1%} daily VaR at 95%"
+            )
+            mitigation_actions.append(
+                "Scale position sizes based on VaR budget"
+            )
+
+        # Analyze concentration
+        if metrics.concentration_ratio > 0.3:
+            key_risks.append(
+                f"Concentration risk: {metrics.concentration_ratio:.1%} HHI"
+            )
+            mitigation_actions.append(
+                "Diversify positions to reduce single-asset exposure"
+            )
+
+        # Default if no specific risks
+        if not key_risks:
+            key_risks.append("Risk metrics within acceptable bounds")
+            mitigation_actions.append("Continue monitoring risk levels")
+
+        if not hedging_strategies:
+            hedging_strategies.append("Portfolio hedging not currently required")
+
+        # Build position recommendation
+        if len(breached_limits) > 2:
+            position_rec = "Reduce overall position size by 30-50% until risk metrics normalize"
+        elif len(breached_limits) > 0:
+            position_rec = "Consider reducing position size by 10-20% in affected areas"
+        else:
+            position_rec = "Current position sizing is appropriate for the risk profile"
+
+        # Build summary
+        if len(breached_limits) == 0:
+            summary = (
+                f"Strategy risk profile is within acceptable bounds. "
+                f"Max drawdown at {metrics.max_drawdown:.1%}, "
+                f"volatility at {metrics.portfolio_volatility:.1%}."
+            )
+        else:
+            summary = (
+                f"Risk limits breached: {', '.join(breached_limits)}. "
+                f"Immediate attention required to address risk exposures."
+            )
+
+        return {
+            "summary": summary,
+            "key_risks": key_risks,
+            "mitigation_actions": mitigation_actions,
+            "position_recommendations": position_rec,
+            "hedging_strategies": hedging_strategies,
+            "confidence": 0.7,
+        }
+
+    async def check_with_llm(self, state: AgentState) -> AgentState:
+        """Perform risk check with LLM-enhanced analysis.
+
+        Enhanced version of check() that includes LLM insights.
+
+        Args:
+            state: Current agent state
+
+        Returns:
+            Updated state with risk assessment and LLM insights
+        """
+        # First, perform standard risk check
+        new_state = await self.check(state)
+
+        # If LLM is available, enhance with LLM analysis
+        if self.llm_provider is not None:
+            context = new_state.context
+            assessment_dict = context.get("risk_assessment", {})
+
+            # Reconstruct metrics for LLM analysis
+            metrics = RiskMetrics(
+                max_drawdown=assessment_dict.get("metrics", {}).get("max_drawdown", 0),
+                current_drawdown=assessment_dict.get("metrics", {}).get("current_drawdown", 0),
+                drawdown_duration=assessment_dict.get("metrics", {}).get("drawdown_duration", 0),
+                portfolio_volatility=assessment_dict.get("metrics", {}).get("portfolio_volatility", 0),
+                var_95=assessment_dict.get("metrics", {}).get("var_95", 0),
+                var_99=assessment_dict.get("metrics", {}).get("var_99", 0),
+                expected_shortfall=assessment_dict.get("metrics", {}).get("expected_shortfall", 0),
+                max_position=assessment_dict.get("metrics", {}).get("max_position", 0),
+                concentration_ratio=assessment_dict.get("metrics", {}).get("concentration_ratio", 0),
+                avg_turnover=assessment_dict.get("metrics", {}).get("avg_turnover", 0),
+            )
+
+            breached_limits = assessment_dict.get("breached_limits", [])
+            approval_status = ApprovalStatus(assessment_dict.get("approval_status", "conditional"))
+
+            # Generate LLM analysis
+            llm_analysis = await self.generate_llm_risk_analysis(
+                metrics=metrics,
+                breached_limits=breached_limits,
+                approval_status=approval_status,
+            )
+
+            # Update context with LLM insights
+            new_context = {
+                **context,
+                "llm_risk_analysis": llm_analysis,
+                "risk_summary": llm_analysis.get("summary", ""),
+                "key_risks": llm_analysis.get("key_risks", []),
+                "mitigation_actions": llm_analysis.get("mitigation_actions", []),
+            }
+
+            return new_state.update(context=new_context)
+
+        return new_state
+
 
 # Node function for StateGraph
 async def check_risk_node(state: AgentState) -> AgentState:
@@ -806,16 +1154,35 @@ async def check_risk_node(state: AgentState) -> AgentState:
     return await agent.check(state)
 
 
+async def check_risk_node_with_llm(
+    state: AgentState,
+    llm_provider: Optional[LLMProviderProtocol] = None,
+) -> AgentState:
+    """StateGraph node function for risk checking with LLM enhancement.
+
+    Args:
+        state: Current agent state
+        llm_provider: LLM provider for intelligent analysis
+
+    Returns:
+        Updated state with risk assessment and LLM insights
+    """
+    agent = RiskCheckAgent(llm_provider=llm_provider)
+    return await agent.check_with_llm(state)
+
+
 # Factory function
 def create_risk_agent(
     config: Optional[RiskConfig] = None,
+    llm_provider: Optional[LLMProviderProtocol] = None,
 ) -> RiskCheckAgent:
     """Factory function to create a RiskCheckAgent.
 
     Args:
         config: Risk configuration
+        llm_provider: LLM provider for intelligent risk analysis
 
     Returns:
         Configured RiskCheckAgent instance
     """
-    return RiskCheckAgent(config=config)
+    return RiskCheckAgent(config=config, llm_provider=llm_provider)

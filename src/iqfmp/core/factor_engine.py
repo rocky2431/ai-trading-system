@@ -55,6 +55,21 @@ from iqfmp.core.qlib_init import init_qlib, ensure_qlib_initialized, is_qlib_ini
 # Import data provider for DB integration
 from iqfmp.core.data_provider import load_ohlcv_sync, DataProvider
 
+# Import Alpha158/360 factor libraries
+try:
+    from iqfmp.evaluation.alpha158 import ALPHA158_FACTORS
+    ALPHA158_AVAILABLE = True
+except ImportError:
+    ALPHA158_FACTORS = {}
+    ALPHA158_AVAILABLE = False
+
+try:
+    from iqfmp.evaluation.alpha360 import ALPHA360_FACTORS
+    ALPHA360_AVAILABLE = True
+except ImportError:
+    ALPHA360_FACTORS = {}
+    ALPHA360_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -1032,6 +1047,196 @@ class FactorEvaluator:
             )
             return float(ic) if not np.isnan(ic) else 0.0
         return 0.0
+
+    # =========================================================================
+    # Alpha158/360 Factor Library Integration
+    # =========================================================================
+
+    def get_alpha158_factor(self, factor_name: str) -> pd.Series:
+        """Compute a single Alpha158 factor.
+
+        Args:
+            factor_name: Name of the Alpha158 factor (e.g., "KMID", "ROC5", "RSI14")
+
+        Returns:
+            Series of factor values
+
+        Raises:
+            ValueError: If factor not found or data not loaded
+        """
+        if self._df is None:
+            raise ValueError("No data loaded. Call load_data() first.")
+
+        if not ALPHA158_AVAILABLE:
+            raise ValueError("Alpha158 factors not available. Install dependencies.")
+
+        if factor_name not in ALPHA158_FACTORS:
+            available = ", ".join(sorted(ALPHA158_FACTORS.keys())[:10])
+            raise ValueError(
+                f"Factor '{factor_name}' not found. Available: {available}... "
+                f"(Total: {len(ALPHA158_FACTORS)} factors)"
+            )
+
+        factor_func = ALPHA158_FACTORS[factor_name]
+        return factor_func(self._df)
+
+    def compute_alpha158_factors(
+        self,
+        factor_names: Optional[list[str]] = None,
+        parallel: bool = False,
+    ) -> pd.DataFrame:
+        """Compute multiple Alpha158 factors in batch.
+
+        Args:
+            factor_names: List of factor names, or None for all 158 factors
+            parallel: Use parallel computation (for large datasets)
+
+        Returns:
+            DataFrame with all computed factors
+
+        Raises:
+            ValueError: If data not loaded
+        """
+        if self._df is None:
+            raise ValueError("No data loaded. Call load_data() first.")
+
+        if not ALPHA158_AVAILABLE:
+            raise ValueError("Alpha158 factors not available. Install dependencies.")
+
+        # Use all factors if none specified
+        names = factor_names or list(ALPHA158_FACTORS.keys())
+
+        results = {}
+        failed = []
+
+        for name in names:
+            if name not in ALPHA158_FACTORS:
+                logger.warning(f"Factor '{name}' not found, skipping")
+                continue
+
+            try:
+                factor_func = ALPHA158_FACTORS[name]
+                results[name] = factor_func(self._df)
+            except Exception as e:
+                logger.warning(f"Failed to compute {name}: {e}")
+                failed.append(name)
+
+        if failed:
+            logger.warning(f"Failed factors: {', '.join(failed)}")
+
+        logger.info(f"Computed {len(results)}/{len(names)} Alpha158 factors")
+        return pd.DataFrame(results, index=self._df.index)
+
+    def get_alpha360_factor(self, factor_name: str) -> pd.Series:
+        """Compute a single Alpha360 factor.
+
+        Args:
+            factor_name: Name of the Alpha360 factor
+
+        Returns:
+            Series of factor values
+        """
+        if self._df is None:
+            raise ValueError("No data loaded. Call load_data() first.")
+
+        if not ALPHA360_AVAILABLE:
+            raise ValueError("Alpha360 factors not available. Install dependencies.")
+
+        if factor_name not in ALPHA360_FACTORS:
+            raise ValueError(f"Factor '{factor_name}' not found in Alpha360")
+
+        factor_func = ALPHA360_FACTORS[factor_name]
+        return factor_func(self._df)
+
+    def compute_alpha360_factors(
+        self,
+        factor_names: Optional[list[str]] = None,
+    ) -> pd.DataFrame:
+        """Compute multiple Alpha360 factors in batch.
+
+        Args:
+            factor_names: List of factor names, or None for all factors
+
+        Returns:
+            DataFrame with all computed factors
+        """
+        if self._df is None:
+            raise ValueError("No data loaded. Call load_data() first.")
+
+        if not ALPHA360_AVAILABLE:
+            raise ValueError("Alpha360 factors not available. Install dependencies.")
+
+        names = factor_names or list(ALPHA360_FACTORS.keys())
+
+        results = {}
+        for name in names:
+            if name in ALPHA360_FACTORS:
+                try:
+                    results[name] = ALPHA360_FACTORS[name](self._df)
+                except Exception as e:
+                    logger.warning(f"Failed to compute {name}: {e}")
+
+        logger.info(f"Computed {len(results)}/{len(names)} Alpha360 factors")
+        return pd.DataFrame(results, index=self._df.index)
+
+    def list_alpha_factors(self) -> dict[str, list[str]]:
+        """List all available Alpha factors.
+
+        Returns:
+            Dictionary with 'alpha158' and 'alpha360' factor lists
+        """
+        return {
+            "alpha158": sorted(ALPHA158_FACTORS.keys()) if ALPHA158_AVAILABLE else [],
+            "alpha360": sorted(ALPHA360_FACTORS.keys()) if ALPHA360_AVAILABLE else [],
+            "alpha158_count": len(ALPHA158_FACTORS) if ALPHA158_AVAILABLE else 0,
+            "alpha360_count": len(ALPHA360_FACTORS) if ALPHA360_AVAILABLE else 0,
+        }
+
+    def evaluate_alpha158_factors(
+        self,
+        factor_names: Optional[list[str]] = None,
+        top_n: int = 20,
+    ) -> list[dict]:
+        """Evaluate Alpha158 factors and return top performers.
+
+        Args:
+            factor_names: Factors to evaluate, or None for all
+            top_n: Number of top factors to return
+
+        Returns:
+            List of evaluation results sorted by IC
+        """
+        if self._df is None:
+            raise ValueError("No data loaded. Call load_data() first.")
+
+        # Compute all factors
+        factors_df = self.compute_alpha158_factors(factor_names)
+
+        results = []
+        for col in factors_df.columns:
+            factor = factors_df[col]
+            valid = ~(factor.isna() | self._df["fwd_returns_1d"].isna())
+
+            if valid.sum() > 30:
+                ic, p_value = stats.spearmanr(
+                    factor[valid].values,
+                    self._df.loc[valid, "fwd_returns_1d"].values,
+                )
+                if not np.isnan(ic):
+                    results.append({
+                        "factor_name": col,
+                        "ic": float(ic),
+                        "ic_abs": abs(float(ic)),
+                        "p_value": float(p_value),
+                        "valid_count": int(valid.sum()),
+                    })
+
+        # Sort by absolute IC
+        results.sort(key=lambda x: x["ic_abs"], reverse=True)
+
+        logger.info(f"Evaluated {len(results)} Alpha158 factors, top IC: {results[0]['ic']:.4f}" if results else "No valid factors")
+
+        return results[:top_n]
 
 
 # =============================================================================

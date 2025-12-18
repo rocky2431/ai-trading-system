@@ -156,11 +156,16 @@ class QdrantClient:
         """获取集合信息"""
         try:
             info = self.client.get_collection(collection_name=collection_name)
+            # 安全获取 status 值 (不同版本 qdrant-client 可能返回字符串或枚举)
+            if info.status:
+                status_str = info.status.value if hasattr(info.status, 'value') else str(info.status)
+            else:
+                status_str = "unknown"
             return {
                 "name": collection_name,
                 "vectors_count": info.vectors_count,
                 "points_count": info.points_count,
-                "status": info.status.value if info.status else "unknown",
+                "status": status_str,
             }
         except Exception as e:
             logger.error(f"Failed to get collection info: {e}")

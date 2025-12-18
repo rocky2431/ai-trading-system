@@ -326,28 +326,171 @@ def risk_check_task(
     check_config: dict[str, Any],
 ) -> dict[str, Any]:
     """
-    风控检查任务（高优先级）
+    风控检查任务（高优先级）- 使用真实风控引擎
+
+    使用 RiskController 执行四层风险检查：
+    1. 回撤检查 - MAX_DRAWDOWN_THRESHOLD (15%)
+    2. 持仓集中度检查 - MAX_POSITION_RATIO (30%)
+    3. 杠杆检查 - MAX_LEVERAGE (3x)
+    4. 单日亏损检查 - EMERGENCY_LOSS_THRESHOLD (5%)
 
     Args:
         account_id: 账户 ID
         check_config: 检查配置
+            - equity: 当前权益
+            - peak_equity: 峰值权益
+            - total_position_value: 总仓位价值
+            - daily_pnl: 当日盈亏
+            - positions: 持仓列表 [{"symbol": str, "value": float}]
 
     Returns:
         风控检查结果
     """
+    from decimal import Decimal
+    from iqfmp.exchange.risk import (
+        Account,
+        Position,
+        RiskConfig,
+        RiskController,
+        RiskLevel,
+    )
+
     task_id = self.request.id
     logger.info(f"Running risk check task {task_id} for account {account_id}")
 
-    # 模拟风控检查
+    # 从 check_config 解析账户数据
+    equity = Decimal(str(check_config.get("equity", 100000)))
+    peak_equity = Decimal(str(check_config.get("peak_equity", equity)))
+    total_position_value = Decimal(str(check_config.get("total_position_value", 0)))
+    daily_pnl = Decimal(str(check_config.get("daily_pnl", 0)))
+    positions_data = check_config.get("positions", [])
+
+    # 构建 Account 对象
+    account = Account(
+        equity=equity,
+        total_position_value=total_position_value,
+        daily_pnl=daily_pnl,
+        peak_equity=peak_equity,
+    )
+
+    # 初始化风控控制器
+    risk_config = RiskConfig()
+    controller = RiskController(config=risk_config, initial_equity=peak_equity)
+    controller.update_equity(equity)
+
+    # 添加持仓到控制器
+    for pos in positions_data:
+        symbol = pos.get("symbol", "UNKNOWN")
+        value = Decimal(str(pos.get("value", 0)))
+        controller.add_position(symbol, value)
+
+    # 执行风控检查 - 逐个持仓检查
+    all_violations = []
+    checks_result = {}
+
+    # 检查每个持仓
+    for pos in positions_data:
+        symbol = pos.get("symbol", "UNKNOWN")
+        value = Decimal(str(pos.get("value", 0)))
+        position = Position(symbol=symbol, value=value)
+        result = controller.check_risk_sync(position, account)
+        all_violations.extend(result.violations)
+
+    # 汇总检查结果
+    # 1. 回撤检查
+    drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else Decimal("0")
+    drawdown_threshold = RiskController.MAX_DRAWDOWN_THRESHOLD
+    drawdown_ok = drawdown <= drawdown_threshold
+    checks_result["max_drawdown"] = {
+        "status": "ok" if drawdown_ok else "breach",
+        "value": float(drawdown * 100),
+        "threshold": float(drawdown_threshold * 100),
+        "message": f"回撤 {drawdown * 100:.2f}% {'正常' if drawdown_ok else '超限'}",
+    }
+
+    # 2. 杠杆检查
+    leverage = total_position_value / equity if equity > 0 else Decimal("0")
+    leverage_threshold = RiskController.MAX_LEVERAGE
+    leverage_ok = leverage <= leverage_threshold
+    checks_result["leverage"] = {
+        "status": "ok" if leverage_ok else "breach",
+        "value": float(leverage),
+        "threshold": float(leverage_threshold),
+        "message": f"杠杆 {leverage:.2f}x {'正常' if leverage_ok else '超限'}",
+    }
+
+    # 3. 单日亏损检查
+    if daily_pnl < 0 and equity > 0:
+        daily_loss_ratio = -daily_pnl / equity
+    else:
+        daily_loss_ratio = Decimal("0")
+    daily_loss_threshold = RiskController.EMERGENCY_LOSS_THRESHOLD
+    daily_loss_ok = daily_loss_ratio <= daily_loss_threshold
+    checks_result["daily_loss"] = {
+        "status": "ok" if daily_loss_ok else "breach",
+        "value": float(daily_loss_ratio * 100),
+        "threshold": float(daily_loss_threshold * 100),
+        "message": f"单日亏损 {daily_loss_ratio * 100:.2f}% {'正常' if daily_loss_ok else '超限'}",
+    }
+
+    # 4. 持仓集中度检查
+    max_concentration = Decimal("0")
+    concentration_threshold = RiskController.MAX_POSITION_RATIO
+    for pos in positions_data:
+        value = Decimal(str(pos.get("value", 0)))
+        if equity > 0:
+            conc = value / equity
+            if conc > max_concentration:
+                max_concentration = conc
+    concentration_ok = max_concentration <= concentration_threshold
+    checks_result["position_concentration"] = {
+        "status": "ok" if concentration_ok else "breach",
+        "value": float(max_concentration * 100),
+        "threshold": float(concentration_threshold * 100),
+        "message": f"最大持仓集中度 {max_concentration * 100:.2f}% {'正常' if concentration_ok else '超限'}",
+    }
+
+    # 确定整体风险等级
+    is_safe = all(c["status"] == "ok" for c in checks_result.values())
+    has_critical = any(v.severity == "critical" for v in all_violations)
+    has_high = any(v.severity == "high" for v in all_violations)
+
+    if has_critical:
+        risk_level = "critical"
+        recommended_action = "emergency_close_all"
+    elif has_high:
+        risk_level = "danger"
+        recommended_action = "reduce_position"
+    elif not is_safe:
+        risk_level = "warning"
+        recommended_action = "monitor"
+    else:
+        risk_level = "normal"
+        recommended_action = "none"
+
+    logger.info(f"Risk check completed: level={risk_level}, violations={len(all_violations)}")
+
     return {
         "task_id": task_id,
         "account_id": account_id,
         "status": "completed",
-        "risk_level": "normal",
-        "checks": {
-            "margin_usage": {"status": "ok", "value": 45.2},
-            "max_drawdown": {"status": "ok", "value": 3.5},
-            "position_concentration": {"status": "ok", "value": 42.5},
+        "risk_level": risk_level,
+        "is_safe": is_safe,
+        "recommended_action": recommended_action,
+        "checks": checks_result,
+        "violations": [
+            {
+                "type": v.type,
+                "severity": v.severity,
+                "action": v.action,
+                "message": v.message,
+                "current_value": float(v.current_value),
+                "threshold": float(v.threshold),
+            }
+            for v in all_violations
+        ],
+        "thresholds": {
+            k: float(v) for k, v in RiskController.get_hard_thresholds().items()
         },
     }
 
@@ -367,28 +510,247 @@ def emergency_close_task(
     reason: str,
 ) -> dict[str, Any]:
     """
-    紧急平仓任务（最高优先级）
+    紧急平仓任务（最高优先级）- 调用真实交易所 API
+
+    通过 ccxt 连接交易所执行紧急平仓操作。
+    如果交易所凭证未配置，将返回错误并发送告警通知。
 
     Args:
         account_id: 账户 ID
-        positions: 持仓 ID 列表
+        positions: 持仓数据列表，每个元素可以是:
+            - 字符串: "BTCUSDT" (仅符号)
+            - 字典: {"symbol": "BTCUSDT", "side": "long", "quantity": 0.1}
         reason: 平仓原因
 
     Returns:
         平仓结果
     """
+    import asyncio
+    import os
+    from decimal import Decimal
+
     task_id = self.request.id
     logger.warning(f"EMERGENCY: Running emergency close task {task_id} for account {account_id}")
     logger.warning(f"Reason: {reason}")
     logger.warning(f"Positions to close: {positions}")
 
-    # 模拟紧急平仓
+    close_results = []
+    telegram_sent = False
+
+    # 尝试发送 Telegram 告警
+    async def _send_telegram_alert() -> bool:
+        """发送 Telegram 紧急告警"""
+        try:
+            from iqfmp.exchange.emergency import TelegramNotifier
+
+            bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+            chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+            if not bot_token or not chat_id:
+                logger.warning("Telegram credentials not configured")
+                return False
+
+            notifier = TelegramNotifier(
+                bot_token=bot_token,
+                chat_id=chat_id,
+                enabled=True,
+            )
+
+            # 发送紧急告警
+            message = (
+                f"🚨 <b>紧急平仓执行中</b>\n\n"
+                f"<b>账户</b>: {account_id}\n"
+                f"<b>原因</b>: {reason}\n"
+                f"<b>持仓数量</b>: {len(positions)}\n"
+                f"<b>任务ID</b>: {task_id}"
+            )
+            return await notifier._send_message(message)
+        except Exception as e:
+            logger.error(f"Failed to send Telegram alert: {e}")
+            return False
+
+    try:
+        telegram_sent = asyncio.run(_send_telegram_alert())
+    except Exception as e:
+        logger.error(f"Telegram alert error: {e}")
+
+    # 检查交易所凭证
+    exchange_type = os.getenv("EXCHANGE_TYPE", "binance")
+    api_key = os.getenv("EXCHANGE_API_KEY", os.getenv("BINANCE_API_KEY"))
+    api_secret = os.getenv("EXCHANGE_API_SECRET", os.getenv("BINANCE_API_SECRET"))
+
+    if not api_key or not api_secret:
+        logger.error("Exchange credentials not configured - cannot execute real close orders")
+        return {
+            "task_id": task_id,
+            "account_id": account_id,
+            "status": "failed",
+            "error": "Exchange credentials not configured. Set EXCHANGE_API_KEY and EXCHANGE_API_SECRET.",
+            "positions_to_close": positions,
+            "reason": reason,
+            "telegram_sent": telegram_sent,
+            "completed_at": datetime.utcnow().isoformat(),
+        }
+
+    # 执行真实平仓
+    async def _execute_emergency_close() -> list[dict]:
+        """异步执行紧急平仓"""
+        results = []
+
+        try:
+            # 动态导入 ccxt
+            import ccxt.async_support as ccxt_async
+
+            # 创建交易所连接
+            exchange_class = getattr(ccxt_async, exchange_type, ccxt_async.binance)
+            exchange = exchange_class({
+                "apiKey": api_key,
+                "secret": api_secret,
+                "sandbox": os.getenv("EXCHANGE_SANDBOX", "false").lower() == "true",
+                "options": {"defaultType": "future"},
+            })
+
+            try:
+                # 加载市场信息
+                await exchange.load_markets()
+
+                for pos_data in positions:
+                    # 解析持仓数据
+                    if isinstance(pos_data, str):
+                        symbol = pos_data
+                        quantity = None
+                        side = None
+                    else:
+                        symbol = pos_data.get("symbol", "")
+                        quantity = pos_data.get("quantity")
+                        side = pos_data.get("side")
+
+                    if not symbol:
+                        results.append({
+                            "symbol": "UNKNOWN",
+                            "status": "failed",
+                            "error": "Invalid position data",
+                        })
+                        continue
+
+                    try:
+                        # 获取当前持仓
+                        positions_info = await exchange.fetch_positions([symbol])
+                        position = next((p for p in positions_info if p["symbol"] == symbol and float(p.get("contracts", 0)) != 0), None)
+
+                        if not position:
+                            results.append({
+                                "symbol": symbol,
+                                "status": "skipped",
+                                "message": "No open position found",
+                            })
+                            continue
+
+                        # 确定平仓方向和数量
+                        pos_side = position.get("side", "long")
+                        pos_contracts = abs(float(position.get("contracts", 0)))
+
+                        if quantity:
+                            close_quantity = min(float(quantity), pos_contracts)
+                        else:
+                            close_quantity = pos_contracts
+
+                        # 执行市价平仓
+                        order_side = "sell" if pos_side == "long" else "buy"
+                        order = await exchange.create_market_order(
+                            symbol=symbol,
+                            side=order_side,
+                            amount=close_quantity,
+                            params={"reduceOnly": True},
+                        )
+
+                        results.append({
+                            "symbol": symbol,
+                            "status": "success",
+                            "order_id": order.get("id"),
+                            "side": order_side,
+                            "quantity": close_quantity,
+                            "average_price": order.get("average"),
+                            "filled": order.get("filled"),
+                        })
+                        logger.info(f"Successfully closed {symbol}: {order}")
+
+                    except Exception as e:
+                        logger.error(f"Failed to close {symbol}: {e}")
+                        results.append({
+                            "symbol": symbol,
+                            "status": "failed",
+                            "error": str(e),
+                        })
+
+            finally:
+                await exchange.close()
+
+        except ImportError:
+            logger.error("ccxt not installed - cannot execute exchange orders")
+            return [{"status": "failed", "error": "ccxt not installed"}]
+        except Exception as e:
+            logger.error(f"Exchange connection failed: {e}")
+            return [{"status": "failed", "error": str(e)}]
+
+        return results
+
+    try:
+        close_results = asyncio.run(_execute_emergency_close())
+    except Exception as e:
+        logger.error(f"Emergency close execution failed: {e}")
+        close_results = [{"status": "failed", "error": str(e)}]
+
+    # 统计结果
+    success_count = sum(1 for r in close_results if r.get("status") == "success")
+    failed_count = sum(1 for r in close_results if r.get("status") == "failed")
+    skipped_count = sum(1 for r in close_results if r.get("status") == "skipped")
+
+    # 发送结果通知
+    async def _send_result_notification() -> bool:
+        try:
+            from iqfmp.exchange.emergency import TelegramNotifier
+
+            bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+            chat_id = os.getenv("TELEGRAM_CHAT_ID")
+
+            if not bot_token or not chat_id:
+                return False
+
+            notifier = TelegramNotifier(bot_token=bot_token, chat_id=chat_id, enabled=True)
+
+            status_icon = "✅" if failed_count == 0 else "⚠️"
+            message = (
+                f"{status_icon} <b>紧急平仓完成</b>\n\n"
+                f"<b>成功</b>: {success_count}\n"
+                f"<b>失败</b>: {failed_count}\n"
+                f"<b>跳过</b>: {skipped_count}\n"
+                f"<b>任务ID</b>: {task_id}"
+            )
+            return await notifier._send_message(message)
+        except Exception:
+            return False
+
+    try:
+        asyncio.run(_send_result_notification())
+    except Exception:
+        pass
+
+    logger.warning(f"Emergency close completed: success={success_count}, failed={failed_count}, skipped={skipped_count}")
+
     return {
         "task_id": task_id,
         "account_id": account_id,
-        "status": "completed",
-        "closed_positions": positions,
+        "status": "completed" if failed_count == 0 else "partial",
         "reason": reason,
+        "results": close_results,
+        "summary": {
+            "total": len(positions),
+            "success": success_count,
+            "failed": failed_count,
+            "skipped": skipped_count,
+        },
+        "telegram_sent": telegram_sent,
         "completed_at": datetime.utcnow().isoformat(),
     }
 
@@ -562,34 +924,101 @@ def _execute_factor_generation(
     factor_family: str,
     config: dict[str, Any],
 ) -> dict[str, Any]:
-    """执行因子生成的内部实现"""
-    import time
+    """执行因子生成的内部实现 - 调用真实 LLM
+
+    使用 FactorGenerationAgent 通过 OpenRouter API 生成真实的因子代码。
+    包含 AST 安全检查和字段约束验证。
+    """
+    import asyncio
     import uuid
 
-    task.update_state(
-        state="PROGRESS",
-        meta={"current": 30, "total": 100, "status": "Generating factor code..."},
+    from iqfmp.agents.factor_generation import (
+        FactorFamily,
+        FactorGenerationAgent,
+        FactorGenerationConfig,
+        FactorGenerationError,
     )
-    time.sleep(0.2)
+    from iqfmp.llm.provider import LLMConfig, LLMProvider
 
     task.update_state(
         state="PROGRESS",
-        meta={"current": 60, "total": 100, "status": "Running safety checks..."},
+        meta={"current": 10, "total": 100, "status": "Initializing LLM provider..."},
     )
-    time.sleep(0.1)
+
+    # 尝试从环境变量加载 LLM 配置
+    try:
+        llm_config = LLMConfig.from_env()
+    except ValueError as e:
+        # 如果没有配置 API key，记录警告并返回降级结果
+        logger.warning(f"LLM config error: {e}. Factor generation will use fallback.")
+        return {
+            "factor_id": str(uuid.uuid4()),
+            "hypothesis": hypothesis,
+            "family": factor_family,
+            "code": f"# LLM not configured - placeholder factor\n# Hypothesis: {hypothesis}\ndef calculate(data):\n    return data['close'].pct_change()",
+            "warning": "LLM not configured. Set OPENROUTER_API_KEY environment variable.",
+        }
 
     task.update_state(
         state="PROGRESS",
-        meta={"current": 90, "total": 100, "status": "Saving factor..."},
+        meta={"current": 20, "total": 100, "status": "Connecting to LLM..."},
     )
-    time.sleep(0.1)
 
-    return {
-        "factor_id": str(uuid.uuid4()),
-        "hypothesis": hypothesis,
-        "family": factor_family,
-        "code": f"# Generated factor for: {hypothesis}\ndef calculate(data):\n    return data['close'].pct_change()",
-    }
+    # 映射 factor_family 字符串到枚举
+    family_map = {f.value: f for f in FactorFamily}
+    factor_family_enum = family_map.get(factor_family.lower(), FactorFamily.MOMENTUM)
+
+    # 创建 agent 配置
+    agent_config = FactorGenerationConfig(
+        name="celery_factor_generator",
+        security_check_enabled=True,
+        field_constraint_enabled=True,
+        max_retries=config.get("max_retries", 3),
+        include_examples=True,
+    )
+
+    async def _generate_async() -> dict[str, Any]:
+        """异步生成因子"""
+        async with LLMProvider(llm_config) as llm:
+            agent = FactorGenerationAgent(config=agent_config, llm_provider=llm)
+
+            task.update_state(
+                state="PROGRESS",
+                meta={"current": 40, "total": 100, "status": "Calling LLM for factor generation..."},
+            )
+
+            generated = await agent.generate(
+                user_request=hypothesis,
+                factor_family=factor_family_enum,
+            )
+
+            task.update_state(
+                state="PROGRESS",
+                meta={"current": 80, "total": 100, "status": "Security checks passed, saving..."},
+            )
+
+            return {
+                "factor_id": str(uuid.uuid4()),
+                "hypothesis": hypothesis,
+                "family": generated.family.value,
+                "name": generated.name,
+                "description": generated.description,
+                "code": generated.code,
+                "metadata": generated.metadata,
+            }
+
+    try:
+        # 在 Celery 同步任务中运行异步代码
+        result = asyncio.run(_generate_async())
+        logger.info(f"Factor generated successfully: {result.get('name')}")
+        return result
+
+    except FactorGenerationError as e:
+        logger.error(f"Factor generation failed: {e}")
+        raise TaskError(f"Factor generation failed: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected error in factor generation: {e}")
+        raise TaskError(f"Factor generation error: {e}")
 
 
 # ==================== Mining Task (C2 Fix: Persistent) ====================

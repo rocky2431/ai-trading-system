@@ -343,7 +343,7 @@ function LLMConfigSection() {
           <ul className="list-disc list-inside space-y-1 text-muted-foreground">
             <li>Only need to configure API Key here for verifying OpenRouter connection</li>
             <li>Each Agent's Chat Model is configured separately in the <strong>Agents</strong> tab</li>
-            <li>Embedding Model is configured in the <strong>Factor</strong> tab</li>
+            <li>Factor Mining LLM Model and Embedding Model are configured in the <strong>Factor</strong> tab</li>
           </ul>
         </div>
 
@@ -685,18 +685,23 @@ function DataInfoSection() {
 function FactorMiningConfigSection() {
   const { config, loading, saving, saveConfig } = useFactorMiningConfig()
   const { models } = useAvailableModels()
-  const { keys, saveKeys } = useAPIKeys()
+  const { keys, saveKeys, refetch } = useAPIKeys()
 
+  const [selectedModel, setSelectedModel] = useState('')
   const [selectedEmbedding, setSelectedEmbedding] = useState('')
   const [maxConcurrent, setMaxConcurrent] = useState(10)
   const [codeTimeout, setCodeTimeout] = useState(30)
+  const [savingModel, setSavingModel] = useState(false)
 
-  // 初始化 embedding model 和系统配置
+  // 初始化 LLM model 和 embedding model
   useEffect(() => {
+    if (keys?.model && !selectedModel) {
+      setSelectedModel(keys.model)
+    }
     if (keys?.embedding_model && !selectedEmbedding) {
       setSelectedEmbedding(keys.embedding_model)
     }
-  }, [keys, selectedEmbedding])
+  }, [keys, selectedModel, selectedEmbedding])
 
   useEffect(() => {
     if (config) {
@@ -705,14 +710,29 @@ function FactorMiningConfigSection() {
     }
   }, [config])
 
+  // LLM 模型选项
+  const modelOptions = models?.models?.openrouter?.map(m => ({
+    value: m.id,
+    label: m.name
+  })) || []
+
   const embeddingOptions = models?.embedding_models?.openrouter?.map(m => ({
     value: m.id,
     label: `${m.name} (${m.dimensions}d)`
   })) || []
 
+  const handleSaveModel = async () => {
+    if (!selectedModel) return
+    setSavingModel(true)
+    await saveKeys({ model: selectedModel })
+    setSavingModel(false)
+    refetch()
+  }
+
   const handleSaveEmbedding = async () => {
     if (!selectedEmbedding) return
     await saveKeys({ embedding_model: selectedEmbedding })
+    refetch()
   }
 
   const handleSaveSystem = async () => {
@@ -742,9 +762,36 @@ function FactorMiningConfigSection() {
         <div className="p-4 bg-blue-500/10 rounded-lg text-sm">
           <p className="font-medium text-blue-600 mb-2">Configuration Guide</p>
           <ul className="list-disc list-inside space-y-1 text-muted-foreground">
-            <li><strong>System Configuration</strong> (this page): Embedding model, concurrency, timeout</li>
+            <li><strong>System Configuration</strong> (this page): LLM model, Embedding model, concurrency, timeout</li>
             <li><strong>Task Configuration</strong> (when creating tasks): Factor families, evaluation thresholds, time range, dataset split</li>
           </ul>
+        </div>
+
+        {/* LLM Model Selection - 主模型 */}
+        <div className="p-4 bg-muted rounded-lg">
+          <h4 className="font-medium mb-3">LLM Model (主模型 - 因子代码生成)</h4>
+          <p className="text-sm text-muted-foreground mb-3">
+            Select the LLM model for factor code generation. Recommended: deepseek/deepseek-v3.2-speciale
+          </p>
+          <div className="flex gap-4 items-end">
+            <div className="flex-1 space-y-2">
+              <Label>Select LLM Model</Label>
+              <Select
+                options={[{ value: '', label: 'Select model...' }, ...modelOptions]}
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+              />
+            </div>
+            <Button onClick={handleSaveModel} disabled={savingModel || !selectedModel || selectedModel === keys?.model}>
+              {savingModel && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Save
+            </Button>
+          </div>
+          {keys?.model && (
+            <p className="text-xs text-muted-foreground mt-2">
+              Current: <span className="font-medium text-green-600">{keys.model}</span>
+            </p>
+          )}
         </div>
 
         {/* Embedding Model Selection */}

@@ -520,9 +520,11 @@ class RDLoop:
         self.hypothesis_agent.process_results(hypothesis, result)
 
         # Record to ledger
+        # Safely get family value (handle both enum and string)
+        family_value = hypothesis.family.value if hasattr(hypothesis.family, 'value') else str(hypothesis.family)
         trial = TrialRecord(
             factor_name=hypothesis.factor_name or hypothesis.name,
-            factor_family=hypothesis.family.value,
+            factor_family=family_value,
             sharpe_ratio=result["metrics"]["sharpe"],
             ic_mean=result["metrics"]["ic_mean"],
             ir=result["metrics"]["ir"],
@@ -539,7 +541,7 @@ class RDLoop:
             self._validated_factors[factor_name] = factor_values
             self._factor_metadata[factor_name] = {
                 "name": factor_name,
-                "family": hypothesis.family.value,
+                "family": family_value,  # Use already computed safe value
                 "code": code,
                 "metrics": result["metrics"],
                 "hypothesis": hypothesis.to_dict(),

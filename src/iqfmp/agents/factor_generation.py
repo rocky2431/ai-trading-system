@@ -601,12 +601,15 @@ class FactorGenerationAgent:
                 system_prompt=system_prompt,
             )
             raw_content = response.content if hasattr(response, "content") else str(response)
+            # Debug: Log the actual LLM response
+            print(f"DEBUG LLM Response (first 500 chars): {raw_content[:500] if raw_content else 'EMPTY'}")
         except Exception as e:
             raise FactorGenerationError(f"LLM call failed: {e}") from e
 
         # Extract code from response
         code = self._extract_code(raw_content)
         if not code:
+            print(f"DEBUG: Failed to extract code. Full response:\n{raw_content[:1000] if raw_content else 'EMPTY'}")
             raise InvalidFactorError("No code found in LLM response")
 
         # Security check

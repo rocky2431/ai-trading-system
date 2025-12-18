@@ -234,6 +234,7 @@ class LLMProvider:
         model: Optional[ModelType] = None,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
+        system_prompt: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Generate a completion for the given prompt.
@@ -243,6 +244,7 @@ class LLMProvider:
             model: Optional model to use (defaults to config default).
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            system_prompt: Optional system prompt to guide the model.
 
         Returns:
             LLMResponse with generated content.
@@ -254,7 +256,11 @@ class LLMProvider:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
 
-        messages = [{"role": "user", "content": prompt}]
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
         return await self._execute_with_fallback(
             messages=messages,
             model=model,

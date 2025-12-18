@@ -107,6 +107,19 @@ class ConfigService:
         self._config_file = self._config_dir / "config.json"
         self._config_dir.mkdir(parents=True, exist_ok=True)
         self._config = self._load_config()
+        # Restore API key from config to environment on startup
+        self._restore_env_from_config()
+
+    def _restore_env_from_config(self) -> None:
+        """Restore environment variables from saved config on startup.
+
+        This ensures API keys persist across server restarts.
+        """
+        # Restore OpenRouter API key
+        api_key = self._config.get("api_key")
+        if api_key and not os.getenv("OPENROUTER_API_KEY"):
+            os.environ["OPENROUTER_API_KEY"] = api_key
+            print(f"Restored OPENROUTER_API_KEY from config: {self._mask_api_key(api_key)}")
 
     def _load_config(self) -> dict:
         """Load configuration from file."""
@@ -539,9 +552,15 @@ class ConfigService:
             if "api_key" in self._config:
                 del self._config["api_key"]
                 deleted.append("api_key")
-                # Also clear from environment
-                if "OPENROUTER_API_KEY" in os.environ:
-                    del os.environ["OPENROUTER_API_KEY"]
+            # ALWAYS clear from environment (even if not in config file)
+            # API key might have been loaded from .env file via dotenv
+            if "OPENROUTER_API_KEY" in os.environ:
+                del os.environ["OPENROUTER_API_KEY"]
+                if "api_key" not in deleted:
+                    deleted.append("api_key (env)")
+            if "LLM_API_KEY" in os.environ:
+                del os.environ["LLM_API_KEY"]
+                deleted.append("LLM_API_KEY (env)")
             if "model" in self._config:
                 del self._config["model"]
                 deleted.append("model")

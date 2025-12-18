@@ -590,3 +590,199 @@ def _execute_factor_generation(
         "family": factor_family,
         "code": f"# Generated factor for: {hypothesis}\ndef calculate(data):\n    return data['close'].pct_change()",
     }
+
+
+# ==================== Mining Task (C2 Fix: Persistent) ====================
+
+
+@celery_app.task(
+    bind=True,
+    name="iqfmp.celery_app.tasks.mining_task",
+    max_retries=1,
+    default_retry_delay=60,
+    acks_late=True,
+    track_started=True,
+    priority=5,
+    queue="default",
+)
+def mining_task(
+    self,
+    task_id: str,
+    task_config: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    因子挖掘任务 - 持久化到 Redis (C2 Fix)
+
+    此任务通过 Celery 执行，确保：
+    1. 任务持久化到 Redis，服务重启后可恢复
+    2. 支持任务取消检查
+    3. 进度实时更新
+
+    Args:
+        task_id: 挖掘任务 ID
+        task_config: 任务配置
+            - name: 任务名称
+            - target_count: 目标因子数量
+            - factor_families: 因子家族列表
+            - auto_evaluate: 是否自动评估
+
+    Returns:
+        挖掘结果
+            - task_id: 任务 ID
+            - status: 完成状态
+            - generated_count: 生成的因子数
+            - passed_count: 通过评估的因子数
+            - failed_count: 失败的因子数
+    """
+    celery_task_id = self.request.id
+    logger.info(f"Starting mining task {task_id} (Celery ID: {celery_task_id})")
+
+    generated_count = 0
+    passed_count = 0
+    failed_count = 0
+
+    try:
+        # Update initial state
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                "current": 0,
+                "total": 100,
+                "status": "Initializing mining task...",
+                "started_at": datetime.utcnow().isoformat(),
+                "task_id": task_id,
+            },
+        )
+
+        target_count = task_config.get("target_count", 10)
+        families = task_config.get("factor_families") or ["momentum", "volatility"]
+        auto_evaluate = task_config.get("auto_evaluate", True)
+        task_name = task_config.get("name", "Mining Task")
+
+        # Run mining loop
+        result = _execute_mining_task(
+            celery_task=self,
+            task_id=task_id,
+            task_name=task_name,
+            target_count=target_count,
+            families=families,
+            auto_evaluate=auto_evaluate,
+        )
+
+        logger.info(f"Mining task {task_id} completed: {result}")
+        return {
+            "task_id": task_id,
+            "celery_task_id": celery_task_id,
+            "status": "completed",
+            "completed_at": datetime.utcnow().isoformat(),
+            **result,
+        }
+
+    except Exception as e:
+        logger.error(f"Mining task {task_id} failed: {e}")
+        return {
+            "task_id": task_id,
+            "celery_task_id": celery_task_id,
+            "status": "failed",
+            "error": str(e),
+            "generated_count": generated_count,
+            "passed_count": passed_count,
+            "failed_count": failed_count,
+        }
+
+
+def _execute_mining_task(
+    celery_task,
+    task_id: str,
+    task_name: str,
+    target_count: int,
+    families: list[str],
+    auto_evaluate: bool,
+) -> dict[str, Any]:
+    """执行因子挖掘的内部实现.
+
+    此函数在 Celery Worker 中同步执行。
+    使用数据库连接进行因子生成和评估。
+    """
+    import asyncio
+    import time
+
+    generated_count = 0
+    passed_count = 0
+    failed_count = 0
+
+    for i in range(target_count):
+        # Check for cancellation via Redis
+        try:
+            import redis
+            redis_url = "redis://localhost:6379/0"
+            redis_client = redis.from_url(redis_url)
+            if redis_client.sismember("mining_tasks:cancelled", task_id):
+                logger.info(f"Mining task {task_id} cancelled at iteration {i}")
+                return {
+                    "generated_count": generated_count,
+                    "passed_count": passed_count,
+                    "failed_count": failed_count,
+                    "cancelled": True,
+                }
+        except Exception:
+            pass  # Redis check failed, continue execution
+
+        # Update progress
+        progress = ((i + 1) / target_count) * 100
+        celery_task.update_state(
+            state="PROGRESS",
+            meta={
+                "current": int(progress),
+                "total": 100,
+                "status": f"Generating factor {i + 1}/{target_count}...",
+                "generated_count": generated_count,
+                "passed_count": passed_count,
+                "failed_count": failed_count,
+            },
+        )
+
+        # Select family for this iteration
+        family = families[i % len(families)]
+        description = f"Auto-generated {family} factor #{i+1} for {task_name}"
+
+        try:
+            # Generate factor using sync implementation
+            factor_result = _execute_factor_generation(
+                celery_task,
+                hypothesis=description,
+                factor_family=family,
+                config={},
+            )
+            generated_count += 1
+
+            # Auto-evaluate if enabled
+            if auto_evaluate:
+                try:
+                    eval_result = _execute_factor_evaluation(
+                        celery_task,
+                        factor_id=factor_result.get("factor_id", "unknown"),
+                        factor_code=factor_result.get("code", ""),
+                        config={"n_trials": generated_count},
+                    )
+                    if eval_result.get("passed_threshold", False):
+                        passed_count += 1
+                    else:
+                        failed_count += 1
+                except Exception as e:
+                    logger.warning(f"Factor evaluation failed: {e}")
+                    failed_count += 1
+
+        except Exception as e:
+            logger.error(f"Factor generation failed: {e}")
+            failed_count += 1
+
+        # Small delay to avoid overwhelming resources
+        time.sleep(0.3)
+
+    return {
+        "generated_count": generated_count,
+        "passed_count": passed_count,
+        "failed_count": failed_count,
+        "cancelled": False,
+    }

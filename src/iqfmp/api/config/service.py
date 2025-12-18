@@ -165,13 +165,18 @@ class ConfigService:
         exchange_configured = bool(exchange_api_key)
         exchange_id = self._config.get("exchange_id") or os.getenv("EXCHANGE_ID")
 
-        # Check for Qlib availability
+        # Check for Qlib availability (M2 FIX: check actual initialization status)
         qlib_available = False
         try:
-            import qlib
-            qlib_available = True
+            from iqfmp.core.qlib_init import is_qlib_initialized
+            qlib_available = is_qlib_initialized()
         except (ImportError, LookupError, Exception):
-            pass
+            # Fallback to simple import check
+            try:
+                import qlib
+                qlib_available = True
+            except Exception:
+                pass
 
         # Check TimescaleDB connection - support both DATABASE_URL and individual PG* vars
         timescaledb_connected = self._check_timescaledb_connection()
@@ -201,28 +206,29 @@ class ConfigService:
 
     def _check_timescaledb_connection(self) -> bool:
         """Check TimescaleDB connection status."""
-        # Check if DATABASE_URL or individual PG* env vars exist
-        has_config = bool(
-            os.getenv("DATABASE_URL")
-            or (os.getenv("PGHOST") or os.getenv("PGPORT"))
-        )
-        if not has_config:
-            return False
-
-        # Try actual connection
         try:
             import psycopg2
-            conn_params = {}
-            if os.getenv("DATABASE_URL"):
-                # Use DATABASE_URL directly
-                conn = psycopg2.connect(os.getenv("DATABASE_URL"))
+            from urllib.parse import urlparse
+
+            # Parse DATABASE_URL if available
+            db_url = os.getenv("DATABASE_URL")
+            if db_url:
+                parsed = urlparse(db_url)
+                conn = psycopg2.connect(
+                    host=parsed.hostname or "localhost",
+                    port=parsed.port or 5433,
+                    user=parsed.username or "iqfmp",
+                    password=parsed.password or "iqfmp",
+                    dbname=parsed.path.lstrip("/") or "iqfmp",
+                    connect_timeout=3,
+                )
             else:
-                # Use individual PG* environment variables
+                # Use individual PG* environment variables with same defaults as database.py
                 conn = psycopg2.connect(
                     host=os.getenv("PGHOST", "localhost"),
-                    port=os.getenv("PGPORT", "5432"),
-                    user=os.getenv("PGUSER", "postgres"),
-                    password=os.getenv("PGPASSWORD", ""),
+                    port=int(os.getenv("PGPORT", "5433")),
+                    user=os.getenv("PGUSER", "iqfmp"),
+                    password=os.getenv("PGPASSWORD", "iqfmp"),
                     dbname=os.getenv("PGDATABASE", "iqfmp"),
                     connect_timeout=3,
                 )

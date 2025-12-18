@@ -107,3 +107,9 @@ dump.rdb
 tmp/
 temp/
 *.tmp
+
+# Process ID files
+*.pid
+.backend.pid
+.celery.pid
+.frontend.pid

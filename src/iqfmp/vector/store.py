@@ -321,3 +321,27 @@ class FactorVectorStore:
     def get_collection_stats(self) -> dict[str, Any]:
         """获取集合统计信息"""
         return self.qdrant.get_collection_info(self.collection_name)
+
+    def health_check(self) -> tuple[bool, str]:
+        """
+        H2 FIX: 健康检查方法
+
+        Returns:
+            (is_healthy, message) 元组
+        """
+        try:
+            # 检查 Qdrant 连接
+            info = self.qdrant.get_collection_info(self.collection_name)
+            if info:
+                point_count = info.get("points_count", 0)
+                return True, f"Qdrant healthy, collection '{self.collection_name}' has {point_count} points"
+            else:
+                return True, f"Qdrant healthy, collection '{self.collection_name}' is empty"
+        except Exception as e:
+            logger.error(f"Qdrant health check failed: {e}")
+            return False, f"Qdrant unhealthy: {e}"
+
+    def is_available(self) -> bool:
+        """检查向量存储是否可用"""
+        healthy, _ = self.health_check()
+        return healthy

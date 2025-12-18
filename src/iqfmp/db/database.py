@@ -6,6 +6,7 @@ from typing import AsyncGenerator, Optional
 
 import redis.asyncio as redis
 from pydantic_settings import BaseSettings
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -112,7 +113,7 @@ async def init_db() -> None:
     # Test connections
     try:
         async with _engine.begin() as conn:
-            await conn.execute("SELECT 1")
+            await conn.execute(text("SELECT 1"))
         print(f"Connected to TimescaleDB: {settings.PGHOST}:{settings.PGPORT}/{settings.PGDATABASE}")
     except Exception as e:
         print(f"Warning: Failed to connect to TimescaleDB: {e}")

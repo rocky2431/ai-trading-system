@@ -25,7 +25,7 @@ from iqfmp.api.factors.schemas import (
     MiningTaskStatus,
     StabilityResponse,
 )
-from iqfmp.api.factors.service import FactorNotFoundError, FactorService
+from iqfmp.api.factors.service import FactorNotFoundError, FactorEvaluationError, FactorService
 from iqfmp.db.database import get_db, get_redis
 from iqfmp.models.factor import Factor
 
@@ -414,6 +414,8 @@ async def evaluate_factor(
             factor_id=factor_id,
             splits=request.splits,
             market_splits=request.market_splits,
+            symbol=request.symbol,
+            timeframe=request.timeframe,
         )
 
         return FactorEvaluateResponse(
@@ -440,6 +442,12 @@ async def evaluate_factor(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Factor {factor_id} not found",
+        )
+    except FactorEvaluationError as e:
+        # H1 FIX: Properly report data loading/evaluation failures
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(e),
         )
 
 

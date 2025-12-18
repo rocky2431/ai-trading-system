@@ -95,6 +95,12 @@ class FactorNotFoundError(Exception):
     pass
 
 
+class FactorEvaluationError(Exception):
+    """Raised when factor evaluation fails due to data or computation issues."""
+
+    pass
+
+
 class FactorService:
     """Service for factor management with database persistence."""
 
@@ -539,6 +545,8 @@ class FactorService:
         include_cv: bool = True,
         include_stability: bool = True,
         include_cost_analysis: bool = True,
+        symbol: str = "ETH/USDT",
+        timeframe: str = "1d",
     ) -> tuple[FactorMetrics, StabilityReport, bool, int]:
         """Evaluate a factor using full evaluation pipeline.
 
@@ -571,10 +579,11 @@ class FactorService:
 
         try:
             # Load real market data from TimescaleDB (primary) or CSV (fallback)
+            # Uses parameterized symbol/timeframe instead of hardcoded values
             provider = DataProvider(session=self.session)
             df = await provider.load_ohlcv(
-                symbol="ETH/USDT",
-                timeframe="1d",
+                symbol=symbol,
+                timeframe=timeframe,
             )
 
             engine = FactorEngine(df=df)
@@ -727,31 +736,16 @@ class FactorService:
             )
 
         except (ValueError, FileNotFoundError) as e:
-            print(f"Warning: Data not found, using fallback evaluation: {e}")
-            metrics = FactorMetrics(
-                ic_mean=0.0, ic_std=0.0, ir=0.0, sharpe=0.0,
-                max_drawdown=0.0, turnover=0.0,
-                ic_by_split={s: 0.0 for s in splits},
-                sharpe_by_split={s: 0.0 for s in splits},
-            )
-            stability = StabilityReport(
-                time_stability={"error": "no_data"},
-                market_stability={"error": "no_data"},
-                regime_stability={"error": "no_data"},
-            )
+            # H1 FIX: Raise proper error instead of returning zero metrics
+            # Zero metrics would cause factors to be incorrectly evaluated as "poor"
+            error_msg = f"Data loading failed for factor {factor_id} (symbol={symbol}, timeframe={timeframe}): {e}"
+            print(f"ERROR: {error_msg}")
+            raise FactorEvaluationError(error_msg)
         except Exception as e:
-            print(f"Warning: Factor evaluation failed: {e}")
-            metrics = FactorMetrics(
-                ic_mean=0.0, ic_std=0.0, ir=0.0, sharpe=0.0,
-                max_drawdown=0.0, turnover=0.0,
-                ic_by_split={s: 0.0 for s in splits},
-                sharpe_by_split={s: 0.0 for s in splits},
-            )
-            stability = StabilityReport(
-                time_stability={"error": str(e)},
-                market_stability={"error": str(e)},
-                regime_stability={"error": str(e)},
-            )
+            # H1 FIX: Raise proper error for any evaluation failure
+            error_msg = f"Factor evaluation failed for {factor_id}: {e}"
+            print(f"ERROR: {error_msg}")
+            raise FactorEvaluationError(error_msg)
 
         # Get dynamic threshold
         threshold = await self.trial_repo.calculate_dynamic_threshold()
@@ -810,6 +804,8 @@ class FactorService:
         include_walk_forward: bool = True,
         include_ic_decomposition: bool = True,
         walk_forward_config: Optional[dict] = None,
+        symbol: str = "ETH/USDT",
+        timeframe: str = "1d",
     ) -> dict:
         """Run extended factor evaluation with Walk-Forward and IC decomposition.
 
@@ -825,12 +821,14 @@ class FactorService:
         Returns:
             Dictionary with all evaluation results
         """
-        # First run basic evaluation
+        # First run basic evaluation with parameterized symbol/timeframe
         metrics, stability, passed, trial_number = await self.evaluate_factor(
             factor_id=factor_id,
             splits=splits,
             include_cv=True,
             include_stability=True,
+            symbol=symbol,
+            timeframe=timeframe,
         )
 
         result = {
@@ -862,7 +860,7 @@ class FactorService:
             from iqfmp.core.data_provider import DataProvider
 
             provider = DataProvider(session=self.session)
-            df = await provider.load_ohlcv(symbol="ETH/USDT", timeframe="1d")
+            df = await provider.load_ohlcv(symbol=symbol, timeframe=timeframe)
             engine = FactorEngine(df=df)
             factor_values = engine.compute_factor(factor.code, factor.name)
             eval_df = self._prepare_evaluation_data(engine.data, factor_values)
@@ -1260,8 +1258,10 @@ class FactorService:
             auto_evaluate=auto_evaluate,
         )
 
-        # Start background mining task (in production, use Celery/asyncio task)
-        asyncio.create_task(self._run_mining_task(task_id, task_data))
+        # C2 FIX: Use Celery task for persistent task queue
+        # Tasks are persisted to Redis and survive service restarts
+        from iqfmp.celery_app.tasks import mining_task
+        mining_task.delay(task_id, task_data)
 
         return task_id
 
@@ -1520,6 +1520,8 @@ class FactorService:
     async def compare_factors(
         self,
         factor_ids: list[str],
+        symbol: str = "ETH/USDT",
+        timeframe: str = "1d",
     ) -> tuple[list[Factor], dict[str, dict[str, float]], list[str]]:
         """Compare multiple factors using real correlation calculation.
 
@@ -1550,7 +1552,7 @@ class FactorService:
         try:
             # Load data from TimescaleDB (primary) or CSV (fallback)
             provider = DataProvider(session=self.session)
-            df = await provider.load_ohlcv(symbol="ETH/USDT", timeframe="1d")
+            df = await provider.load_ohlcv(symbol=symbol, timeframe=timeframe)
             engine = FactorEngine(df=df)
 
             factor_values_dict = {}

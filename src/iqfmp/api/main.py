@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -18,6 +19,8 @@ from iqfmp.api.strategies.router import router as strategies_router
 from iqfmp.api.system.router import router as system_router
 from iqfmp.db.database import init_db, close_db
 
+logger = logging.getLogger(__name__)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
@@ -26,6 +29,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     from iqfmp.api.config.service import ConfigService
     config_service = ConfigService()  # This restores env vars from saved config
     print(f"Config initialized from {config_service._config_file}")
+
+    # M2 FIX: Initialize Qlib for factor evaluation
+    try:
+        from iqfmp.core.qlib_init import ensure_qlib_initialized, is_qlib_initialized
+        if ensure_qlib_initialized():
+            logger.info("Qlib initialized successfully")
+        else:
+            logger.warning("Qlib initialization failed, factor evaluation may be limited")
+    except Exception as e:
+        logger.warning(f"Qlib initialization error: {e}, factor evaluation may be limited")
 
     # Initialize database connections
     await init_db()

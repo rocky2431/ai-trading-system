@@ -76,6 +76,9 @@ class FactorEvaluateRequest(BaseModel):
     splits: list[str] = Field(default=["train", "valid", "test"])
     market_splits: list[str] = Field(default_factory=list)
     frequency_splits: list[str] = Field(default_factory=list)
+    # Data source configuration - fixes hardcoded symbol/timeframe issue
+    symbol: str = Field(default="ETH/USDT", description="Trading symbol for evaluation")
+    timeframe: str = Field(default="1d", description="Timeframe: 1h, 4h, 1d, 1w")
 
 
 class FactorEvaluateResponse(BaseModel):

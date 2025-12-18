@@ -6,6 +6,10 @@ This module provides LangGraph-based agent orchestration with support for:
 - Time-travel debugging
 - Conditional routing
 - Natural language factor generation
+- Factor evaluation
+- Strategy assembly
+- Backtest optimization
+- Risk management
 """
 
 from iqfmp.agents.orchestrator import (
@@ -47,6 +51,70 @@ from iqfmp.agents.hypothesis_agent import (
     HypothesisToCode,
     HYPOTHESIS_TEMPLATES,
 )
+from iqfmp.agents.evaluation_agent import (
+    EvaluationAgentConfig,
+    EvaluationAgentError,
+    EvaluationAgentResult,
+    FactorEvaluationAgent,
+    DataValidationError,
+    EvaluationTimeoutError,
+    create_evaluation_agent,
+    evaluate_factors_node,
+)
+from iqfmp.agents.strategy_agent import (
+    CombinationMethod,
+    FactorWeight,
+    InsufficientFactorsError,
+    PortfolioConstruction,
+    SignalTransform,
+    StrategyAgentError,
+    StrategyAssemblyAgent,
+    StrategyConfig,
+    StrategyResult,
+    StrategySignal,
+    WeightConstraintError,
+    assemble_strategy_node,
+    create_strategy_agent,
+)
+from iqfmp.agents.backtest_agent import (
+    BacktestAgentError,
+    BacktestConfig,
+    BacktestEngine,
+    BacktestMetrics,
+    BacktestMode,
+    BacktestOptimizationAgent,
+    InsufficientDataError,
+    OptimizationFailedError,
+    OptimizationMethod,
+    OptimizationResult,
+    ParameterSpace,
+    TrialResult,
+    create_backtest_agent,
+    optimize_backtest_node,
+)
+from iqfmp.agents.risk_agent import (
+    ApprovalStatus,
+    RiskAgentError,
+    RiskAssessment,
+    RiskCalculator,
+    RiskCategory,
+    RiskCheckAgent,
+    RiskConfig,
+    RiskLevel,
+    RiskLimit,
+    RiskLimitExceededError,
+    RiskMetrics,
+    check_risk_node,
+    create_risk_agent,
+)
+from iqfmp.agents.pipeline_builder import (
+    PipelineBuilder,
+    PipelineConfig,
+    build_full_pipeline,
+    build_evaluation_only_pipeline,
+    build_research_pipeline,
+    build_production_pipeline,
+)
 
 __all__ = [
     # Orchestrator
@@ -85,4 +153,63 @@ __all__ = [
     "HypothesisStatus",
     "HypothesisToCode",
     "HYPOTHESIS_TEMPLATES",
+    # Evaluation Agent
+    "EvaluationAgentConfig",
+    "EvaluationAgentError",
+    "EvaluationAgentResult",
+    "FactorEvaluationAgent",
+    "DataValidationError",
+    "EvaluationTimeoutError",
+    "create_evaluation_agent",
+    "evaluate_factors_node",
+    # Strategy Agent
+    "CombinationMethod",
+    "FactorWeight",
+    "InsufficientFactorsError",
+    "PortfolioConstruction",
+    "SignalTransform",
+    "StrategyAgentError",
+    "StrategyAssemblyAgent",
+    "StrategyConfig",
+    "StrategyResult",
+    "StrategySignal",
+    "WeightConstraintError",
+    "assemble_strategy_node",
+    "create_strategy_agent",
+    # Backtest Agent
+    "BacktestAgentError",
+    "BacktestConfig",
+    "BacktestEngine",
+    "BacktestMetrics",
+    "BacktestMode",
+    "BacktestOptimizationAgent",
+    "InsufficientDataError",
+    "OptimizationFailedError",
+    "OptimizationMethod",
+    "OptimizationResult",
+    "ParameterSpace",
+    "TrialResult",
+    "create_backtest_agent",
+    "optimize_backtest_node",
+    # Risk Agent
+    "ApprovalStatus",
+    "RiskAgentError",
+    "RiskAssessment",
+    "RiskCalculator",
+    "RiskCategory",
+    "RiskCheckAgent",
+    "RiskConfig",
+    "RiskLevel",
+    "RiskLimit",
+    "RiskLimitExceededError",
+    "RiskMetrics",
+    "check_risk_node",
+    "create_risk_agent",
+    # Pipeline Builder
+    "PipelineBuilder",
+    "PipelineConfig",
+    "build_full_pipeline",
+    "build_evaluation_only_pipeline",
+    "build_research_pipeline",
+    "build_production_pipeline",
 ]

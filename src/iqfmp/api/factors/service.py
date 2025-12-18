@@ -185,11 +185,17 @@ class FactorService:
                 return False
 
             # 准备元数据
+            # 安全获取 status 值 (Pydantic use_enum_values=True 可能已转为字符串)
+            if factor.status:
+                status_value = factor.status.value if hasattr(factor.status, 'value') else str(factor.status)
+            else:
+                status_value = "candidate"
+
             metadata = {
                 "sharpe": metrics.sharpe if metrics else 0.0,
                 "ic_mean": metrics.ic_mean if metrics else 0.0,
                 "ir": metrics.ir if metrics else 0.0,
-                "status": factor.status.value if factor.status else "candidate",
+                "status": status_value,
             }
 
             # 获取因子假设/描述

@@ -10,11 +10,15 @@ LangGraph concepts, with support for:
 
 import asyncio
 import inspect
+import json
+import os
 import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Union
+
+import asyncpg
 
 
 # === Error Classes ===
@@ -294,6 +298,143 @@ class MemorySaver(CheckpointSaver):
     async def delete(self, checkpoint_id: str) -> None:
         """Delete checkpoint from memory."""
         self._checkpoints.pop(checkpoint_id, None)
+
+
+class PostgresCheckpointSaver(CheckpointSaver):
+    """PostgreSQL-backed checkpoint storage.
+
+    Uses asyncpg to persist AgentState snapshots. Intended for production
+    alignment with architecture要求的持久化 checkpoint。
+    """
+
+    def __init__(self, conn_str: str) -> None:
+        self._conn_str = conn_str
+        self._initialized = False
+        self._init_lock = asyncio.Lock()
+
+    async def _ensure_table(self) -> None:
+        if self._initialized:
+            return
+        async with self._init_lock:
+            if self._initialized:
+                return
+            conn = await asyncpg.connect(self._conn_str)
+            await conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                    id TEXT PRIMARY KEY,
+                    state_json TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    ts DOUBLE PRECISION,
+                    metadata_json TEXT
+                );
+                """
+            )
+            await conn.close()
+            self._initialized = True
+
+    async def save(self, checkpoint: Checkpoint) -> None:
+        await self._ensure_table()
+        state_json = json.dumps({
+            "messages": checkpoint.state.messages,
+            "context": checkpoint.state.context,
+            "current_node": checkpoint.state.current_node,
+            "metadata": checkpoint.state.metadata,
+        })
+        metadata_json = json.dumps(checkpoint.metadata or {})
+        conn = await asyncpg.connect(self._conn_str)
+        try:
+            await conn.execute(
+                """
+                INSERT INTO agent_checkpoints (id, state_json, node, ts, metadata_json)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (id) DO UPDATE SET
+                    state_json = EXCLUDED.state_json,
+                    node = EXCLUDED.node,
+                    ts = EXCLUDED.ts,
+                    metadata_json = EXCLUDED.metadata_json;
+                """,
+                checkpoint.id,
+                state_json,
+                checkpoint.node,
+                checkpoint.timestamp,
+                metadata_json,
+            )
+        finally:
+            await conn.close()
+
+    async def load(self, checkpoint_id: str) -> Optional[Checkpoint]:
+        await self._ensure_table()
+        conn = await asyncpg.connect(self._conn_str)
+        try:
+            row = await conn.fetchrow(
+                "SELECT state_json, node, ts, metadata_json FROM agent_checkpoints WHERE id=$1",
+                checkpoint_id,
+            )
+        finally:
+            await conn.close()
+
+        if not row:
+            return None
+
+        state_payload = json.loads(row["state_json"])
+        state = AgentState(
+            messages=state_payload.get("messages", []),
+            context=state_payload.get("context", {}),
+            current_node=state_payload.get("current_node"),
+            metadata=state_payload.get("metadata", {}),
+        )
+        metadata = json.loads(row["metadata_json"] or "{}")
+
+        return Checkpoint(
+            id=checkpoint_id,
+            state=state,
+            node=row["node"],
+            timestamp=row["ts"] or time.time(),
+            metadata=metadata,
+        )
+
+    async def list(self) -> list[Checkpoint]:
+        await self._ensure_table()
+        conn = await asyncpg.connect(self._conn_str)
+        try:
+            rows = await conn.fetch(
+                "SELECT id, state_json, node, ts, metadata_json FROM agent_checkpoints ORDER BY ts DESC"
+            )
+        finally:
+            await conn.close()
+
+        checkpoints: list[Checkpoint] = []
+        for row in rows:
+            payload = json.loads(row["state_json"])
+            state = AgentState(
+                messages=payload.get("messages", []),
+                context=payload.get("context", {}),
+                current_node=payload.get("current_node"),
+                metadata=payload.get("metadata", {}),
+            )
+            metadata = json.loads(row["metadata_json"] or "{}")
+            checkpoints.append(
+                Checkpoint(
+                    id=row["id"],
+                    state=state,
+                    node=row["node"],
+                    timestamp=row["ts"] or time.time(),
+                    metadata=metadata,
+                )
+            )
+        return checkpoints
+
+    async def delete(self, checkpoint_id: str) -> None:
+        await self._ensure_table()
+        conn = await asyncpg.connect(self._conn_str)
+        try:
+            await conn.execute(
+                "DELETE FROM agent_checkpoints WHERE id=$1",
+                checkpoint_id,
+            )
+        finally:
+            await conn.close()
 
 
 # === Orchestrator Configuration ===

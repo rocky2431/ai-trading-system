@@ -137,15 +137,25 @@ QLIB_INDICATOR_EXPRESSIONS: dict[str, str] = {
 }
 
 
+class QlibUnavailableError(RuntimeError):
+    """Raised when Qlib is required but not available."""
+
+
 class QlibExpressionEngine:
     """Wrapper for Qlib's expression engine.
 
     All indicator calculations MUST go through this class.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, require_qlib: bool = False) -> None:
         """Initialize expression engine with Qlib backend."""
+        self._require_qlib = require_qlib
         self._qlib_available = _ensure_qlib_initialized()
+        if self._require_qlib and not self._qlib_available:
+            raise QlibUnavailableError(
+                "Qlib backend is required but not available. "
+                "Set QLIB_DATA_DIR correctly or install qlib extras."
+            )
         self._ops_cache: dict[str, Any] = {}
 
         if self._qlib_available:
@@ -200,7 +210,11 @@ class QlibExpressionEngine:
             Series of computed values
         """
         if not self._qlib_available:
-            logger.warning("Qlib not available, returning NaN series")
+            if self._require_qlib:
+                raise QlibUnavailableError(
+                    "Qlib backend unavailable while require_qlib=True"
+                )
+            logger.warning("Qlib not available, returning NaN series (non-strict mode)")
             return pd.Series(np.nan, index=df.index, name=result_name)
 
         try:

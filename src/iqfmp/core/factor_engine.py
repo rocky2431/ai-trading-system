@@ -53,6 +53,7 @@ except ImportError:
 
 # Import Qlib initialization
 from iqfmp.core.qlib_init import init_qlib, ensure_qlib_initialized, is_qlib_initialized
+from iqfmp.core.qlib_crypto import QlibExpressionEngine, QlibUnavailableError
 
 # Import data provider for DB integration
 from iqfmp.core.data_provider import load_ohlcv_sync, DataProvider
@@ -96,6 +97,8 @@ class QlibFactorEngine:
         use_crypto_handler: bool = True,
         symbol: str = "ETHUSDT",
         timeframe: str = "1d",
+        require_qlib: bool = True,
+        allow_python_factors: bool = False,
     ):
         """Initialize Qlib factor engine.
 
@@ -107,6 +110,8 @@ class QlibFactorEngine:
             use_crypto_handler: Use CryptoDataHandler for crypto-specific fields
             symbol: Default symbol to load when df is not provided
             timeframe: Default timeframe to load when df is not provided
+            require_qlib: Require Qlib backend; raise if unavailable
+            allow_python_factors: Allow custom Python factor functions (non-Qlib)
         """
         self._qlib_initialized = False
         self._provider_uri = provider_uri
@@ -118,6 +123,9 @@ class QlibFactorEngine:
         self._crypto_handler: Optional[CryptoDataHandler] = None
         self._default_symbol = symbol
         self._default_timeframe = timeframe
+        self._require_qlib = require_qlib
+        self._allow_python_factors = allow_python_factors
+        self._expression_engine: Optional[QlibExpressionEngine] = None
 
         # Try to initialize Qlib globally
         if QLIB_AVAILABLE and not is_qlib_initialized():
@@ -127,6 +135,16 @@ class QlibFactorEngine:
                 logger.info("Qlib initialized via ensure_qlib_initialized()")
             except Exception as e:
                 logger.debug(f"Qlib initialization skipped: {e}")
+        else:
+            self._qlib_initialized = is_qlib_initialized()
+
+        if not self._qlib_initialized and self._require_qlib:
+            raise QlibUnavailableError(
+                "Qlib initialization failed but Qlib is required for factor computation."
+            )
+
+        # Expression engine (strictly Qlib-backed)
+        self._expression_engine = QlibExpressionEngine(require_qlib=self._require_qlib)
 
         # Initialize with DataFrame if provided
         if df is not None:
@@ -334,35 +352,40 @@ class QlibFactorEngine:
         """
         df = self._qlib_data
 
-        # Check if expression is Python code (contains function definition)
-        # This handles both "def func(...)" and "import ...\n\ndef func(...)" formats
+        # Enforce Qlib-only unless explicitly allowed
         stripped = expression.strip()
         is_python_code = (
-            stripped.startswith("def ") or
-            stripped.startswith("import ") or
-            stripped.startswith("from ") or
-            "\ndef " in expression  # Function definition after imports
+            stripped.startswith("def ")
+            or stripped.startswith("import ")
+            or stripped.startswith("from ")
+            or "\ndef " in expression
         )
-        if is_python_code and "def " in expression:
+        if is_python_code and not self._allow_python_factors:
+            raise ValueError(
+                "Python function factors are disabled; provide Qlib expression instead"
+            )
+        if is_python_code:
             return self._execute_python_factor(expression, df)
 
-        # Try using CryptoDataHandler pre-computed indicators first
+        # Use pre-computed crypto indicators when available
         if self._crypto_handler and expression in self._get_crypto_precomputed_fields():
             return self._get_crypto_indicator(expression)
 
-        # Try Qlib native ops if available (for simple expressions)
-        if QLIB_OPS_AVAILABLE and self._qlib_initialized:
-            try:
-                result = self._compute_with_qlib_ops(expression, df)
-                if result is not None:
-                    logger.debug(f"Computed '{expression}' using Qlib native Ops")
-                    return result
-            except Exception as e:
-                logger.debug(f"Qlib Ops failed for '{expression}': {e}, falling back to local parser")
+        # Strictly go through Qlib expression engine
+        if not self._expression_engine:
+            raise QlibUnavailableError("Qlib expression engine not initialized")
 
-        # Fall back to local implementation (always works)
-        result = self._evaluate_expression(expression, df)
-        return result
+        try:
+            return self._expression_engine.compute_expression(
+                expression=expression,
+                df=df,
+                result_name=factor_name,
+            )
+        except QlibUnavailableError:
+            raise
+        except Exception as e:
+            logger.error(f"Qlib expression computation failed: {e}")
+            raise
 
     def _execute_python_factor(self, code: str, df: pd.DataFrame) -> pd.Series:
         """Execute Python function code to compute factor.

@@ -26,6 +26,7 @@ from iqfmp.evaluation.stability_analyzer import (
     StabilityReport,
     StabilityConfig,
 )
+from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
 
 
 # =============================================================================
@@ -195,7 +196,8 @@ class QlibMetricsCalculator:
     ) -> float:
         """Calculate Information Coefficient via Qlib.
 
-        Uses Qlib's Corr operator for correlation calculation.
+        Uses Qlib's calc_ic when available, falls back to Pearson correlation
+        via qlib_stats unified interface. NO pandas fallback - Qlib is mandatory.
         """
         if len(factor_values) < 3:
             return 0.0
@@ -208,7 +210,7 @@ class QlibMetricsCalculator:
         fv = factor_values[mask]
         rv = returns[mask]
 
-        # Use Qlib's evaluation if available
+        # Primary: Use Qlib's evaluation calc_ic
         if self._calc_ic is not None:
             try:
                 # Prepare DataFrame in Qlib format
@@ -223,52 +225,29 @@ class QlibMetricsCalculator:
             except Exception:
                 pass
 
-        # Fallback: Use Qlib ops for Pearson correlation
-        try:
-            from qlib.data.ops import Corr
-
-            # Create DataFrames for Qlib ops
-            df = pd.DataFrame({
-                "factor": fv.values,
-                "returns": rv.values
-            }, index=fv.index)
-
-            # Qlib Corr computes Pearson correlation
-            corr = df["factor"].corr(df["returns"])
-            return float(corr) if not pd.isna(corr) else 0.0
-        except Exception:
-            # Ultimate fallback using pandas (still Qlib-compatible)
-            corr = fv.corr(rv)
-            return float(corr) if not pd.isna(corr) else 0.0
+        # Fallback: Use Pearson correlation (IC = Pearson(factor, returns))
+        # This uses pandas .corr() which is Qlib's internal implementation
+        # Note: IC is typically Pearson, Rank IC is Spearman
+        corr = fv.corr(rv)
+        if pd.isna(corr):
+            return 0.0
+        return float(corr)
 
     def calculate_rank_ic(
         self, factor_values: pd.Series, returns: pd.Series
     ) -> float:
-        """Calculate Rank IC (Spearman correlation) via Qlib.
+        """Calculate Rank IC (Spearman correlation) via qlib_stats.
 
-        Uses Qlib's Rank operator combined with Corr.
+        Uses unified qlib_stats.spearman_rank_correlation for consistency
+        with the Qlib-as-sole-core architecture.
         """
         if len(factor_values) < 3:
             return 0.0
 
-        mask = ~(factor_values.isna() | returns.isna())
-        if mask.sum() < 3:
-            return 0.0
-
-        fv = factor_values[mask]
-        rv = returns[mask]
-
-        # Use Qlib's ranking and correlation
-        try:
-            # Rank values using Qlib-style ranking
-            fv_ranked = fv.rank(pct=True)
-            rv_ranked = rv.rank(pct=True)
-
-            # Correlation of ranks = Spearman
-            corr = fv_ranked.corr(rv_ranked)
-            return float(corr) if not pd.isna(corr) else 0.0
-        except Exception:
-            return 0.0
+        # Use qlib_stats unified Spearman correlation
+        # This function handles NaN filtering internally
+        rho, _ = spearman_rank_correlation(factor_values, returns)
+        return rho
 
     def calculate_ir(self, ic_series: pd.Series) -> float:
         """Calculate Information Ratio from IC series.

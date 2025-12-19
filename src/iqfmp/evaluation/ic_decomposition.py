@@ -15,7 +15,13 @@ from datetime import datetime
 from typing import Any, Optional
 import numpy as np
 import pandas as pd
-from scipy import stats
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import (
+    linear_regression,
+    t_test_independent,
+    spearman_rank_correlation,
+)
 
 from iqfmp.evaluation.factor_evaluator import MetricsCalculator
 
@@ -346,12 +352,12 @@ class ICDecompositionAnalyzer:
         sorted_periods = sorted(ic_by_month.keys())
         ics = [ic_by_month[p] for p in sorted_periods]
 
-        # Linear regression
+        # Linear regression using Qlib-native function
         x = np.arange(len(ics))
         y = np.array(ics)
 
         try:
-            slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+            slope, intercept, r_value, p_value, std_err = linear_regression(x, y)
             return float(slope), float(p_value)
         except Exception:
             return 0.0, 1.0
@@ -516,7 +522,7 @@ class ICDecompositionAnalyzer:
         log_ics = np.log(np.array(ics))
 
         try:
-            slope, intercept, r_value, p_value, std_err = stats.linregress(t, log_ics)
+            slope, intercept, r_value, p_value, std_err = linear_regression(t, log_ics)
 
             # Decay rate (negative slope means decay)
             decay_rate = -slope if slope < 0 else 0.0
@@ -533,7 +539,7 @@ class ICDecompositionAnalyzer:
             if n >= 12:
                 first_half = monthly_ics[: n // 2]
                 second_half = monthly_ics[n // 2:]
-                t_stat, p_val = stats.ttest_ind(first_half, second_half)
+                t_stat, p_val = t_test_independent(first_half, second_half)
                 regime_shift = p_val < 0.05
             else:
                 regime_shift = False

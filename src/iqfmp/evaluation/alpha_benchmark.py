@@ -19,7 +19,9 @@ import logging
 
 import numpy as np
 import pandas as pd
-from scipy import stats
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
 
 logger = logging.getLogger(__name__)
 
@@ -472,9 +474,9 @@ class AlphaBenchmarker:
                 if valid_mask.sum() < 20:
                     continue
 
-                ic, _ = stats.spearmanr(
-                    factor_values[valid_mask].values,
-                    forward_returns[valid_mask].values,
+                ic, _ = spearman_rank_correlation(
+                    factor_values[valid_mask],
+                    forward_returns[valid_mask],
                 )
 
                 # Calculate IC stability (IR)
@@ -528,9 +530,9 @@ class AlphaBenchmarker:
         if valid_mask.sum() < 20:
             raise ValueError("Insufficient valid data points for benchmarking")
 
-        factor_ic, _ = stats.spearmanr(
-            factor_values[valid_mask].values,
-            forward_returns[valid_mask].values,
+        factor_ic, _ = spearman_rank_correlation(
+            factor_values[valid_mask],
+            forward_returns[valid_mask],
         )
         factor_ic = float(factor_ic) if not np.isnan(factor_ic) else 0.0
 
@@ -577,9 +579,9 @@ class AlphaBenchmarker:
             try:
                 valid = ~(factor_values.isna() | bench_values.isna())
                 if valid.sum() > 20:
-                    corr, _ = stats.spearmanr(
-                        factor_values[valid].values,
-                        bench_values[valid].values,
+                    corr, _ = spearman_rank_correlation(
+                        factor_values[valid],
+                        bench_values[valid],
                     )
                     corr = abs(corr) if not np.isnan(corr) else 0.0
                     if corr > max_corr:
@@ -647,9 +649,9 @@ class AlphaBenchmarker:
 
             valid_mask = ~(f_window.isna() | r_window.isna())
             if valid_mask.sum() >= 5:
-                ic, _ = stats.spearmanr(
-                    f_window[valid_mask].values,
-                    r_window[valid_mask].values,
+                ic, _ = spearman_rank_correlation(
+                    f_window[valid_mask],
+                    r_window[valid_mask],
                 )
                 if not np.isnan(ic):
                     ic_values.append(ic)

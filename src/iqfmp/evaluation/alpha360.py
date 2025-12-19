@@ -16,7 +16,9 @@ from __future__ import annotations
 from typing import Callable
 import numpy as np
 import pandas as pd
-from scipy import stats
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import rank_percentile
 
 # =============================================================================
 # Alpha360 Factor Registry
@@ -59,11 +61,12 @@ def _decay_linear(series: pd.Series, window: int) -> pd.Series:
 
 
 def _ts_rank(series: pd.Series, window: int) -> pd.Series:
-    """Time-series rank (percentile within window)."""
-    return series.rolling(window).apply(
-        lambda x: stats.percentileofscore(x, x[-1]) / 100 if len(x) > 0 else np.nan,
-        raw=True
-    )
+    """Time-series rank (percentile within window).
+
+    Delegates to Qlib-native implementation for architectural consistency.
+    Returns value between 0 and 1 (rank_percentile returns 0-100, so we divide by 100).
+    """
+    return rank_percentile(series, window) / 100
 
 
 def _get_vwap(df: pd.DataFrame) -> pd.Series:

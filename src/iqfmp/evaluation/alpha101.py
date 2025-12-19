@@ -22,7 +22,9 @@ from __future__ import annotations
 from typing import Callable
 import numpy as np
 import pandas as pd
-from scipy.stats import rankdata
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import ts_rank as qlib_ts_rank
 
 
 # =============================================================================
@@ -30,13 +32,11 @@ from scipy.stats import rankdata
 # =============================================================================
 
 def ts_rank(series: pd.Series, window: int) -> pd.Series:
-    """Time-series rank over window."""
-    def rank_pct(x):
-        if len(x) == 0 or np.all(np.isnan(x)):
-            return np.nan
-        ranked = rankdata(x, nan_policy='omit')
-        return ranked[-1] / len(x[~np.isnan(x)])
-    return series.rolling(window).apply(rank_pct, raw=True)
+    """Time-series rank over window.
+
+    Delegates to Qlib-native implementation for architectural consistency.
+    """
+    return qlib_ts_rank(series, window)
 
 
 def ts_argmax(series: pd.Series, window: int) -> pd.Series:

@@ -15,6 +15,7 @@ Factor mining without deduplication leads to redundant factors and wasted comput
 """
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -36,6 +37,7 @@ from iqfmp.agents.orchestrator import (
     StateGraph,
     CheckpointSaver,
     MemorySaver,
+    PostgresCheckpointSaver,
 )
 from iqfmp.agents.hypothesis_agent import HypothesisAgent
 from iqfmp.agents.factor_generation import FactorGenerationAgent, FactorGenerationConfig
@@ -170,12 +172,27 @@ class PipelineBuilder:
         orchestrator = AgentOrchestrator(
             graph=self._graph,
             config=orchestrator_config,
-            checkpoint_saver=checkpoint_saver or MemorySaver(),
+            checkpoint_saver=checkpoint_saver or self._default_checkpoint_saver(),
         )
 
         logger.info(f"Pipeline built: {orchestrator.get_graph_structure()}")
 
         return orchestrator
+
+    def _default_checkpoint_saver(self) -> CheckpointSaver:
+        """Pick a checkpoint saver based on environment (Postgres → Memory fallback)."""
+        if not self.config.checkpoint_enabled:
+            return MemorySaver()
+
+        conn_str = os.getenv("CHECKPOINT_DB_URL") or os.getenv("DATABASE_URL")
+        if conn_str:
+            try:
+                logger.info("Using Postgres checkpoint saver for pipeline")
+                return PostgresCheckpointSaver(conn_str)
+            except Exception as e:
+                logger.warning(f"Postgres checkpoint saver unavailable ({e}), falling back to memory")
+
+        return MemorySaver()
 
     def _initialize_agents(self) -> None:
         """Initialize all agents with configs."""

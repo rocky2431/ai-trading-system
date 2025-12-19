@@ -110,10 +110,31 @@ export interface AgentConfigOperationResponse {
   config?: AgentConfigResponse
 }
 
+// WebSocket Message Types
+export type SystemWSMessageType =
+  | 'connected'
+  | 'resource_update'
+  | 'agent_update'
+  | 'task_update'
+  | 'factor_created'
+  | 'evaluation_complete'
+  | 'pong'
+
+export interface SystemWSMessage {
+  type: SystemWSMessageType
+  data: Record<string, unknown>
+}
+
 // System API
 export const systemApi = {
   // 获取完整系统状态
   getStatus: () => api.get<SystemStatusResponse>('/system/status'),
+
+  // 获取 Agent 列表
+  getAgents: () => api.get<AgentResponse[]>('/system/agents'),
+
+  // 获取任务队列
+  getTasks: () => api.get<TaskQueueItemResponse[]>('/system/tasks'),
 
   // 获取资源指标
   getResources: () => api.get<ResourceMetricsResponse>('/system/resources'),
@@ -127,4 +148,59 @@ export const systemApi = {
   updateAgentConfig: (agentType: AgentType, data: AgentConfigUpdateRequest) =>
     api.put<AgentConfigOperationResponse>(`/system/agent-configs/${agentType}`, data),
   initAgentConfigs: () => api.post<AgentConfigOperationResponse>('/system/agent-configs/init', {}),
+
+  // ============== WebSocket ==============
+
+  /**
+   * 创建系统 WebSocket 连接
+   */
+  createWebSocket: (): WebSocket => {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const wsHost = window.location.host
+    return new WebSocket(`${wsProtocol}//${wsHost}/api/v1/system/ws`)
+  },
+
+  /**
+   * WebSocket 消息处理工具
+   */
+  wsUtils: {
+    /**
+     * 发送 ping 消息
+     */
+    ping: (ws: WebSocket): void => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'ping' }))
+      }
+    },
+
+    /**
+     * 请求状态更新
+     */
+    requestStatus: (ws: WebSocket): void => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'get_status' }))
+      }
+    },
+
+    /**
+     * 订阅特定事件类型
+     */
+    subscribe: (ws: WebSocket, eventTypes: SystemWSMessageType[]): void => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'subscribe', event_types: eventTypes }))
+      }
+    },
+
+    /**
+     * 解析 WebSocket 消息
+     */
+    parseMessage: (event: MessageEvent): SystemWSMessage | null => {
+      try {
+        return JSON.parse(event.data) as SystemWSMessage
+      } catch {
+        console.error('Failed to parse WebSocket message:', event.data)
+        return null
+      }
+    },
+  },
 }

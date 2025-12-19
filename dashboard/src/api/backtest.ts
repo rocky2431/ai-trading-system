@@ -1,10 +1,14 @@
 /**
  * Backtest API - 策略回测相关 API 调用
+ *
+ * 注意: Strategy 相关 API 已迁移至独立的 strategies.ts 模块
+ * 本文件中的 Strategy API 已标记为 @deprecated
+ * 请使用 import { strategiesApi } from './strategies'
  */
 
 import { api } from './client'
 
-// ============== Strategy Types ==============
+// ============== Strategy Types (已废弃，请使用 strategies.ts) ==============
 
 export interface StrategyResponse {
   id: string
@@ -142,20 +146,37 @@ export interface GenericResponse {
 // ============== API Functions ==============
 
 export const backtestApi = {
-  // Strategy APIs
+  // ============== Strategy APIs (已废弃) ==============
+  // @deprecated 请使用 strategiesApi.create() 替代
+  /**
+   * @deprecated 已废弃，请使用 strategiesApi.create()
+   * 路由已迁移至 /strategies
+   */
   createStrategy: (data: StrategyCreateRequest) =>
     api.post<StrategyResponse>('/backtest/strategies', data),
 
+  /**
+   * @deprecated 已废弃，请使用 strategiesApi.list()
+   * 路由已迁移至 /strategies
+   */
   listStrategies: (params?: { page?: number; page_size?: number; status?: string }) =>
     api.get<StrategyListResponse>('/backtest/strategies', params),
 
+  /**
+   * @deprecated 已废弃，请使用 strategiesApi.get()
+   * 路由已迁移至 /strategies
+   */
   getStrategy: (strategyId: string) =>
     api.get<StrategyResponse>(`/backtest/strategies/${strategyId}`),
 
+  /**
+   * @deprecated 已废弃，请使用 strategiesApi.delete()
+   * 路由已迁移至 /strategies
+   */
   deleteStrategy: (strategyId: string) =>
     api.delete<GenericResponse>(`/backtest/strategies/${strategyId}`),
 
-  // Backtest APIs
+  // ============== Backtest APIs ==============
   createBacktest: (data: {
     strategy_id: string
     config: BacktestConfig

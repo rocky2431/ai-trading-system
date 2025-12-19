@@ -49,6 +49,12 @@ export interface FactorStatsResponse {
   by_status: Record<string, number>
   total_trials: number
   current_threshold: number
+  // Extended fields for monitoring dashboard (aligned with backend FactorStatsResponse)
+  evaluated_count: number
+  pass_rate: number
+  avg_ic: number
+  avg_sharpe: number
+  pending_count: number
 }
 
 export interface FactorEvaluateResponse {

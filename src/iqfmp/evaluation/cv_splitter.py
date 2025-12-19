@@ -12,6 +12,9 @@ from typing import Any, Iterator, Optional
 import pandas as pd
 import numpy as np
 
+# Use Qlib-native statistics for consistency
+from iqfmp.evaluation.qlib_stats import QlibStatisticalEngine
+
 
 class InvalidSplitError(Exception):
     """Raised when split configuration or data is invalid."""
@@ -487,6 +490,8 @@ class RegimeSplitter:
         self.volatility_bins = volatility_bins or [0.0, 0.02, 0.05, float("inf")]
         self.trend_window = trend_window
         self.trend_threshold = trend_threshold
+        # Use Qlib-native statistics for consistency
+        self._stats = QlibStatisticalEngine()
 
     def detect_volatility_regime(
         self,
@@ -494,6 +499,9 @@ class RegimeSplitter:
         price_column: str = "close",
     ) -> pd.Series:
         """Detect volatility regime for each data point.
+
+        Uses QlibStatisticalEngine for Qlib-consistent volatility calculation.
+        Equivalent to Qlib expression: Std($close, window)
 
         Args:
             data: DataFrame with price data
@@ -505,9 +513,12 @@ class RegimeSplitter:
         if price_column not in data.columns:
             raise InvalidSplitError(f"Price column '{price_column}' not found")
 
-        # Calculate rolling volatility
-        returns = data[price_column].pct_change()
-        volatility = returns.rolling(self.volatility_window).std()
+        # Calculate rolling volatility using Qlib-consistent method
+        # This is equivalent to Qlib's Std operator
+        volatility = self._stats.calculate_volatility(
+            data[price_column],
+            window=self.volatility_window,
+        )
 
         # Classify into regimes
         regime_labels = ["low_vol", "medium_vol", "high_vol"]
@@ -527,6 +538,9 @@ class RegimeSplitter:
     ) -> pd.Series:
         """Detect trend regime for each data point.
 
+        Uses QlibStatisticalEngine for Qlib-consistent trend calculation.
+        Equivalent to Qlib expression: Ref($close, window) / $close - 1
+
         Args:
             data: DataFrame with price data
             price_column: Name of price column
@@ -537,8 +551,12 @@ class RegimeSplitter:
         if price_column not in data.columns:
             raise InvalidSplitError(f"Price column '{price_column}' not found")
 
-        # Calculate rolling return
-        rolling_return = data[price_column].pct_change(self.trend_window)
+        # Calculate rolling return using Qlib-consistent method
+        # This is equivalent to Qlib's Ref operator for returns
+        rolling_return = self._stats.calculate_trend(
+            data[price_column],
+            window=self.trend_window,
+        )
 
         # Classify into regimes
         conditions = [

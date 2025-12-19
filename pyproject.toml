@@ -78,6 +78,9 @@ dev = [
 
 qlib = [
     "pyqlib>=0.9.0",
+    # Qlib backtest required dependencies
+    "gym>=0.26.0",           # Required for Qlib RL/backtest modules
+    "cvxpy>=1.4.0",          # Required for portfolio optimization
 ]
 
 [project.scripts]

@@ -14,8 +14,9 @@ from datetime import datetime
 from typing import Any, Optional
 import numpy as np
 import pandas as pd
-from scipy import stats
 
+# Use Qlib-native statistics instead of scipy
+from iqfmp.evaluation.qlib_stats import normal_ppf, normal_cdf
 from iqfmp.evaluation.factor_evaluator import MetricsCalculator, FactorMetrics
 
 
@@ -432,6 +433,8 @@ class WalkForwardValidator:
         Uses exponential decay model: IC(t) = IC(0) * exp(-λt)
         Half-life = ln(2) / λ
 
+        Uses manual linear regression to avoid scipy dependency.
+
         Returns:
             (decay_rate, half_life_periods)
         """
@@ -449,9 +452,21 @@ class WalkForwardValidator:
         t = np.arange(len(test_ics))[valid_mask]
         log_ics = np.log(test_ics[valid_mask])
 
-        # Linear regression on log(IC) vs t
+        # Manual linear regression on log(IC) vs t
+        # slope = Σ(x-x̄)(y-ȳ) / Σ(x-x̄)²
         try:
-            slope, intercept, r_value, p_value, std_err = stats.linregress(t, log_ics)
+            n = len(t)
+            t_mean = np.mean(t)
+            log_mean = np.mean(log_ics)
+
+            # Calculate slope using least squares
+            numerator = np.sum((t - t_mean) * (log_ics - log_mean))
+            denominator = np.sum((t - t_mean) ** 2)
+
+            if abs(denominator) < 1e-10:
+                return 0.0, 999
+
+            slope = numerator / denominator
 
             # Decay rate is negative of slope
             decay_rate = -slope if slope < 0 else 0.0
@@ -478,7 +493,7 @@ class WalkForwardValidator:
         Based on Bailey & Lopez de Prado (2014):
         DSR = (SR - E[max(SR)]) / σ[max(SR)]
 
-        Simplified approximation for practical use.
+        Uses Qlib-native normal distribution functions.
         """
         if n_windows <= 1:
             return raw_sharpe
@@ -492,8 +507,9 @@ class WalkForwardValidator:
 
         gamma = 0.5772156649
         try:
-            term1 = (1 - gamma) * stats.norm.ppf(1 - 1 / n_trials)
-            term2 = gamma * stats.norm.ppf(1 - 1 / (n_trials * np.e))
+            # Use Qlib-native normal_ppf instead of scipy
+            term1 = (1 - gamma) * normal_ppf(1 - 1 / n_trials)
+            term2 = gamma * normal_ppf(1 - 1 / (n_trials * np.e))
             expected_max_sr = term1 + term2
 
             # Variance of max Sharpe
@@ -505,7 +521,8 @@ class WalkForwardValidator:
 
             # Convert back to Sharpe-like scale
             # This is a probability that SR is not due to chance
-            p_value = 1 - stats.norm.cdf(deflated)
+            # Use Qlib-native normal_cdf instead of scipy
+            p_value = 1 - normal_cdf(deflated)
 
             # Return adjusted Sharpe (scaled by significance)
             significance_multiplier = max(0, 1 - 2 * p_value)  # 0 if p > 0.5, 1 if p < 0

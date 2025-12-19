@@ -53,6 +53,9 @@ class SandboxConfig:
 
     timeout_seconds: int = 60
     max_memory_mb: int = 512
+    # NOTE: scipy is intentionally EXCLUDED from allowed modules
+    # All statistical operations must go through qlib_stats for Qlib architectural consistency
+    # See: .ultra/docs/qlib-architecture-audit-report.md
     allowed_modules: list[str] = field(default_factory=lambda: [
         "math",
         "statistics",
@@ -75,7 +78,8 @@ class SandboxConfig:
         "base64",
         "pandas",
         "numpy",
-        "scipy",
+        # "scipy" - REMOVED: Use iqfmp.evaluation.qlib_stats instead
+        "iqfmp.evaluation.qlib_stats",  # Qlib-native statistical functions
     ])
 
 
@@ -236,9 +240,10 @@ class SandboxExecutor:
                     import numpy as np
                     exec_globals["numpy"] = np
                     exec_globals["np"] = np
-                elif module_name == "scipy":
-                    import scipy
-                    exec_globals["scipy"] = scipy
+                elif module_name == "iqfmp.evaluation.qlib_stats":
+                    # Provide Qlib-native statistical functions instead of scipy
+                    from iqfmp.evaluation import qlib_stats
+                    exec_globals["qlib_stats"] = qlib_stats
                 elif module_name == "math":
                     import math
                     exec_globals["math"] = math

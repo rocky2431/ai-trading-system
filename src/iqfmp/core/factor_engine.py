@@ -17,7 +17,9 @@ from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
-from scipy import stats
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
 
 # Qlib imports (with optional crypto extension)
 try:
@@ -820,9 +822,9 @@ class FactorEvaluator:
             # Overall IC
             valid_mask = ~(factor.isna() | fwd_returns.isna())
             if valid_mask.sum() > 10:
-                ic, _ = stats.spearmanr(
-                    factor[valid_mask].values,
-                    fwd_returns[valid_mask].values,
+                ic, _ = spearman_rank_correlation(
+                    factor[valid_mask],
+                    fwd_returns[valid_mask],
                 )
                 ic_results[f"ic_{period}d"] = float(ic) if not np.isnan(ic) else 0.0
 
@@ -837,9 +839,9 @@ class FactorEvaluator:
 
             valid_mask = ~(split_factor.isna() | split_returns.isna())
             if valid_mask.sum() > 10:
-                ic, _ = stats.spearmanr(
-                    split_factor[valid_mask].values,
-                    split_returns[valid_mask].values,
+                ic, _ = spearman_rank_correlation(
+                    split_factor[valid_mask],
+                    split_returns[valid_mask],
                 )
                 ic_by_split[split_name] = float(ic) if not np.isnan(ic) else 0.0
             else:
@@ -908,9 +910,9 @@ class FactorEvaluator:
 
             valid_mask = ~(f_window.isna() | r_window.isna())
             if valid_mask.sum() >= 5:
-                ic, _ = stats.spearmanr(
-                    f_window[valid_mask].values,
-                    r_window[valid_mask].values,
+                ic, _ = spearman_rank_correlation(
+                    f_window[valid_mask],
+                    r_window[valid_mask],
                 )
                 if not np.isnan(ic):
                     ic_values.append(ic)
@@ -993,9 +995,9 @@ class FactorEvaluator:
                 if len(group) > 5:
                     valid_mask = ~(group["factor"].isna() | group["fwd_returns_1d"].isna())
                     if valid_mask.sum() > 5:
-                        ic, _ = stats.spearmanr(
-                            group.loc[valid_mask, "factor"].values,
-                            group.loc[valid_mask, "fwd_returns_1d"].values,
+                        ic, _ = spearman_rank_correlation(
+                            group.loc[valid_mask, "factor"],
+                            group.loc[valid_mask, "fwd_returns_1d"],
                         )
                         if not np.isnan(ic):
                             monthly_ics.append(ic)
@@ -1041,9 +1043,9 @@ class FactorEvaluator:
         valid_mask = ~(regime_factor.isna() | regime_returns.isna())
 
         if valid_mask.sum() > 10:
-            ic, _ = stats.spearmanr(
-                regime_factor[valid_mask].values,
-                regime_returns[valid_mask].values,
+            ic, _ = spearman_rank_correlation(
+                regime_factor[valid_mask],
+                regime_returns[valid_mask],
             )
             return float(ic) if not np.isnan(ic) else 0.0
         return 0.0
@@ -1218,9 +1220,9 @@ class FactorEvaluator:
             valid = ~(factor.isna() | self._df["fwd_returns_1d"].isna())
 
             if valid.sum() > 30:
-                ic, p_value = stats.spearmanr(
-                    factor[valid].values,
-                    self._df.loc[valid, "fwd_returns_1d"].values,
+                ic, p_value = spearman_rank_correlation(
+                    factor[valid],
+                    self._df.loc[valid, "fwd_returns_1d"],
                 )
                 if not np.isnan(ic):
                     results.append({

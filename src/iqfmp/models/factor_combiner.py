@@ -326,9 +326,9 @@ class FactorCombiner:
         # IC
         ic = pred.corr(y_test)
 
-        # Rank IC
-        from scipy import stats
-        rank_ic, _ = stats.spearmanr(pred.values, y_test.values)
+        # Rank IC using Qlib-native function
+        from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
+        rank_ic, _ = spearman_rank_correlation(pred, y_test)
 
         # MSE
         mse = ((pred - y_test) ** 2).mean()

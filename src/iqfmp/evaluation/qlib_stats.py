@@ -433,6 +433,457 @@ class QlibRiskAnalyzer:
 
 
 # =============================================================================
+# Extended Statistical Functions (Replacing scipy)
+# =============================================================================
+
+def spearman_rank_correlation(x: pd.Series, y: pd.Series) -> Tuple[float, float]:
+    """Calculate Spearman rank correlation coefficient.
+
+    Replaces scipy.stats.spearmanr with a pure pandas implementation.
+
+    Args:
+        x: First series
+        y: Second series
+
+    Returns:
+        Tuple of (correlation coefficient, p-value)
+    """
+    # Remove NaN values
+    mask = ~(x.isna() | y.isna())
+    x_clean = x[mask]
+    y_clean = y[mask]
+
+    n = len(x_clean)
+    if n < 3:
+        return 0.0, 1.0
+
+    # Calculate ranks
+    x_rank = x_clean.rank()
+    y_rank = y_clean.rank()
+
+    # Spearman correlation = Pearson correlation of ranks
+    rho = x_rank.corr(y_rank)
+
+    if np.isnan(rho):
+        return 0.0, 1.0
+
+    # Calculate p-value using t-distribution approximation
+    # t = rho * sqrt((n-2)/(1-rho^2))
+    if abs(rho) >= 1.0:
+        p_value = 0.0
+    else:
+        t_stat = rho * math.sqrt((n - 2) / (1 - rho * rho))
+        # Use normal approximation for large n
+        p_value = 2 * (1 - normal_cdf(abs(t_stat)))
+
+    return float(rho), float(p_value)
+
+
+def ts_rank(series: pd.Series, window: int) -> pd.Series:
+    """Time-series rank over rolling window.
+
+    Replaces scipy.stats.rankdata in time-series context.
+    Returns the percentile rank of the last value within the window.
+
+    Args:
+        series: Input time series
+        window: Rolling window size
+
+    Returns:
+        Series of percentile ranks (0 to 1)
+    """
+    def _rank_pct(arr: np.ndarray) -> float:
+        if len(arr) == 0:
+            return np.nan
+        valid = arr[~np.isnan(arr)]
+        if len(valid) == 0:
+            return np.nan
+        last_val = arr[-1]
+        if np.isnan(last_val):
+            return np.nan
+        # Count how many values are less than or equal to the last value
+        rank = np.sum(valid <= last_val)
+        return rank / len(valid)
+
+    return series.rolling(window).apply(_rank_pct, raw=True)
+
+
+def rank_percentile(series: pd.Series, window: int) -> pd.Series:
+    """Calculate percentile rank within a rolling window.
+
+    Replaces scipy.stats.percentileofscore in rolling context.
+
+    Args:
+        series: Input series
+        window: Rolling window size
+
+    Returns:
+        Series of percentile scores (0 to 100)
+    """
+    def _percentile_score(arr: np.ndarray) -> float:
+        if len(arr) == 0:
+            return np.nan
+        valid = arr[~np.isnan(arr)]
+        if len(valid) == 0:
+            return np.nan
+        last_val = arr[-1]
+        if np.isnan(last_val):
+            return np.nan
+        # Strict percentile: count of values strictly less than x
+        below = np.sum(valid < last_val)
+        equal = np.sum(valid == last_val)
+        # Use 'mean' method like scipy default
+        percentile = (below + 0.5 * equal) / len(valid) * 100
+        return percentile
+
+    return series.rolling(window).apply(_percentile_score, raw=True)
+
+
+def linear_regression(
+    x: np.ndarray, y: np.ndarray
+) -> Tuple[float, float, float, float, float]:
+    """Perform simple linear regression.
+
+    Replaces scipy.stats.linregress with pure numpy implementation.
+
+    Args:
+        x: Independent variable
+        y: Dependent variable
+
+    Returns:
+        Tuple of (slope, intercept, r_value, p_value, std_err)
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+
+    # Remove NaN
+    mask = ~(np.isnan(x) | np.isnan(y))
+    x = x[mask]
+    y = y[mask]
+
+    n = len(x)
+    if n < 2:
+        return 0.0, 0.0, 0.0, 1.0, 0.0
+
+    # Calculate means
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
+
+    # Calculate slope and intercept
+    ss_xy = np.sum((x - x_mean) * (y - y_mean))
+    ss_xx = np.sum((x - x_mean) ** 2)
+
+    if abs(ss_xx) < 1e-10:
+        return 0.0, y_mean, 0.0, 1.0, 0.0
+
+    slope = ss_xy / ss_xx
+    intercept = y_mean - slope * x_mean
+
+    # Calculate R-squared
+    y_pred = slope * x + intercept
+    ss_res = np.sum((y - y_pred) ** 2)
+    ss_tot = np.sum((y - y_mean) ** 2)
+
+    if abs(ss_tot) < 1e-10:
+        r_value = 0.0
+    else:
+        r_squared = 1 - ss_res / ss_tot
+        r_value = math.sqrt(max(r_squared, 0)) * np.sign(slope)
+
+    # Calculate standard error of slope
+    if n > 2:
+        mse = ss_res / (n - 2)
+        std_err = math.sqrt(mse / ss_xx) if ss_xx > 0 else 0.0
+    else:
+        std_err = 0.0
+
+    # Calculate p-value using t-distribution approximation
+    if std_err > 1e-10:
+        t_stat = slope / std_err
+        # Use normal approximation for p-value
+        p_value = 2 * (1 - normal_cdf(abs(t_stat)))
+    else:
+        p_value = 0.0 if abs(slope) > 1e-10 else 1.0
+
+    return float(slope), float(intercept), float(r_value), float(p_value), float(std_err)
+
+
+def t_test_independent(
+    a: np.ndarray, b: np.ndarray, equal_var: bool = True
+) -> Tuple[float, float]:
+    """Perform independent samples t-test.
+
+    Replaces scipy.stats.ttest_ind with pure numpy implementation.
+
+    Args:
+        a: First sample
+        b: Second sample
+        equal_var: Whether to assume equal variances
+
+    Returns:
+        Tuple of (t_statistic, p_value)
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+
+    # Remove NaN
+    a = a[~np.isnan(a)]
+    b = b[~np.isnan(b)]
+
+    n1, n2 = len(a), len(b)
+    if n1 < 2 or n2 < 2:
+        return 0.0, 1.0
+
+    mean1, mean2 = np.mean(a), np.mean(b)
+    var1, var2 = np.var(a, ddof=1), np.var(b, ddof=1)
+
+    if equal_var:
+        # Pooled variance
+        pooled_var = ((n1 - 1) * var1 + (n2 - 1) * var2) / (n1 + n2 - 2)
+        se = math.sqrt(pooled_var * (1/n1 + 1/n2))
+        df = n1 + n2 - 2
+    else:
+        # Welch's t-test
+        se = math.sqrt(var1/n1 + var2/n2)
+        # Welch-Satterthwaite degrees of freedom
+        num = (var1/n1 + var2/n2) ** 2
+        den = (var1/n1)**2/(n1-1) + (var2/n2)**2/(n2-1)
+        df = num / den if den > 0 else n1 + n2 - 2
+
+    if se < 1e-10:
+        return 0.0, 1.0
+
+    t_stat = (mean1 - mean2) / se
+
+    # Use normal approximation for large df
+    p_value = 2 * (1 - normal_cdf(abs(t_stat)))
+
+    return float(t_stat), float(p_value)
+
+
+def hierarchical_cluster(
+    distance_matrix: np.ndarray,
+    method: str = "average",
+    threshold: float = 0.5,
+) -> np.ndarray:
+    """Perform hierarchical clustering.
+
+    Simplified implementation replacing scipy.cluster.hierarchy.
+    Uses a basic agglomerative approach.
+
+    Args:
+        distance_matrix: Symmetric distance/dissimilarity matrix
+        method: Linkage method ('single', 'complete', 'average')
+        threshold: Distance threshold for forming clusters
+
+    Returns:
+        Array of cluster labels (0-indexed)
+    """
+    n = distance_matrix.shape[0]
+    if n == 0:
+        return np.array([])
+    if n == 1:
+        return np.array([0])
+
+    # Initialize: each point in its own cluster
+    cluster_labels = np.arange(n)
+    active_clusters = set(range(n))
+
+    # Create working copy of distance matrix
+    dist = distance_matrix.copy()
+    np.fill_diagonal(dist, np.inf)
+
+    # Agglomerative clustering
+    while len(active_clusters) > 1:
+        # Find minimum distance between active clusters
+        min_dist = np.inf
+        merge_i, merge_j = -1, -1
+
+        active_list = sorted(active_clusters)
+        for i_idx, i in enumerate(active_list):
+            for j in active_list[i_idx + 1:]:
+                if dist[i, j] < min_dist:
+                    min_dist = dist[i, j]
+                    merge_i, merge_j = i, j
+
+        # Stop if minimum distance exceeds threshold
+        if min_dist > threshold or merge_i < 0:
+            break
+
+        # Merge clusters: assign all points in j's cluster to i's cluster
+        old_label = cluster_labels[merge_j]
+        new_label = cluster_labels[merge_i]
+        cluster_labels[cluster_labels == old_label] = new_label
+
+        # Update distances based on linkage method
+        for k in active_clusters:
+            if k != merge_i and k != merge_j:
+                if method == "single":
+                    new_dist = min(dist[merge_i, k], dist[merge_j, k])
+                elif method == "complete":
+                    new_dist = max(dist[merge_i, k], dist[merge_j, k])
+                else:  # average
+                    new_dist = (dist[merge_i, k] + dist[merge_j, k]) / 2
+                dist[merge_i, k] = dist[k, merge_i] = new_dist
+
+        # Remove j from active clusters
+        active_clusters.remove(merge_j)
+
+    # Relabel clusters to be contiguous
+    unique_labels = np.unique(cluster_labels)
+    label_map = {old: new for new, old in enumerate(unique_labels)}
+    return np.array([label_map[label] for label in cluster_labels])
+
+
+def calculate_var(
+    returns: pd.Series, confidence: float = 0.95
+) -> float:
+    """Calculate Value at Risk (VaR).
+
+    Args:
+        returns: Return series
+        confidence: Confidence level (e.g., 0.95 for 95%)
+
+    Returns:
+        VaR value (positive number representing loss)
+    """
+    returns = returns.dropna()
+    if len(returns) == 0:
+        return 0.0
+
+    # Historical VaR: percentile of returns
+    var = -np.percentile(returns, (1 - confidence) * 100)
+    return float(max(var, 0))
+
+
+def calculate_expected_shortfall(
+    returns: pd.Series, confidence: float = 0.95
+) -> float:
+    """Calculate Expected Shortfall (Conditional VaR).
+
+    Args:
+        returns: Return series
+        confidence: Confidence level (e.g., 0.95 for 95%)
+
+    Returns:
+        Expected Shortfall value (positive number representing expected loss)
+    """
+    returns = returns.dropna()
+    if len(returns) == 0:
+        return 0.0
+
+    var = calculate_var(returns, confidence)
+    # Average of returns worse than VaR
+    tail_returns = returns[returns < -var]
+
+    if len(tail_returns) == 0:
+        return var
+
+    es = -float(tail_returns.mean())
+    return max(es, 0)
+
+
+def calculate_sortino_ratio(
+    returns: pd.Series,
+    target_return: float = 0.0,
+    periods_per_year: int = 252,
+) -> float:
+    """Calculate Sortino Ratio.
+
+    Args:
+        returns: Return series
+        target_return: Target/minimum acceptable return
+        periods_per_year: Periods for annualization
+
+    Returns:
+        Sortino ratio
+    """
+    returns = returns.dropna()
+    if len(returns) < 2:
+        return 0.0
+
+    excess_returns = returns - target_return / periods_per_year
+    mean_excess = excess_returns.mean()
+
+    # Downside deviation (only negative returns)
+    negative_returns = excess_returns[excess_returns < 0]
+    if len(negative_returns) == 0:
+        return float('inf') if mean_excess > 0 else 0.0
+
+    downside_std = np.sqrt(np.mean(negative_returns ** 2))
+
+    if downside_std < 1e-10:
+        return 0.0
+
+    return float(mean_excess / downside_std * np.sqrt(periods_per_year))
+
+
+def calculate_calmar_ratio(
+    returns: pd.Series, periods_per_year: int = 252
+) -> float:
+    """Calculate Calmar Ratio (Annual Return / Max Drawdown).
+
+    Args:
+        returns: Return series
+        periods_per_year: Periods for annualization
+
+    Returns:
+        Calmar ratio
+    """
+    returns = returns.dropna()
+    if len(returns) == 0:
+        return 0.0
+
+    # Annualized return
+    total_return = (1 + returns).prod() - 1
+    n_periods = len(returns)
+    years = n_periods / periods_per_year
+    if years <= 0:
+        return 0.0
+    annual_return = (1 + total_return) ** (1 / years) - 1
+
+    # Max drawdown
+    cum_returns = (1 + returns).cumprod()
+    running_max = cum_returns.expanding().max()
+    drawdown = (cum_returns - running_max) / running_max
+    max_dd = abs(drawdown.min())
+
+    if max_dd < 1e-10:
+        return 0.0
+
+    return float(annual_return / max_dd)
+
+
+def calculate_information_ratio(
+    returns: pd.Series,
+    benchmark_returns: pd.Series,
+    periods_per_year: int = 252,
+) -> float:
+    """Calculate Information Ratio.
+
+    Args:
+        returns: Portfolio return series
+        benchmark_returns: Benchmark return series
+        periods_per_year: Periods for annualization
+
+    Returns:
+        Information ratio
+    """
+    # Align series
+    aligned = pd.concat([returns, benchmark_returns], axis=1).dropna()
+    if len(aligned) < 2:
+        return 0.0
+
+    excess = aligned.iloc[:, 0] - aligned.iloc[:, 1]
+    tracking_error = excess.std()
+
+    if tracking_error < 1e-10:
+        return 0.0
+
+    return float(excess.mean() / tracking_error * np.sqrt(periods_per_year))
+
+
+# =============================================================================
 # Standalone Normal Distribution Functions (No scipy dependency)
 # =============================================================================
 
@@ -503,6 +954,7 @@ def normal_cdf(x: float) -> float:
 # =============================================================================
 
 __all__ = [
+    # Core classes
     "QlibNotAvailableError",
     "QlibStatisticalEngine",
     "DeflatedSharpeCalculator",
@@ -510,6 +962,24 @@ __all__ = [
     "QlibRiskAnalyzer",
     "RiskMetrics",
     "QLIB_AVAILABLE",
+    # Distribution functions (replacing scipy.stats.norm)
     "normal_ppf",
     "normal_cdf",
+    # Correlation functions (replacing scipy.stats.spearmanr)
+    "spearman_rank_correlation",
+    # Ranking functions (replacing scipy.stats.rankdata/percentileofscore)
+    "ts_rank",
+    "rank_percentile",
+    # Regression functions (replacing scipy.stats.linregress)
+    "linear_regression",
+    # Statistical tests (replacing scipy.stats.ttest_ind)
+    "t_test_independent",
+    # Clustering (replacing scipy.cluster.hierarchy)
+    "hierarchical_cluster",
+    # Risk metrics (replacing custom implementations)
+    "calculate_var",
+    "calculate_expected_shortfall",
+    "calculate_sortino_ratio",
+    "calculate_calmar_ratio",
+    "calculate_information_ratio",
 ]

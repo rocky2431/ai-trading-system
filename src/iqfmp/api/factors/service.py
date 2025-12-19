@@ -1032,14 +1032,14 @@ class FactorService:
 
     def _calculate_ic(self, factor_values: pd.Series, returns: pd.Series) -> float:
         """Calculate Information Coefficient (Spearman correlation)."""
-        from scipy import stats
+        from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
 
         mask = ~(factor_values.isna() | returns.isna())
         if mask.sum() < 10:
             return 0.0
 
-        corr, _ = stats.spearmanr(
-            factor_values[mask].values, returns[mask].values
+        corr, _ = spearman_rank_correlation(
+            factor_values[mask], returns[mask]
         )
         return float(corr) if not np.isnan(corr) else 0.0
 
@@ -1050,14 +1050,14 @@ class FactorService:
         volume: Optional[pd.Series] = None,
     ) -> dict:
         """Calculate core factor metrics."""
-        from scipy import stats
+        from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
 
         metrics = {}
 
         # IC (Information Coefficient)
         mask = ~(factor_values.isna() | returns.isna())
         if mask.sum() > 10:
-            ic, _ = stats.spearmanr(factor_values[mask].values, returns[mask].values)
+            ic, _ = spearman_rank_correlation(factor_values[mask], returns[mask])
             metrics["ic_mean"] = float(ic) if not np.isnan(ic) else 0.0
         else:
             metrics["ic_mean"] = 0.0
@@ -1070,7 +1070,7 @@ class FactorService:
             r_window = returns.iloc[i - window:i]
             m = ~(f_window.isna() | r_window.isna())
             if m.sum() >= 5:
-                ic_val, _ = stats.spearmanr(f_window[m].values, r_window[m].values)
+                ic_val, _ = spearman_rank_correlation(f_window[m], r_window[m])
                 if not np.isnan(ic_val):
                     ic_series.append(ic_val)
 
@@ -1544,8 +1544,8 @@ class FactorService:
         # Calculate real correlation matrix using factor values
         from iqfmp.core.factor_engine import FactorEngine
         from iqfmp.core.data_provider import DataProvider
+        from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
         import numpy as np
-        from scipy import stats
 
         correlation_matrix: dict[str, dict[str, float]] = {}
 
@@ -1576,12 +1576,12 @@ class FactorService:
                     else:
                         v2 = factor_values_dict.get(f2.id)
                         if v1 is not None and v2 is not None:
-                            # Calculate Spearman correlation
+                            # Calculate Spearman correlation using Qlib-native function
                             valid_mask = ~(v1.isna() | v2.isna())
                             if valid_mask.sum() > 10:
-                                corr, _ = stats.spearmanr(
-                                    v1[valid_mask].values,
-                                    v2[valid_mask].values,
+                                corr, _ = spearman_rank_correlation(
+                                    v1[valid_mask],
+                                    v2[valid_mask],
                                 )
                                 correlation_matrix[f1.id][f2.id] = round(float(corr), 4) if not np.isnan(corr) else 0.0
                             else:

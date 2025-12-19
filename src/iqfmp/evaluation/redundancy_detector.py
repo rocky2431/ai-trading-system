@@ -15,9 +15,12 @@ from datetime import datetime
 from typing import Any, Optional
 import numpy as np
 import pandas as pd
-from scipy import stats
-from scipy.cluster.hierarchy import linkage, fcluster
-from scipy.spatial.distance import squareform
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import (
+    spearman_rank_correlation,
+    hierarchical_cluster,
+)
 
 
 class InsufficientFactorsError(Exception):
@@ -239,21 +242,13 @@ class RedundancyDetector:
         distance_matrix = np.maximum(distance_matrix, 0)
         np.fill_diagonal(distance_matrix, 0)
 
-        # Convert to condensed form for scipy
-        condensed_dist = squareform(distance_matrix)
-
-        # Perform hierarchical clustering
-        linkage_matrix = linkage(
-            condensed_dist,
-            method=self.config.linkage_method,
-        )
-
-        # Cut tree at threshold (distance = 1 - correlation_threshold)
+        # Use Qlib-native hierarchical clustering
+        # threshold = 1 - correlation_threshold (distance threshold)
         distance_threshold = 1 - self.config.correlation_threshold
-        cluster_labels = fcluster(
-            linkage_matrix,
-            t=distance_threshold,
-            criterion="distance",
+        cluster_labels = hierarchical_cluster(
+            distance_matrix,
+            method=self.config.linkage_method,
+            threshold=distance_threshold,
         )
 
         # Group factors by cluster
@@ -444,8 +439,10 @@ class IncrementalRedundancyChecker:
         for existing_name in self.factor_names:
             existing = self.existing_factors[existing_name]
 
-            # Calculate Spearman correlation
-            corr, _ = stats.spearmanr(new_factor, existing, nan_policy="omit")
+            # Calculate Spearman correlation using Qlib-native function
+            corr, _ = spearman_rank_correlation(
+                pd.Series(new_factor), pd.Series(existing)
+            )
 
             if not np.isnan(corr) and abs(corr) > max_corr:
                 max_corr = abs(corr)

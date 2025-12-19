@@ -20,7 +20,9 @@ from __future__ import annotations
 from typing import Callable
 import numpy as np
 import pandas as pd
-from scipy import stats
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import rank_percentile
 
 # =============================================================================
 # Alpha158 Factor Registry
@@ -46,6 +48,18 @@ def _safe_divide(a: pd.Series, b: pd.Series) -> pd.Series:
     return a / (b + 1e-10)
 
 
+def _window_percentile_rank(x: pd.Series) -> float:
+    """Calculate percentile rank of last value within window.
+
+    Pure numpy/pandas implementation replacing scipy.stats.percentileofscore.
+    Returns value between 0 and 1 (normalized percentile).
+    """
+    last_val = x.iloc[-1]
+    n = len(x)
+    # Percentile: proportion of values less than or equal to last value
+    return (x <= last_val).sum() / n
+
+
 def _ema(series: pd.Series, window: int) -> pd.Series:
     """Exponential moving average."""
     return series.ewm(span=window, adjust=False).mean()
@@ -61,11 +75,12 @@ def _wma(series: pd.Series, window: int) -> pd.Series:
 
 
 def _ts_rank(series: pd.Series, window: int) -> pd.Series:
-    """Time-series rank (percentile within window)."""
-    return series.rolling(window).apply(
-        lambda x: stats.percentileofscore(x, x[-1]) / 100 if len(x) > 0 else np.nan,
-        raw=True
-    )
+    """Time-series rank (percentile within window).
+
+    Delegates to Qlib-native implementation for architectural consistency.
+    Returns value between 0 and 1 (rank_percentile returns 0-100, so we divide by 100).
+    """
+    return rank_percentile(series, window) / 100
 
 
 # =============================================================================
@@ -1218,7 +1233,7 @@ def qtlu20(df: pd.DataFrame) -> pd.Series:
 def rank5(df: pd.DataFrame) -> pd.Series:
     """Rank of close within 5-period window."""
     return df["close"].rolling(5).apply(
-        lambda x: stats.percentileofscore(x, x.iloc[-1]) / 100,
+        _window_percentile_rank,
         raw=False,
     )
 
@@ -1227,7 +1242,7 @@ def rank5(df: pd.DataFrame) -> pd.Series:
 def rank10(df: pd.DataFrame) -> pd.Series:
     """Rank of close within 10-period window."""
     return df["close"].rolling(10).apply(
-        lambda x: stats.percentileofscore(x, x.iloc[-1]) / 100,
+        _window_percentile_rank,
         raw=False,
     )
 
@@ -1236,7 +1251,7 @@ def rank10(df: pd.DataFrame) -> pd.Series:
 def rank20(df: pd.DataFrame) -> pd.Series:
     """Rank of close within 20-period window."""
     return df["close"].rolling(20).apply(
-        lambda x: stats.percentileofscore(x, x.iloc[-1]) / 100,
+        _window_percentile_rank,
         raw=False,
     )
 

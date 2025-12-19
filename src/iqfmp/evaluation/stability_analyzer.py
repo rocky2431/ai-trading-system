@@ -14,7 +14,12 @@ from enum import Enum
 from typing import Any, Optional
 import numpy as np
 import pandas as pd
-from scipy import stats
+
+# Use Qlib-native statistical functions instead of scipy
+from iqfmp.evaluation.qlib_stats import (
+    linear_regression,
+    spearman_rank_correlation,
+)
 
 
 class InvalidDataError(Exception):
@@ -287,11 +292,11 @@ class TimeStabilityAnalyzer:
                 has_decay=False, decay_rate=0.0, p_value=1.0, trend_strength=0.0
             )
 
-        # Linear regression on IC over time
+        # Linear regression on IC over time using Qlib-native function
         x = np.arange(len(ic_series))
         y = ic_series.values
 
-        slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+        slope, intercept, r_value, p_value, std_err = linear_regression(x, y)
 
         has_decay = bool(slope < 0 and p_value < 0.1)
         trend_strength = abs(r_value)

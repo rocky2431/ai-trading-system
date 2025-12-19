@@ -26,6 +26,13 @@ import pandas as pd
 
 from iqfmp.agents.orchestrator import AgentState
 
+# Import SignalConverter for factor-to-signal conversion
+try:
+    from iqfmp.core.signal_converter import SignalConverter, SignalConfig
+    SIGNAL_CONVERTER_AVAILABLE = True
+except ImportError:
+    SIGNAL_CONVERTER_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 # Qlib Backtest Integration - Full Import
@@ -700,28 +707,41 @@ class BacktestOptimizationAgent:
 
         Args:
             config: Backtest configuration
+
+        Raises:
+            RuntimeError: If Qlib is not available (Qlib is REQUIRED)
         """
         self.config = config or BacktestConfig()
+        self.signal_converter: Optional[SignalConverter] = None
 
-        # Use QlibBacktestEngine as PRIMARY engine (REQUIRED for production)
-        if QLIB_AVAILABLE:
-            self.engine = QlibBacktestEngine(
-                commission_rate=self.config.commission_rate,
-                slippage_rate=self.config.slippage_rate,
-                initial_cash=1_000_000.0,
-                freq="day",  # Can be configured based on data frequency
-            )
-            logger.info(
-                f"BacktestOptimizationAgent: Using QlibBacktestEngine "
-                f"(Qlib initialized: {QLIB_INITIALIZED})"
-            )
-        else:
-            # CRITICAL: Qlib is required for IQFMP
+        # Initialize SignalConverter if available (for factor-to-signal conversion)
+        if SIGNAL_CONVERTER_AVAILABLE:
+            self.signal_converter = SignalConverter(SignalConfig(
+                normalize_method="zscore",
+                max_position=0.1,
+            ))
+            logger.info("BacktestOptimizationAgent: SignalConverter initialized")
+
+        # Qlib is REQUIRED for all backtests - no fallback options
+        if not QLIB_AVAILABLE:
             raise RuntimeError(
-                "CRITICAL: Qlib is not available. IQFMP requires Qlib for all backtests. "
-                "Please ensure PYTHONPATH includes vendor/qlib and all Qlib dependencies are installed. "
-                "Run: pip install qlib loguru gym"
+                "CRITICAL: Qlib is REQUIRED for backtesting. "
+                "No fallback engines are allowed. "
+                "Please ensure Qlib is installed and PYTHONPATH includes vendor/qlib. "
+                "Run: pip install qlib"
             )
+
+        # Initialize QlibBacktestEngine as the ONLY backtest engine
+        self.engine = QlibBacktestEngine(
+            commission_rate=self.config.commission_rate,
+            slippage_rate=self.config.slippage_rate,
+            initial_cash=1_000_000.0,
+            freq="day",  # Can be configured based on data frequency
+        )
+        logger.info(
+            f"BacktestOptimizationAgent: Using QlibBacktestEngine "
+            f"(Qlib initialized: {QLIB_INITIALIZED})"
+        )
 
     async def optimize(self, state: AgentState) -> AgentState:
         """Run backtest optimization on strategy.
@@ -746,6 +766,29 @@ class BacktestOptimizationAgent:
         strategy_result = context.get("strategy_result")
         strategy_signals = context.get("strategy_signals")
         price_data = context.get("price_data")
+        factor_values = context.get("factor_values")  # From factor generation
+
+        # Convert factor_values to signals using SignalConverter if available
+        if factor_values is not None and self.signal_converter:
+            try:
+                if isinstance(factor_values, dict):
+                    factor_series = pd.Series(factor_values.get("values", factor_values))
+                elif isinstance(factor_values, pd.DataFrame):
+                    factor_series = factor_values["value"] if "value" in factor_values.columns else factor_values.iloc[:, 0]
+                elif isinstance(factor_values, pd.Series):
+                    factor_series = factor_values
+                else:
+                    factor_series = None
+
+                if factor_series is not None:
+                    converted_signal = self.signal_converter.to_signal(factor_series)
+                    logger.info(f"Converted factor_values to trading signal: {len(converted_signal)} points")
+
+                    # Use converted signal if no strategy_signals provided
+                    if not strategy_signals:
+                        strategy_signals = [{"combined_signal": v} for v in converted_signal]
+            except Exception as e:
+                logger.warning(f"Failed to convert factor_values: {e}")
 
         if not strategy_result:
             logger.warning("No strategy to backtest")

@@ -15,6 +15,9 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - PYTHONPATH=/app/src:/app/vendor/qlib
+      - QLIB_AUTO_INIT=true
+      - QLIB_DATA_DIR=/home/iqfmp/.qlib/qlib_data
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
@@ -55,11 +58,15 @@ services:
       dockerfile: Dockerfile
     container_name: iqfmp-celery-worker
     restart: unless-stopped
-    command: celery -A iqfmp.celery_app.app worker --loglevel=info --concurrency=4
+    command: celery -A iqfmp.celery_app.app worker --loglevel=info --concurrency=4 -Q high,default,low
     environment:
       - DATABASE_URL=postgresql://iqfmp:iqfmp@timescaledb:5432/iqfmp
       - REDIS_URL=redis://redis:6379/0
       - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - PYTHONPATH=/app/src:/app/vendor/qlib
+      - QLIB_AUTO_INIT=true
+      - QLIB_DATA_DIR=/home/iqfmp/.qlib/qlib_data
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     depends_on:
       - backend

@@ -1,4 +1,1 @@
-"""
-集成测试套件
-覆盖因子生成→评估→策略→回测完整流程
-"""
+"""Integration tests for IQFMP fixed pipeline."""

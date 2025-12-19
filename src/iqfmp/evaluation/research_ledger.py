@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-from scipy import stats
+
+# Use Qlib-native statistics instead of scipy
+from iqfmp.evaluation.qlib_stats import normal_ppf, normal_cdf
 
 
 class InvalidTrialError(Exception):
@@ -181,7 +183,7 @@ class DynamicThreshold:
 
         # Get z-score for confidence level
         # Higher confidence → higher z-score → higher threshold
-        z_score = stats.norm.ppf(self.config.confidence_level)
+        z_score = normal_ppf(self.config.confidence_level)
 
         # Confidence multiplier: higher confidence means stricter threshold
         confidence_multiplier = z_score / 1.645  # Normalize to 95% baseline
@@ -234,7 +236,7 @@ class DynamicThreshold:
         )
 
         # 3. Get z-score for confidence level
-        z_alpha = stats.norm.ppf(self.config.confidence_level)
+        z_alpha = normal_ppf(self.config.confidence_level)
 
         # 4. Deflated Sharpe Ratio threshold
         # Requirement: SR_observed > E[max(SR)] + z_alpha * SE(SR)
@@ -263,7 +265,7 @@ class DynamicThreshold:
 
         # Use the quantile function for expected max of n normals
         # This is more accurate than the sqrt(2*ln(n)) approximation
-        quantile = stats.norm.ppf(1 - 1 / n)
+        quantile = normal_ppf(1 - 1 / n)
         return float(quantile * np.sqrt(variance))
 
     def _sharpe_standard_error(
@@ -350,7 +352,7 @@ class DynamicThreshold:
             deflated_sr = observed_sharpe - e_max
 
         # P-value: probability of observing this DSR under null
-        p_value = 1.0 - stats.norm.cdf(deflated_sr)
+        p_value = 1.0 - normal_cdf(deflated_sr)
 
         return float(deflated_sr), float(p_value)
 

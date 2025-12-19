@@ -122,6 +122,56 @@ init_database() {
     fi
 }
 
+# ==================== Phase 2.5: Qlib Verification ====================
+verify_qlib() {
+    log_info "Verifying Qlib backtest engine availability..."
+
+    # Activate virtual environment
+    if [ -f ".venv/bin/activate" ]; then
+        source .venv/bin/activate
+    fi
+
+    # Set PYTHONPATH
+    export PYTHONPATH="src:vendor/qlib:$PYTHONPATH"
+
+    # Check Qlib availability
+    QLIB_CHECK=$(python3 -c "
+try:
+    from iqfmp.agents.backtest_agent import QLIB_AVAILABLE
+    print('AVAILABLE' if QLIB_AVAILABLE else 'UNAVAILABLE')
+except Exception as e:
+    print(f'ERROR:{e}')
+" 2>&1)
+
+    if [ "$QLIB_CHECK" = "AVAILABLE" ]; then
+        log_success "Qlib backtest engine: READY"
+    elif [[ "$QLIB_CHECK" == ERROR:* ]]; then
+        log_error "Qlib check failed: ${QLIB_CHECK#ERROR:}"
+        log_info "Attempting to install missing Qlib dependencies..."
+        pip install gym cvxpy
+        # Retry check
+        QLIB_RETRY=$(python3 -c "
+try:
+    from iqfmp.agents.backtest_agent import QLIB_AVAILABLE
+    print('AVAILABLE' if QLIB_AVAILABLE else 'UNAVAILABLE')
+except:
+    print('UNAVAILABLE')
+" 2>&1)
+        if [ "$QLIB_RETRY" = "AVAILABLE" ]; then
+            log_success "Qlib backtest engine: READY (after installing dependencies)"
+        else
+            log_error "CRITICAL: Qlib is REQUIRED for backtesting but unavailable!"
+            log_error "Please run: pip install gym cvxpy"
+            exit 1
+        fi
+    else
+        log_error "CRITICAL: Qlib is REQUIRED for backtesting but unavailable!"
+        log_error "Please ensure vendor/qlib is in PYTHONPATH and dependencies are installed"
+        log_error "Run: pip install gym cvxpy"
+        exit 1
+    fi
+}
+
 # ==================== Phase 3: Backend ====================
 start_backend() {
     log_info "Starting backend API server..."
@@ -259,6 +309,8 @@ case "$MODE" in
         start_infrastructure
         echo ""
         init_database
+        echo ""
+        verify_qlib
         echo ""
         start_backend
         echo ""

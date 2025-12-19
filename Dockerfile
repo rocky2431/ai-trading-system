@@ -10,12 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies
-COPY pyproject.toml setup.py ./
+# Copy source code
+COPY pyproject.toml ./
 COPY src/ ./src/
+COPY vendor/qlib/ ./vendor/qlib/
 
+# Install Python dependencies including Qlib extras
 RUN pip install --no-cache-dir build && \
-    pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -e .
+    pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -e ".[qlib]"
 
 # ==================== Production Stage ====================
 FROM python:3.11-slim as production
@@ -34,14 +36,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy wheels from builder
 COPY --from=builder /app/wheels /wheels
 COPY --from=builder /app/src /app/src
+COPY --from=builder /app/vendor/qlib /app/vendor/qlib
 COPY --from=builder /app/pyproject.toml /app/
 
-# Install application
+# Install application with Qlib dependencies
 RUN pip install --no-cache-dir /wheels/*.whl && \
+    pip install --no-cache-dir gym cvxpy && \
     rm -rf /wheels
 
 # Copy application code
 COPY src/ /app/src/
+COPY vendor/qlib/ /app/vendor/qlib/
 
 # Set ownership
 RUN chown -R iqfmp:iqfmp /app
@@ -49,10 +54,15 @@ RUN chown -R iqfmp:iqfmp /app
 # Switch to non-root user
 USER iqfmp
 
+# Create Qlib data directory
+RUN mkdir -p /home/iqfmp/.qlib/qlib_data
+
 # Environment variables
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app/src \
+    PYTHONPATH=/app/src:/app/vendor/qlib \
+    QLIB_AUTO_INIT=true \
+    QLIB_DATA_DIR=/home/iqfmp/.qlib/qlib_data \
     PORT=8000
 
 # Health check

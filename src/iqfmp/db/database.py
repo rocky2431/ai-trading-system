@@ -72,6 +72,14 @@ _session_factory: Optional[async_sessionmaker[AsyncSession]] = None
 _redis_client: Optional[redis.Redis] = None
 
 
+def _is_test_env() -> bool:
+    """Return True when running under pytest or explicit test env.
+
+    NOTE: Our CI/unit tests should not require a live TimescaleDB/Redis instance.
+    """
+    return bool(os.environ.get("PYTEST_CURRENT_TEST")) or os.environ.get("IQFMP_ENV") == "test"
+
+
 def get_settings() -> DatabaseSettings:
     """Get database settings singleton."""
     global _settings
@@ -180,3 +188,35 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def get_redis() -> redis.Redis:
     """FastAPI dependency for Redis client."""
     return get_redis_client()
+
+
+async def get_optional_db() -> AsyncGenerator[AsyncSession | None, None]:
+    """FastAPI dependency for optional database session.
+
+    In test/dev environments (or when DB is not reachable), this yields None instead
+    of failing the whole request.
+    """
+    if _is_test_env():
+        yield None
+        return
+
+    try:
+        async with get_async_session() as session:
+            yield session
+    except Exception as e:
+        print(f"Warning: Database unavailable, using in-memory fallback: {e}")
+        yield None
+
+
+async def get_optional_redis() -> Optional[redis.Redis]:
+    """FastAPI dependency for optional Redis client."""
+    if _is_test_env():
+        return None
+
+    try:
+        client = get_redis_client()
+        await client.ping()
+        return client
+    except Exception as e:
+        print(f"Warning: Redis unavailable, using no-cache mode: {e}")
+        return None

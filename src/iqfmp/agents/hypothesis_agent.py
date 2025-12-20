@@ -371,6 +371,27 @@ Generate exactly {n_hypotheses} hypotheses in the following JSON format:
             # Use custom system prompt if configured, otherwise use default
             system_prompt = custom_system_prompt or HYPOTHESIS_SYSTEM_PROMPT
 
+            # Prefer schema-validated structured output when using the native LLMProvider.
+            from iqfmp.llm.provider import LLMProvider
+            from iqfmp.llm.validation.json_schema import OutputType
+
+            if isinstance(self.llm_provider, LLMProvider):
+                _resp, validation = await self.llm_provider.complete_structured(
+                    prompt=prompt,
+                    output_type=OutputType.HYPOTHESES_LIST,
+                    model=model_id,
+                    temperature=temperature,
+                    max_tokens=2048,
+                    system_prompt=system_prompt,
+                )
+                if validation.is_valid and isinstance(validation.data, list):
+                    hypotheses = self._build_hypotheses_from_items(validation.data)
+                    self._generated_count += len(hypotheses)
+                    logger.info(
+                        f"LLM generated {len(hypotheses)} hypotheses using model {model_id}"
+                    )
+                    return hypotheses
+
             response = await self.llm_provider.complete(
                 prompt=prompt,
                 system_prompt=system_prompt,
@@ -379,7 +400,7 @@ Generate exactly {n_hypotheses} hypotheses in the following JSON format:
                 max_tokens=2048,
             )
 
-            # Parse LLM response
+            # Parse LLM response (legacy fallback)
             hypotheses = self._parse_llm_response(response.content)
             self._generated_count += len(hypotheses)
 
@@ -422,6 +443,33 @@ Generate exactly {n_hypotheses} hypotheses in the following JSON format:
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse LLM JSON: {e}")
+
+        return hypotheses
+
+    def _build_hypotheses_from_items(self, items: list[Any]) -> list[Hypothesis]:
+        """Build Hypothesis objects from parsed JSON list (structured output path)."""
+        hypotheses: list[Hypothesis] = []
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+
+            family_str = str(item.get("family", "momentum"))
+            try:
+                family = HypothesisFamily(family_str)
+            except ValueError:
+                family = HypothesisFamily.MOMENTUM
+
+            hypothesis = Hypothesis(
+                name=str(item.get("name", "Unnamed Hypothesis")),
+                description=str(item.get("description", "")),
+                family=family,
+                rationale=str(item.get("rationale", "")),
+                expected_ic=float(item.get("expected_ic", 0.03)),
+                expected_direction=str(item.get("expected_direction", "long_short")),
+                source="llm",
+            )
+            hypotheses.append(hypothesis)
 
         return hypotheses
 
@@ -913,16 +961,34 @@ Format your response as JSON:
             # Use custom system prompt if configured, otherwise use default
             system_prompt = custom_system_prompt or FEEDBACK_SYSTEM_PROMPT
 
-            response = await self.llm_provider.complete(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                model=model_id,
-                temperature=temperature,
-                max_tokens=1024,
-            )
+            # Prefer schema-validated structured output when using the native LLMProvider.
+            from iqfmp.llm.provider import LLMProvider
+            from iqfmp.llm.validation.json_schema import OutputType
 
-            # Parse LLM response
-            feedback_data = self._parse_feedback_response(response.content)
+            if isinstance(self.llm_provider, LLMProvider):
+                _resp, validation = await self.llm_provider.complete_structured(
+                    prompt=prompt,
+                    output_type=OutputType.FEEDBACK_ANALYSIS,
+                    model=model_id,
+                    temperature=temperature,
+                    max_tokens=1024,
+                    system_prompt=system_prompt,
+                )
+                if validation.is_valid and isinstance(validation.data, dict):
+                    feedback_data = validation.data
+                else:
+                    feedback_data = {}
+            else:
+                response = await self.llm_provider.complete(
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    model=model_id,
+                    temperature=temperature,
+                    max_tokens=1024,
+                )
+
+                # Parse LLM response (legacy fallback)
+                feedback_data = self._parse_feedback_response(response.content)
 
             hypothesis.status = HypothesisStatus.REJECTED
             hypothesis.feedback = feedback_data.get("feedback", self._generate_rejection_feedback(hypothesis, metrics))

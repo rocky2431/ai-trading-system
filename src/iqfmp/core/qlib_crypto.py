@@ -1,7 +1,7 @@
 """Crypto market data handler for Qlib.
 
-Provides CryptoDataHandler and CryptoField classes for handling
-cryptocurrency OHLCV data within Qlib's framework.
+Provides QlibExpressionEngine (expression-only computation) and a thin
+CryptoDataHandler compatibility wrapper for cryptocurrency OHLCV data.
 
 This module extends Qlib's data handling capabilities to support:
 - 24/7 trading (no market close)
@@ -14,8 +14,6 @@ No local pandas/numpy implementations allowed.
 
 import logging
 import os
-from datetime import datetime
-from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
@@ -23,6 +21,21 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+try:
+    from iqfmp.qlib_crypto import (
+        CryptoDataConfig as _VendorCryptoDataConfig,
+        CryptoDataHandler as _VendorCryptoDataHandler,
+        Exchange as _VendorExchange,
+        TimeFrame as _VendorTimeFrame,
+    )
+    _VENDOR_CRYPTO_HANDLER_AVAILABLE = True
+except Exception:
+    _VendorCryptoDataConfig = None  # type: ignore[assignment]
+    _VendorCryptoDataHandler = None  # type: ignore[assignment]
+    _VendorExchange = None  # type: ignore[assignment]
+    _VendorTimeFrame = None  # type: ignore[assignment]
+    _VENDOR_CRYPTO_HANDLER_AVAILABLE = False
 
 
 # =============================================================================
@@ -409,39 +422,6 @@ def _ensure_qlib_initialized() -> bool:
         return False
 
 
-class CryptoField(Enum):
-    """Standard fields for crypto market data."""
-
-    # OHLCV fields
-    OPEN = "$open"
-    HIGH = "$high"
-    LOW = "$low"
-    CLOSE = "$close"
-    VOLUME = "$volume"
-
-    # Derived fields
-    VWAP = "$vwap"
-    TYPICAL_PRICE = "$typical"
-    DOLLAR_VOLUME = "$dollar_volume"
-
-    # Crypto-specific fields
-    FUNDING_RATE = "$funding_rate"
-    OPEN_INTEREST = "$open_interest"
-    LONG_RATIO = "$long_ratio"
-    SHORT_RATIO = "$short_ratio"
-    TAKER_BUY_VOLUME = "$taker_buy_vol"
-    TAKER_SELL_VOLUME = "$taker_sell_vol"
-
-    # Technical indicators (computed via Qlib expressions)
-    RSI_14 = "$rsi_14"
-    MACD = "$macd"
-    MACD_SIGNAL = "$macd_signal"
-    MACD_HIST = "$macd_hist"
-    BOLLINGER_UPPER = "$bb_upper"
-    BOLLINGER_LOWER = "$bb_lower"
-    ATR_14 = "$atr_14"
-
-
 # =============================================================================
 # Qlib Expression Definitions for Technical Indicators
 # =============================================================================
@@ -555,21 +535,27 @@ class QlibExpressionEngine:
         Returns:
             Series of computed values
         """
+        # Prepare data in Qlib-style dict for both Qlib and pandas fallback paths.
+        data = self._prepare_data_for_qlib(df)
+
+        # If Qlib backend is unavailable, fall back to the pure-pandas operator set.
+        # This keeps local/dev pipelines runnable without requiring a full Qlib data provider.
         if not self._qlib_available:
             if self._require_qlib:
                 raise QlibUnavailableError(
                     "Qlib backend unavailable while require_qlib=True"
                 )
-            logger.warning("Qlib not available, returning NaN series (non-strict mode)")
-            return pd.Series(np.nan, index=df.index, name=result_name)
+            try:
+                result = self._fallback_eval(expression, data)
+                if isinstance(result, pd.Series):
+                    return result.rename(result_name)
+                return pd.Series(result, index=df.index, name=result_name)
+            except Exception as e:
+                logger.error(f"Pandas fallback eval failed: {e}")
+                return pd.Series(np.nan, index=df.index, name=result_name)
 
         try:
             # Use Qlib's expression evaluation
-            from qlib.data.ops import Operators
-
-            # Prepare data in Qlib format
-            data = self._prepare_data_for_qlib(df)
-
             # Build and evaluate expression
             result = self._evaluate_expression(expression, data)
             return pd.Series(result, index=df.index, name=result_name)
@@ -714,13 +700,11 @@ class QlibExpressionEngine:
 
 
 class CryptoDataHandler:
-    """Data handler for cryptocurrency market data.
+    """Crypto data handler (single source: vendor deep fork).
 
-    Compatible with Qlib's DataHandlerLP interface but optimized for
-    crypto markets with 24/7 trading and high-frequency data.
-
-    IMPORTANT: All indicator computations use Qlib expression engine.
-    No local pandas/numpy calculations.
+    P2-11: Unify data normalization/alignment under the deep-forked Qlib crypto
+    handler (vendor/qlib/qlib/contrib/crypto). IQFMP keeps the expression engine
+    and exposes a Qlib-style `$field` DataFrame for expression computation.
     """
 
     def __init__(
@@ -730,116 +714,111 @@ class CryptoDataHandler:
         end_time: Optional[str] = None,
         data_dir: Optional[Path] = None,
         timeframe: str = "1d",
-    ):
-        """Initialize crypto data handler.
-
-        Args:
-            instruments: List of crypto pairs (e.g., ["BTCUSDT", "ETHUSDT"])
-            start_time: Start datetime string
-            end_time: End datetime string
-            data_dir: Directory containing data files
-            timeframe: Data timeframe (1m, 5m, 15m, 1h, 4h, 1d)
-        """
+        exchange: str = "binance",
+    ) -> None:
         self.instruments = instruments or []
         self.start_time = start_time
         self.end_time = end_time
         self.data_dir = data_dir
         self.timeframe = timeframe
+        self.exchange = exchange
 
-        self._data: dict[str, pd.DataFrame] = {}
+        if not _VENDOR_CRYPTO_HANDLER_AVAILABLE or _VendorCryptoDataHandler is None:
+            raise ImportError(
+                "Qlib crypto deep fork is required. Ensure `iqfmp.qlib_crypto` "
+                "is importable (PYTHONPATH includes vendor/qlib)."
+            )
+
+        config = None
+        exchange_enum = self._to_vendor_exchange(exchange)
+        timeframe_enum = self._to_vendor_timeframe(timeframe)
+        if (
+            _VendorCryptoDataConfig is not None
+            and exchange_enum is not None
+            and timeframe_enum is not None
+        ):
+            config = _VendorCryptoDataConfig(
+                exchange=exchange_enum,
+                timeframe=timeframe_enum,
+                symbols=list(self.instruments),
+            )
+
+        self._vendor = _VendorCryptoDataHandler(config=config) if config else _VendorCryptoDataHandler()
+        self._expression_engine = QlibExpressionEngine()
         self._combined_data: Optional[pd.DataFrame] = None
 
-        # Initialize Qlib expression engine
-        self._expression_engine = QlibExpressionEngine()
+    @staticmethod
+    def _to_vendor_exchange(exchange: str) -> Optional[Any]:
+        if _VendorExchange is None:
+            return None
+        try:
+            return _VendorExchange(str(exchange).lower())
+        except Exception:
+            return None
+
+    @staticmethod
+    def _to_vendor_timeframe(timeframe: str) -> Optional[Any]:
+        if _VendorTimeFrame is None:
+            return None
+        try:
+            return _VendorTimeFrame(str(timeframe).lower())
+        except Exception:
+            return None
 
     def load_data(
         self,
         path: Optional[Union[str, Path]] = None,
         df: Optional[pd.DataFrame] = None,
     ) -> None:
-        """Load data from file or DataFrame.
+        """Load data from file or DataFrame (delegates normalization to vendor)."""
+        if df is None:
+            if path is None:
+                raise ValueError("Either path or df must be provided")
+            path_obj = Path(path)
+            if path_obj.suffix == ".csv":
+                df = pd.read_csv(path_obj)
+            elif path_obj.suffix == ".parquet":
+                df = pd.read_parquet(path_obj)
+            else:
+                raise ValueError(f"Unsupported file format: {path_obj.suffix}")
 
-        Args:
-            path: Path to data file (CSV or Parquet)
-            df: Pre-loaded DataFrame
-        """
-        if df is not None:
-            self._process_dataframe(df)
-            return
+        data = df.copy()
 
-        if path is None:
-            raise ValueError("Either path or df must be provided")
+        # If the caller provides a named index (common for time-series), lift it into columns.
+        if not isinstance(data.index, pd.RangeIndex):
+            data = data.reset_index()
 
-        path = Path(path)
+        exchange_enum = self._to_vendor_exchange(self.exchange)
+        self._vendor.load(
+            data=data,
+            exchange=exchange_enum,
+            validate=False,
+            fill_na=False,
+        )
 
-        if path.suffix == ".csv":
-            df = pd.read_csv(path)
-        elif path.suffix == ".parquet":
-            df = pd.read_parquet(path)
-        else:
-            raise ValueError(f"Unsupported file format: {path.suffix}")
+        qlib_df = self._vendor.to_qlib_format()
+        if "datetime" in qlib_df.columns:
+            qlib_df["datetime"] = pd.to_datetime(qlib_df["datetime"])
+            sort_cols = ["datetime"]
+            if "symbol" in qlib_df.columns:
+                sort_cols = ["symbol", "datetime"]
+            qlib_df = qlib_df.sort_values(sort_cols).reset_index(drop=True)
 
-        self._process_dataframe(df)
+        self._add_derived_fields_inplace(qlib_df)
+        self._combined_data = qlib_df
 
-    def _process_dataframe(self, df: pd.DataFrame) -> None:
-        """Process and standardize DataFrame.
+    @staticmethod
+    def _add_derived_fields_inplace(df: pd.DataFrame) -> None:
+        """Add common derived `$` fields used by factor engines."""
+        if {"$high", "$low", "$close"}.issubset(df.columns):
+            typical = (df["$high"] + df["$low"] + df["$close"]) / 3
+            df["$typical"] = typical
 
-        Args:
-            df: Raw DataFrame with OHLCV data
-        """
-        # Standardize column names
-        column_mapping = {
-            "timestamp": "datetime",
-            "time": "datetime",
-            "date": "datetime",
-            "open": "open",
-            "high": "high",
-            "low": "low",
-            "close": "close",
-            "volume": "volume",
-            "vol": "volume",
-            "symbol": "symbol",
-            "instrument": "symbol",
-        }
-
-        df = df.rename(columns={
-            k: v for k, v in column_mapping.items()
-            if k in df.columns
-        })
-
-        # Ensure datetime column
-        if "datetime" in df.columns:
-            df["datetime"] = pd.to_datetime(df["datetime"])
-            df = df.sort_values("datetime").reset_index(drop=True)
-
-        # Add Qlib-style fields
-        df["$open"] = df["open"]
-        df["$high"] = df["high"]
-        df["$low"] = df["low"]
-        df["$close"] = df["close"]
-        df["$volume"] = df["volume"]
-
-        # Compute derived fields using Qlib expressions
-        df["$vwap"] = self._compute_vwap_qlib(df)
-        df["$typical"] = (df["$high"] + df["$low"] + df["$close"]) / 3
-        df["$dollar_volume"] = df["$volume"] * df["$close"]
-
-        # Store data
-        symbol = df.get("symbol", pd.Series(["UNKNOWN"] * len(df))).iloc[0]
-        if isinstance(symbol, (pd.Series, np.ndarray)):
-            symbol = str(symbol)
-        self._data[str(symbol)] = df
-        self._combined_data = df
-
-    def _compute_vwap_qlib(self, df: pd.DataFrame) -> pd.Series:
-        """Compute VWAP using Qlib-compatible formula.
-
-        VWAP = Cumulative(TypicalPrice * Volume) / Cumulative(Volume)
-        """
-        typical_price = (df["$high"] + df["$low"] + df["$close"]) / 3
-        cum_tp_vol = (typical_price * df["$volume"]).cumsum()
-        cum_vol = df["$volume"].cumsum()
-        return cum_tp_vol / (cum_vol + 1e-10)
+            if "$volume" in df.columns:
+                df["$dollar_volume"] = df["$volume"] * df["$close"]
+                cum_tp_vol = (typical * df["$volume"]).cumsum()
+                cum_vol = df["$volume"].cumsum()
+                df["$vwap"] = cum_tp_vol / (cum_vol + 1e-10)
 
     def get_data(
         self,
@@ -848,69 +827,41 @@ class CryptoDataHandler:
         start_time: Optional[str] = None,
         end_time: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Get data for specified instruments and fields.
-
-        Args:
-            instruments: List of instruments (None for all)
-            fields: List of field names (None for all)
-            start_time: Start datetime
-            end_time: End datetime
-
-        Returns:
-            DataFrame with requested data
-        """
         if self._combined_data is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
         df = self._combined_data.copy()
 
-        # Filter by time
+        if instruments and "symbol" in df.columns:
+            df = df[df["symbol"].isin(instruments)]
+
         if start_time and "datetime" in df.columns:
             df = df[df["datetime"] >= pd.to_datetime(start_time)]
         if end_time and "datetime" in df.columns:
             df = df[df["datetime"] <= pd.to_datetime(end_time)]
 
-        # Filter by fields
         if fields:
-            available_cols = ["datetime", "symbol"] + [
-                c for c in fields if c in df.columns
-            ]
+            base_cols = [c for c in ["datetime", "symbol"] if c in df.columns]
+            available_cols = base_cols + [c for c in fields if c in df.columns]
             df = df[available_cols]
 
         return df
 
-    def compute_factor(
-        self,
-        expression: str,
-        factor_name: str = "factor",
-    ) -> pd.Series:
-        """Compute factor from Qlib expression.
-
-        Args:
-            expression: Qlib factor expression
-            factor_name: Name for the result series
-
-        Returns:
-            Series of factor values
-        """
+    def compute_factor(self, expression: str, factor_name: str = "factor") -> pd.Series:
         if self._combined_data is None:
             raise ValueError("No data loaded")
-
         return self._expression_engine.compute_expression(
-            expression, self._combined_data, factor_name
+            expression=expression,
+            df=self._combined_data,
+            result_name=factor_name,
         )
 
     def add_technical_indicators(self) -> None:
-        """Add technical indicators computed via Qlib expression engine.
-
-        All indicators are computed through Qlib - no local calculations.
-        """
+        """Add a small baseline set of indicators via QlibExpressionEngine."""
         if self._combined_data is None:
             return
 
         df = self._combined_data
-
-        # Compute all indicators via Qlib expression engine
         indicators_to_compute = [
             "$rsi_14",
             "$macd",
@@ -923,10 +874,7 @@ class CryptoDataHandler:
 
         for indicator in indicators_to_compute:
             try:
-                df[indicator] = self._expression_engine.compute_indicator(
-                    indicator, df
-                )
-                logger.debug(f"Computed {indicator} via Qlib")
+                df[indicator] = self._expression_engine.compute_indicator(indicator, df)
             except Exception as e:
                 logger.warning(f"Failed to compute {indicator}: {e}")
                 df[indicator] = np.nan
@@ -934,60 +882,35 @@ class CryptoDataHandler:
         self._combined_data = df
 
     def resample(self, timeframe: str) -> "CryptoDataHandler":
-        """Resample data to a different timeframe.
+        if getattr(self._vendor, "data", None) is None:
+            raise ValueError("No data loaded. Call load_data() first.")
 
-        Args:
-            timeframe: Target timeframe (1m, 5m, 15m, 1h, 4h, 1d)
+        tf_enum = self._to_vendor_timeframe(timeframe)
+        if tf_enum is None:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
 
-        Returns:
-            New CryptoDataHandler with resampled data
-        """
-        if self._combined_data is None:
-            raise ValueError("No data to resample")
-
-        # Map timeframe strings to pandas resample rules
-        tf_map = {
-            "1m": "1T",
-            "5m": "5T",
-            "15m": "15T",
-            "1h": "1H",
-            "4h": "4H",
-            "1d": "1D",
-        }
-
-        rule = tf_map.get(timeframe, "1D")
-        df = self._combined_data.copy()
-
-        if "datetime" in df.columns:
-            df = df.set_index("datetime")
-
-        resampled = df.resample(rule).agg({
-            "open": "first",
-            "high": "max",
-            "low": "min",
-            "close": "last",
-            "volume": "sum",
-        }).dropna()
-
-        resampled = resampled.reset_index()
-
+        resampled = self._vendor.resample(tf_enum)
         new_handler = CryptoDataHandler(
             instruments=self.instruments,
+            start_time=self.start_time,
+            end_time=self.end_time,
+            data_dir=self.data_dir,
             timeframe=timeframe,
+            exchange=self.exchange,
         )
-        new_handler._process_dataframe(resampled)
-
+        new_handler.load_data(df=resampled)
         return new_handler
 
     @property
     def data(self) -> Optional[pd.DataFrame]:
-        """Get combined data DataFrame."""
         return self._combined_data
 
     @property
     def instruments_list(self) -> list[str]:
-        """Get list of loaded instruments."""
-        return list(self._data.keys())
+        try:
+            return list(self._vendor.get_symbols())
+        except Exception:
+            return list(self.instruments)
 
 
 class CryptoDataLoader:

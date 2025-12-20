@@ -199,6 +199,15 @@ class QlibMetricsCalculator:
         Uses Qlib's calc_ic when available, falls back to Pearson correlation
         via qlib_stats unified interface. NO pandas fallback - Qlib is mandatory.
         """
+        # Cross-sectional IC (date x symbol) when MultiIndex is provided
+        if isinstance(factor_values.index, pd.MultiIndex) and isinstance(
+            returns.index, pd.MultiIndex
+        ):
+            cs = self._calculate_cross_sectional_corr_series(
+                factor_values, returns, method="pearson"
+            )
+            return float(cs.mean()) if not cs.empty else 0.0
+
         if len(factor_values) < 3:
             return 0.0
 
@@ -241,6 +250,15 @@ class QlibMetricsCalculator:
         Uses unified qlib_stats.spearman_rank_correlation for consistency
         with the Qlib-as-sole-core architecture.
         """
+        # Cross-sectional RankIC (date x symbol) when MultiIndex is provided
+        if isinstance(factor_values.index, pd.MultiIndex) and isinstance(
+            returns.index, pd.MultiIndex
+        ):
+            cs = self._calculate_cross_sectional_corr_series(
+                factor_values, returns, method="spearman"
+            )
+            return float(cs.mean()) if not cs.empty else 0.0
+
         if len(factor_values) < 3:
             return 0.0
 
@@ -248,6 +266,50 @@ class QlibMetricsCalculator:
         # This function handles NaN filtering internally
         rho, _ = spearman_rank_correlation(factor_values, returns)
         return rho
+
+    def _calculate_cross_sectional_corr_series(
+        self,
+        factor_values: pd.Series,
+        returns: pd.Series,
+        *,
+        method: str,
+        min_symbols: int = 3,
+    ) -> pd.Series:
+        """Calculate cross-sectional correlation series grouped by date.
+
+        Args:
+            factor_values: MultiIndex Series with (date, symbol) index.
+            returns: MultiIndex Series with (date, symbol) index.
+            method: "pearson" or "spearman".
+            min_symbols: Minimum symbols required per date.
+
+        Returns:
+            Series indexed by date with per-date correlations.
+        """
+        import numpy as np
+
+        common_idx = factor_values.index.intersection(returns.index)
+        if len(common_idx) == 0:
+            return pd.Series(dtype=float)
+
+        fv = factor_values.reindex(common_idx)
+        rv = returns.reindex(common_idx)
+
+        def _corr(group: pd.Series) -> float:
+            r = rv.loc[group.index]
+            mask = ~(group.isna() | r.isna())
+            if mask.sum() < min_symbols:
+                return float("nan")
+            if method == "pearson":
+                val = group[mask].corr(r[mask])
+                return float(val) if not pd.isna(val) else float("nan")
+            if method == "spearman":
+                rho, _ = spearman_rank_correlation(group[mask], r[mask])
+                return float(rho) if not np.isnan(rho) else float("nan")
+            raise ValueError(f"Unknown correlation method: {method}")
+
+        # Group by date (level 0) and compute cross-sectional correlation
+        return fv.groupby(level=0).apply(_corr).dropna()
 
     def calculate_ir(self, ic_series: pd.Series) -> float:
         """Calculate Information Ratio from IC series.
@@ -651,6 +713,105 @@ class FactorEvaluator:
 
         factor_col = self.config.factor_column
         return_col = self.config.return_column
+        symbol_col = self.config.symbol_column
+
+        use_cross_sectional = (
+            symbol_col in df.columns and df[symbol_col].nunique() >= 3
+        )
+
+        if use_cross_sectional:
+            ic_points: list[tuple[pd.Timestamp, float]] = []
+            rank_ic_points: list[tuple[pd.Timestamp, float]] = []
+            ls_return_points: list[tuple[pd.Timestamp, float]] = []
+            positions_by_date: list[tuple[pd.Timestamp, pd.Series]] = []
+
+            for date, group in df.groupby("_date"):
+                g = group[[symbol_col, factor_col, return_col]].dropna()
+                if g[symbol_col].nunique() < 3:
+                    continue
+
+                ic_val = self.calculator.calculate_ic(g[factor_col], g[return_col])
+                rank_val = self.calculator.calculate_rank_ic(g[factor_col], g[return_col])
+                if not np.isnan(ic_val):
+                    ic_points.append((pd.Timestamp(date), float(ic_val)))
+                if not np.isnan(rank_val):
+                    rank_ic_points.append((pd.Timestamp(date), float(rank_val)))
+
+                # Long-short return: top-bottom 20% by factor
+                n = len(g)
+                k = max(1, int(n * 0.2))
+                sorted_g = g.sort_values(factor_col)
+                bottom = sorted_g.head(k)
+                top = sorted_g.tail(k)
+                ls_ret = float(top[return_col].mean() - bottom[return_col].mean())
+                ls_return_points.append((pd.Timestamp(date), ls_ret))
+
+                # Positions (equal-weight top/bottom) for turnover estimation
+                weights = pd.Series(0.0, index=sorted_g[symbol_col].astype(str))
+                weights.loc[top[symbol_col].astype(str)] = 1.0 / k
+                weights.loc[bottom[symbol_col].astype(str)] = -1.0 / k
+                positions_by_date.append((pd.Timestamp(date), weights))
+
+            ic_series = (
+                pd.Series({d: v for d, v in ic_points}).sort_index()
+                if ic_points
+                else pd.Series(dtype=float)
+            )
+            rank_ic_series = (
+                pd.Series({d: v for d, v in rank_ic_points}).sort_index()
+                if rank_ic_points
+                else pd.Series(dtype=float)
+            )
+
+            ic = float(ic_series.mean()) if not ic_series.empty else 0.0
+            rank_ic = float(rank_ic_series.mean()) if not rank_ic_series.empty else 0.0
+
+            ir = self.calculator.calculate_ir(ic_series) if not ic_series.empty else 0.0
+            ic_std = float(ic_series.std()) if len(ic_series) > 1 else 0.0
+            ic_skew = float(ic_series.skew()) if len(ic_series) > 2 else 0.0
+
+            ls_returns = (
+                pd.Series({d: v for d, v in ls_return_points}).sort_index()
+                if ls_return_points
+                else pd.Series(dtype=float)
+            )
+            ls_returns = ls_returns.fillna(0)
+
+            sharpe = self.calculator.calculate_sharpe_ratio(
+                ls_returns,
+                annualization_factor=self.config.annualization_factor,
+            )
+            cumulative = (1 + ls_returns).cumprod()
+            max_dd = self.calculator.calculate_max_drawdown(cumulative)
+            win_rate = self.calculator.calculate_win_rate(ls_returns)
+
+            # Turnover based on daily position changes
+            turnover = 0.0
+            if len(positions_by_date) >= 2:
+                positions_by_date.sort(key=lambda x: x[0])
+                turnovers = []
+                for i in range(1, len(positions_by_date)):
+                    prev = positions_by_date[i - 1][1]
+                    curr = positions_by_date[i][1]
+                    idx = prev.index.union(curr.index)
+                    prev_aligned = prev.reindex(idx, fill_value=0.0)
+                    curr_aligned = curr.reindex(idx, fill_value=0.0)
+                    turnovers.append(
+                        self.calculator.calculate_turnover(prev_aligned, curr_aligned)
+                    )
+                turnover = float(np.mean(turnovers)) if turnovers else 0.0
+
+            return FactorMetrics(
+                ic=ic,
+                rank_ic=rank_ic,
+                ir=ir,
+                sharpe_ratio=sharpe,
+                max_drawdown=max_dd,
+                win_rate=win_rate,
+                turnover=turnover,
+                ic_std=ic_std,
+                ic_skew=ic_skew,
+            )
 
         # Overall IC (via Qlib)
         ic = self.calculator.calculate_ic(df[factor_col], df[return_col])

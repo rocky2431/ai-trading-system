@@ -74,9 +74,10 @@ class TestMetricsCalculator:
         self, metrics_calculator: MetricsCalculator, sample_factor_data: pd.DataFrame
     ) -> None:
         """Test IC calculation."""
+        df = sample_factor_data.set_index(["date", "symbol"])
         ic = metrics_calculator.calculate_ic(
-            sample_factor_data["factor_value"],
-            sample_factor_data["forward_return"],
+            df["factor_value"],
+            df["forward_return"],
         )
 
         assert isinstance(ic, float)
@@ -86,9 +87,10 @@ class TestMetricsCalculator:
         self, metrics_calculator: MetricsCalculator, sample_factor_data: pd.DataFrame
     ) -> None:
         """Test Rank IC calculation."""
+        df = sample_factor_data.set_index(["date", "symbol"])
         rank_ic = metrics_calculator.calculate_rank_ic(
-            sample_factor_data["factor_value"],
-            sample_factor_data["forward_return"],
+            df["factor_value"],
+            df["forward_return"],
         )
 
         assert isinstance(rank_ic, float)

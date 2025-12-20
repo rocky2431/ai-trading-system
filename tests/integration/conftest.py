@@ -28,8 +28,6 @@ def momentum_factor(df):
     动量因子
     计算过去 N 天的收益率变化
     """
-    import pandas as pd
-
     # 计算收益率
     returns = df["close"].pct_change(periods=20)
 
@@ -156,6 +154,10 @@ def sample_backtest_result() -> dict[str, Any]:
 
     random.seed(42)
 
+    total_trades = random.randint(50, 150)
+    long_trades = random.randint(25, min(80, total_trades))
+    short_trades = total_trades - long_trades
+
     return {
         "strategy_id": "test_multi_factor_strategy",
         "backtest_id": "bt_20240101_20240401",
@@ -171,7 +173,7 @@ def sample_backtest_result() -> dict[str, Any]:
             "win_rate": random.uniform(0.52, 0.62),
             "profit_factor": random.uniform(1.3, 2.0),
             "avg_trade_return": random.uniform(0.005, 0.015),
-            "trade_count": random.randint(50, 150),
+            "trade_count": total_trades,
         },
         "risk_metrics": {
             "volatility": random.uniform(0.15, 0.3),
@@ -181,9 +183,9 @@ def sample_backtest_result() -> dict[str, Any]:
             "alpha": random.uniform(0.05, 0.2),
         },
         "execution_stats": {
-            "total_trades": random.randint(50, 150),
-            "long_trades": random.randint(25, 80),
-            "short_trades": random.randint(20, 70),
+            "total_trades": total_trades,
+            "long_trades": long_trades,
+            "short_trades": short_trades,
             "avg_holding_period_hours": random.uniform(12, 72),
             "slippage_cost": random.uniform(0.001, 0.005),
         },

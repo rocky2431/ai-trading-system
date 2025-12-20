@@ -51,6 +51,54 @@ INDICATOR_ALIASES: dict[str, list[str]] = {
     "TRIX": ["trix", "三重指数平滑"],
     "PPO": ["ppo", "价格震荡器", "percentage price oscillator"],
     "CMO": ["cmo", "钱德动量振荡器", "chande momentum oscillator"],
+
+    # ===== Crypto Derivatives / Microstructure =====
+    "FUNDING": [
+        "funding",
+        "funding rate",
+        "funding_rate",
+        "资金费率",
+        "资金费",
+        "费率",
+    ],
+    "OPEN_INTEREST": [
+        "open interest",
+        "open_interest",
+        "持仓量",
+        "未平仓",
+        " 未平仓 ",
+        " oi ",
+    ],
+    "LIQUIDATION": [
+        "liquidation",
+        "liquidations",
+        "爆仓",
+        "强平",
+        " 清算 ",
+        " liq ",
+    ],
+    "BASIS": [
+        "basis",
+        "基差",
+        "premium",
+        "溢价",
+        "折价",
+        "mark price",
+        "index price",
+        "mark_price",
+        "index_price",
+    ],
+    "ORDERBOOK": [
+        "orderbook",
+        "order book",
+        "盘口",
+        "深度",
+        "depth",
+        "bid ask",
+        "bid/ask",
+        "spread",
+        "imbalance",
+    ],
 }
 
 
@@ -96,6 +144,40 @@ INDICATOR_DETECTION_PATTERNS: dict[str, list[str]] = {
     ],
     "MOMENTUM": ["Ref($close,", "$close / Ref(", "$close - Ref("],
     "ROC": ["$close / Ref($close", "- 1"],
+
+    # ===== Crypto Derivatives / Microstructure =====
+    "FUNDING": [
+        "$funding_rate",
+        "$funding_rate_predicted",
+        "Mean($funding_rate",
+        "Std($funding_rate",
+    ],
+    "OPEN_INTEREST": [
+        "$open_interest",
+        "$open_interest_change",
+        "Mean($open_interest",
+        "Ref($open_interest",
+    ],
+    "LIQUIDATION": [
+        "$liquidation_volume",
+        "Mean($liquidation_volume",
+        "Ref($liquidation_volume",
+    ],
+    "BASIS": [
+        "$basis",
+        "$premium",
+        "$mark_price",
+        "$index_price",
+        "($mark_price - $index_price",
+        "$mark_price / $index_price",
+    ],
+    "ORDERBOOK": [
+        "$bid_volume",
+        "$ask_volume",
+        "$spread",
+        "$bid_ask_imbalance",
+        "$depth_imbalance",
+    ],
 }
 
 

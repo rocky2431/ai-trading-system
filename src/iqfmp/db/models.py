@@ -556,6 +556,41 @@ class PromptCacheORM(Base):
         }
 
 
+class LLMTraceORM(Base):
+    """LLM call trace table - stores prompts/responses for replay."""
+
+    __tablename__ = "llm_traces"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    execution_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    conversation_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+
+    agent: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    model: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    prompt_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    messages: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    response: Mapped[str] = mapped_column(Text, nullable=False)
+    usage: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    cost_estimate: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    cached: Mapped[bool] = mapped_column(Boolean, default=False)
+    request_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_llm_traces_execution_id", "execution_id"),
+        Index("ix_llm_traces_conversation_id", "conversation_id"),
+        Index("ix_llm_traces_created_at", "created_at"),
+    )
+
+
 class AgentConfigORM(Base):
     """Agent configuration table - stores AI agent settings and prompts."""
 

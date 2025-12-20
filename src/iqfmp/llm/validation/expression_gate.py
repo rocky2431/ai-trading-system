@@ -114,6 +114,8 @@ class FieldRegistry:
             return (
                 cls.BASIC_FIELDS
                 | cls.CRYPTO_FIELDS
+                | cls.ORDERBOOK_FIELDS
+                | cls.ONCHAIN_FIELDS
                 | cls.INDICATOR_FIELDS
                 | cls.RETURN_FIELDS
             )
@@ -336,6 +338,17 @@ class ExpressionGate:
         if invalid_operators:
             result.is_valid = False
             result.error_message = f"Invalid operators: {invalid_operators}"
+            return result
+
+        # Basic shape check: an expression must reference at least one field/operator/number.
+        # This prevents plain natural language text from being treated as a valid expression.
+        has_number = re.search(r"\d", expression_without_comment) is not None
+        if not used_fields and not used_operators and not has_number:
+            result.is_valid = False
+            result.error_message = (
+                "Expression must reference at least one $field, operator call (e.g., Mean/Ref), "
+                "or numeric literal"
+            )
             return result
 
         # Check operator count

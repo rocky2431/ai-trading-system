@@ -44,12 +44,11 @@ except ImportError:
 
 # Crypto extension (P2.2: custom implementation for crypto markets)
 try:
-    from iqfmp.core.qlib_crypto import CryptoDataHandler, CryptoField
+    from iqfmp.core.qlib_crypto import CryptoDataHandler
     CRYPTO_AVAILABLE = True
 except ImportError:
     CRYPTO_AVAILABLE = False
     CryptoDataHandler = None
-    CryptoField = None
 
 # Import Qlib initialization
 from iqfmp.core.qlib_init import init_qlib, ensure_qlib_initialized, is_qlib_initialized

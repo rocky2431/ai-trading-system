@@ -132,12 +132,18 @@ class CryptoDataConfig:
 # Column mappings for different exchanges
 EXCHANGE_COLUMN_MAPPINGS: dict[Exchange, dict[str, str]] = {
     Exchange.BINANCE: {
+        # Common in-house format
+        "instrument": "symbol",
+        # Binance REST
         "open_time": "datetime",
         "close_time": "_close_time",
         "quote_volume": "quote_volume",
         "trades": "trades",
     },
     Exchange.OKX: {
+        # Common in-house format
+        "instrument": "symbol",
+        # OKX REST
         "ts": "datetime",
         "instId": "symbol",
         "o": "open",
@@ -148,6 +154,9 @@ EXCHANGE_COLUMN_MAPPINGS: dict[Exchange, dict[str, str]] = {
         "volCcy": "quote_volume",
     },
     Exchange.BYBIT: {
+        # Common in-house format
+        "instrument": "symbol",
+        # Bybit REST
         "timestamp": "datetime",
         "turnover": "quote_volume",
     },
@@ -193,7 +202,16 @@ def _create_crypto_data_handler():
             **kwargs: Any,
         ) -> None:
             """Initialize the CryptoDataHandler."""
-            if QLIB_AVAILABLE and _QlibDataHandlerLP is not None:
+            # NOTE:
+            # Qlib's DataHandlerLP asserts `data_loader is not None` during init.
+            # Our crypto handler primarily operates on in-memory DataFrames via
+            # `load()`, so we only initialize the Qlib base class when a valid
+            # data_loader is explicitly provided by the caller.
+            if (
+                QLIB_AVAILABLE
+                and _QlibDataHandlerLP is not None
+                and kwargs.get("data_loader") is not None
+            ):
                 super().__init__(**kwargs)
 
             self.config = config or CryptoDataConfig()

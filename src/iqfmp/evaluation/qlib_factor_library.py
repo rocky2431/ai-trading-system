@@ -149,6 +149,17 @@ ADDITIONAL_EXPRESSIONS: dict[str, str] = {
     "CRYPTO_VOLATILITY": "Std(Ref($close, 1) / $close - 1, 24)",  # 24h volatility
     "VOLUME_SPIKE": "$volume / (Mean($volume, 24) + 1e-10)",  # Volume spike detection
     "PRICE_RANGE": "($high - $low) / ($close + 1e-10)",  # Intraday range
+    "CRYPTO_FUNDING_ZSCORE": "($funding_rate - Mean($funding_rate, 24)) / (Std($funding_rate, 24) + 1e-10)",
+    "CRYPTO_FUNDING_MOMENTUM": "Ref($funding_rate, 8) - $funding_rate",
+    "CRYPTO_PREMIUM_ZSCORE": "($premium - Mean($premium, 24)) / (Std($premium, 24) + 1e-10)",
+    "CRYPTO_OI_CHANGE_1": "Ref($open_interest, 1) / ($open_interest + 1e-10) - 1",
+    "CRYPTO_OI_ZSCORE": "($open_interest - Mean($open_interest, 24)) / (Std($open_interest, 24) + 1e-10)",
+    "CRYPTO_OI_PRICE_DIVERGENCE": "(Ref($open_interest, 1) / ($open_interest + 1e-10) - 1) - (Ref($close, 1) / ($close + 1e-10) - 1)",
+    "CRYPTO_LIQUIDATION_SPIKE": "$liquidation_volume / (Mean($liquidation_volume, 24) + 1e-10)",
+    "CRYPTO_BASIS_PCT": "($mark_price - $index_price) / ($index_price + 1e-10)",
+    "CRYPTO_ORDERBOOK_IMBALANCE": "$bid_ask_imbalance",
+    "CRYPTO_SPREAD_NORM": "$spread / ($close + 1e-10)",
+    "CRYPTO_LONG_SHORT_SKEW": "$long_ratio - $short_ratio",
 }
 
 

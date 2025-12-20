@@ -41,6 +41,11 @@ class OutputType(Enum):
     EVALUATION_RESULT = "evaluation_result"  # Factor evaluation results
     HYPOTHESIS = "hypothesis"  # Research hypothesis
     ANALYSIS = "analysis"  # General analysis output
+    EVALUATION_INSIGHTS = "evaluation_insights"  # LLM insights for evaluation agent
+    STRATEGY_RECOMMENDATIONS = "strategy_recommendations"  # LLM strategy advice
+    RISK_ANALYSIS = "risk_analysis"  # LLM risk analysis output
+    HYPOTHESES_LIST = "hypotheses_list"  # List output for hypothesis generator
+    FEEDBACK_ANALYSIS = "feedback_analysis"  # LLM feedback for failed hypotheses
 
 
 # JSON Schema Definitions
@@ -203,6 +208,81 @@ SCHEMAS: dict[OutputType, dict[str, Any]] = {
         },
         "additionalProperties": True,
     },
+
+    OutputType.EVALUATION_INSIGHTS: {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": ["analysis", "insights", "recommendations"],
+        "properties": {
+            "analysis": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "insights": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "recommendations": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        },
+        "additionalProperties": True,
+    },
+
+    OutputType.STRATEGY_RECOMMENDATIONS: {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": ["assessment", "risks", "recommendations"],
+        "properties": {
+            "assessment": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "risks": {"type": "array", "items": {"type": "string"}},
+            "recommendations": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": True,
+    },
+
+    OutputType.RISK_ANALYSIS: {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": [
+            "summary",
+            "key_risks",
+            "mitigation_actions",
+            "position_recommendations",
+            "hedging_strategies",
+        ],
+        "properties": {
+            "summary": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "key_risks": {"type": "array", "items": {"type": "string"}},
+            "mitigation_actions": {"type": "array", "items": {"type": "string"}},
+            "position_recommendations": {"type": "string", "maxLength": 2000},
+            "hedging_strategies": {"type": "array", "items": {"type": "string"}},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "additionalProperties": True,
+    },
+
+    OutputType.HYPOTHESES_LIST: {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "array",
+        "minItems": 1,
+        "items": {
+            "type": "object",
+            "required": ["name", "description", "family", "rationale"],
+            "properties": {
+                "name": {"type": "string", "minLength": 1, "maxLength": 200},
+                "description": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "family": {"type": "string"},
+                "rationale": {"type": "string", "minLength": 1, "maxLength": 2000},
+                "expected_ic": {"type": "number"},
+                "expected_direction": {"type": "string"},
+            },
+            "additionalProperties": True,
+        },
+    },
+
+    OutputType.FEEDBACK_ANALYSIS: {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "required": ["feedback", "suggestions"],
+        "properties": {
+            "feedback": {"type": "string", "minLength": 1, "maxLength": 5000},
+            "suggestions": {"type": "array", "items": {"type": "string"}},
+        },
+        "additionalProperties": True,
+    },
 }
 
 
@@ -211,7 +291,7 @@ class SchemaValidationResult:
     """Result of JSON schema validation."""
 
     is_valid: bool
-    data: Optional[dict[str, Any]] = None
+    data: Optional[dict[str, Any] | list[Any]] = None
     error_message: Optional[str] = None
     error_path: Optional[str] = None
     repair_hint: Optional[str] = None
@@ -270,7 +350,7 @@ class JSONSchemaValidator:
 
     def validate(
         self,
-        content: str | dict[str, Any],
+        content: str | dict[str, Any] | list[Any],
         output_type: OutputType,
         auto_repair: bool = True,
     ) -> SchemaValidationResult:
@@ -395,8 +475,10 @@ class JSONSchemaValidator:
         repaired = re.sub(r"```(?:json)?\s*\n?", "", repaired)
         repaired = re.sub(r"\n?```", "", repaired)
 
-        # Extract JSON from mixed content
+        # Extract JSON from mixed content (object or array)
         json_match = re.search(r"\{[\s\S]*\}", repaired)
+        if not json_match:
+            json_match = re.search(r"\[[\s\S]*\]", repaired)
         if json_match:
             repaired = json_match.group(0)
 
@@ -510,12 +592,44 @@ class JSONSchemaValidator:
                 "findings": ["Positive IC", "Low turnover", "Stable returns"],
                 "recommendations": ["Increase allocation", "Monitor drawdown"]
             }, indent=2),
+            OutputType.EVALUATION_INSIGHTS: json.dumps({
+                "analysis": "Factor passed thresholds with stable IC and acceptable drawdown.",
+                "insights": ["IC is consistently positive", "Low turnover suggests robustness"],
+                "recommendations": ["Test alternative lookbacks", "Add volatility filter"],
+            }, indent=2),
+            OutputType.STRATEGY_RECOMMENDATIONS: json.dumps({
+                "assessment": "Combination is diversified with balanced exposure.",
+                "risks": ["Correlation between factors may rise in stress regimes"],
+                "recommendations": ["Cap single-factor weight", "Monitor turnover and costs"],
+            }, indent=2),
+            OutputType.RISK_ANALYSIS: json.dumps({
+                "summary": "Risk is acceptable but drawdown risk is elevated.",
+                "key_risks": ["High max drawdown", "Concentration risk"],
+                "mitigation_actions": ["Reduce max position size", "Add stop-loss rules"],
+                "position_recommendations": "Reduce exposure by 20% and cap per-asset weight at 5%.",
+                "hedging_strategies": ["Delta hedge via BTC/ETH futures"],
+                "confidence": 0.7,
+            }, indent=2),
+            OutputType.HYPOTHESES_LIST: json.dumps([
+                {
+                    "name": "Funding Rate Mean Reversion",
+                    "description": "Extreme funding rates revert and predict next-period returns.",
+                    "family": "funding",
+                    "rationale": "Crowded positioning reflected in funding is mean-reverting.",
+                    "expected_ic": 0.03,
+                    "expected_direction": "long_short",
+                }
+            ], indent=2),
+            OutputType.FEEDBACK_ANALYSIS: json.dumps({
+                "feedback": "IC/IR are below thresholds; the signal may be noisy in this regime.",
+                "suggestions": ["Try longer lookback", "Add volatility filter", "Use rank normalization"],
+            }, indent=2),
         }
         return examples.get(output_type, "")
 
     def _validate_basic(
         self,
-        content: str | dict[str, Any],
+        content: str | dict[str, Any] | list[Any],
         output_type: OutputType,
     ) -> SchemaValidationResult:
         """Basic validation without jsonschema library.
@@ -539,14 +653,24 @@ class JSONSchemaValidator:
         else:
             data = content
 
+        schema = SCHEMAS.get(output_type, {})
+        expected_type = schema.get("type", "object")
+
+        if expected_type == "array":
+            if not isinstance(data, list):
+                return SchemaValidationResult(
+                    is_valid=False,
+                    error_message="Expected JSON array (list)",
+                )
+            return SchemaValidationResult(is_valid=True, data=data)
+
         if not isinstance(data, dict):
             return SchemaValidationResult(
                 is_valid=False,
                 error_message="Expected JSON object (dict)",
             )
 
-        # Check required fields
-        schema = SCHEMAS.get(output_type, {})
+        # Check required fields for object schemas
         required = schema.get("required", [])
         missing = [f for f in required if f not in data]
 
@@ -585,7 +709,7 @@ class JSONSchemaValidator:
 
 # Convenience function for direct validation
 def validate_json_output(
-    content: str | dict[str, Any],
+    content: str | dict[str, Any] | list[Any],
     output_type: OutputType,
     auto_repair: bool = True,
 ) -> SchemaValidationResult:
@@ -607,7 +731,7 @@ def validate_json_output(
 def extract_json_from_response(
     response: str,
     output_type: Optional[OutputType] = None,
-) -> tuple[Optional[dict[str, Any]], Optional[str]]:
+) -> tuple[Optional[dict[str, Any] | list[Any]], Optional[str]]:
     """Extract and optionally validate JSON from LLM response.
 
     Args:

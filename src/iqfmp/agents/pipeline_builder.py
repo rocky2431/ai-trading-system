@@ -40,26 +40,26 @@ from iqfmp.agents.orchestrator import (
     PostgresCheckpointSaver,
 )
 from iqfmp.agents.hypothesis_agent import HypothesisAgent
-from iqfmp.agents.factor_generation import FactorGenerationAgent, FactorGenerationConfig
+from iqfmp.agents.factor_generation import (
+    FactorFamily,
+    FactorGenerationAgent,
+    FactorGenerationConfig,
+)
 from iqfmp.agents.evaluation_agent import (
     FactorEvaluationAgent,
     EvaluationAgentConfig,
-    evaluate_factors_node,
 )
 from iqfmp.agents.strategy_agent import (
     StrategyAssemblyAgent,
     StrategyConfig,
-    assemble_strategy_node,
 )
 from iqfmp.agents.backtest_agent import (
     BacktestOptimizationAgent,
     BacktestConfig,
-    optimize_backtest_node,
 )
 from iqfmp.agents.risk_agent import (
     RiskCheckAgent,
     RiskConfig,
-    check_risk_node,
 )
 
 
@@ -200,11 +200,6 @@ class PipelineBuilder:
         if self.config.enable_hypothesis:
             self._agents["hypothesis"] = HypothesisAgent()
 
-        # Factor generation agent
-        self._agents["factor_generation"] = FactorGenerationAgent(
-            config=self.config.factor_config or FactorGenerationConfig()
-        )
-
         # Evaluation agent
         if self.config.enable_evaluation:
             self._agents["evaluation"] = FactorEvaluationAgent(
@@ -243,19 +238,19 @@ class PipelineBuilder:
 
         # Evaluation node
         if self.config.enable_evaluation:
-            self._graph.add_node("evaluate", evaluate_factors_node)
+            self._graph.add_node("evaluate", self._evaluate_node)
 
         # Strategy assembly node
         if self.config.enable_strategy:
-            self._graph.add_node("strategy", assemble_strategy_node)
+            self._graph.add_node("strategy", self._strategy_node)
 
         # Backtest optimization node
         if self.config.enable_backtest:
-            self._graph.add_node("backtest", optimize_backtest_node)
+            self._graph.add_node("backtest", self._backtest_node)
 
         # Risk check node
         if self.config.enable_risk_check:
-            self._graph.add_node("risk", check_risk_node)
+            self._graph.add_node("risk", self._risk_node)
 
         # Finish node
         self._graph.add_node("finish", self._finish_node)
@@ -321,6 +316,35 @@ class PipelineBuilder:
         context = state.context.copy()
         context["pipeline_status"] = "started"
         context["pipeline_stage"] = "start"
+        context.setdefault("execution_id", str(uuid.uuid4()))
+        context.setdefault("conversation_id", context["execution_id"])
+
+        # P0: Provide default evaluation data if not injected by caller.
+        # This keeps the pipeline runnable out-of-the-box for smoke tests and local dev.
+        if self.config.enable_evaluation and context.get("evaluation_data") is None:
+            try:
+                import pandas as pd
+                from iqfmp.core.factor_engine import get_default_data_path
+
+                data_path = get_default_data_path()
+                df = pd.read_csv(data_path)
+
+                # Standardize columns for evaluator expectations
+                if "timestamp" in df.columns and "date" not in df.columns:
+                    df["date"] = pd.to_datetime(df["timestamp"])
+
+                if "symbol" not in df.columns:
+                    df["symbol"] = "ETHUSDT"
+
+                if "forward_return" not in df.columns and "close" in df.columns:
+                    df["forward_return"] = df["close"].shift(-1) / df["close"] - 1
+                    df = df.dropna(subset=["forward_return"]).reset_index(drop=True)
+
+                context["evaluation_data"] = df
+                logger.info(f"Injected default evaluation_data: {len(df)} rows")
+            except Exception as e:
+                logger.warning(f"Failed to inject default evaluation_data: {e}")
+
         return state.update(context=context)
 
     async def _hypothesis_node(self, state: AgentState) -> AgentState:
@@ -340,6 +364,44 @@ class PipelineBuilder:
             return state.update(context=context)
         return state
 
+    async def _evaluate_node(self, state: AgentState) -> AgentState:
+        """Evaluate generated factors (StateGraph node)."""
+        agent = self._agents.get("evaluation")
+        if agent is None:
+            agent = FactorEvaluationAgent(
+                config=self.config.evaluation_config or EvaluationAgentConfig()
+            )
+            self._agents["evaluation"] = agent
+        return await agent.evaluate(state)
+
+    async def _strategy_node(self, state: AgentState) -> AgentState:
+        """Assemble strategy from evaluated factors (StateGraph node)."""
+        agent = self._agents.get("strategy")
+        if agent is None:
+            agent = StrategyAssemblyAgent(
+                config=self.config.strategy_config or StrategyConfig()
+            )
+            self._agents["strategy"] = agent
+        return await agent.assemble(state)
+
+    async def _backtest_node(self, state: AgentState) -> AgentState:
+        """Optimize/backtest assembled strategy (StateGraph node)."""
+        agent = self._agents.get("backtest")
+        if agent is None:
+            agent = BacktestOptimizationAgent(
+                config=self.config.backtest_config or BacktestConfig()
+            )
+            self._agents["backtest"] = agent
+        return await agent.optimize(state)
+
+    async def _risk_node(self, state: AgentState) -> AgentState:
+        """Run centralized risk checks (StateGraph node)."""
+        agent = self._agents.get("risk")
+        if agent is None:
+            agent = RiskCheckAgent(config=self.config.risk_config or RiskConfig())
+            self._agents["risk"] = agent
+        return await agent.check(state)
+
     async def _generate_node(self, state: AgentState) -> AgentState:
         """Generate factors with automatic deduplication.
 
@@ -350,7 +412,6 @@ class PipelineBuilder:
         Set require_vector_db=True in PipelineConfig for production use.
         """
         logger.info("Generating factors")
-        agent = self._agents.get("factor_generation")
         context = state.context.copy()
         context["pipeline_stage"] = "generate"
 
@@ -362,7 +423,11 @@ class PipelineBuilder:
         if VECTOR_AVAILABLE:
             try:
                 vector_store = FactorVectorStore()
-                similarity_searcher = SimilaritySearcher(vector_store)
+                similarity_searcher = SimilaritySearcher(
+                    similarity_threshold=float(
+                        context.get("dedup_threshold", self.config.dedup_threshold)
+                    )
+                )
                 vector_db_active = True
                 logger.info("Qdrant vector database connected - deduplication enabled")
             except Exception as e:
@@ -393,72 +458,118 @@ class PipelineBuilder:
             prompts = [h.get("description", "") for h in context["hypotheses"]]
 
         # Deduplication threshold from context or default
-        dedup_threshold = context.get("dedup_threshold", 0.85)
+        dedup_threshold = float(context.get("dedup_threshold", self.config.dedup_threshold))
+
+        # Map factor_family string to enum (if provided)
+        family_value = context.get("factor_family")
+        family_enum: Optional[FactorFamily] = None
+        if isinstance(family_value, FactorFamily):
+            family_enum = family_value
+        elif isinstance(family_value, str) and family_value.strip():
+            family_map = {f.value: f for f in FactorFamily}
+            family_enum = family_map.get(family_value.strip().lower())
 
         # Generate factors with deduplication
         generated_factors = []
         skipped_duplicates = []
 
-        for prompt in prompts[:5]:  # Limit to 5
+        # Prefer caller-injected llm_provider for tests/offline runs.
+        llm_provider_override = context.get("llm_provider")
+        factor_config = self.config.factor_config or FactorGenerationConfig(
+            name="pipeline_factor_generation",
+            security_check_enabled=True,
+            field_constraint_enabled=True,
+            include_examples=True,
+        )
+
+        async def _generate_one(prompt: str, agent: FactorGenerationAgent) -> None:
             try:
-                result = await agent.generate(
-                    prompt=prompt,
-                    factor_family=context.get("factor_family", "momentum"),
+                generated = await agent.generate(
+                    user_request=prompt,
+                    factor_family=family_enum,
                 )
-                if result.success:
-                    factor_data = {
-                        "name": result.factor.name,
-                        "family": result.factor.family,
-                        "code": result.factor.code,
-                        "description": result.factor.description,
-                    }
+                factor_data = {
+                    "name": generated.name,
+                    "family": generated.family.value,
+                    "code": generated.code,
+                    "description": generated.description,
+                }
 
-                    # Check for duplicates using vector similarity
-                    is_duplicate = False
-                    similar_factor = None
+                # Check for duplicates using vector similarity
+                is_duplicate = False
+                similar_factor: Optional[str] = None
 
-                    if similarity_searcher:
-                        try:
-                            is_duplicate, similar_result = similarity_searcher.check_duplicate(
-                                code=result.factor.code,
-                                name=result.factor.name,
-                                hypothesis=result.factor.description or "",
-                                threshold=dedup_threshold,
+                if similarity_searcher:
+                    try:
+                        is_duplicate, similar_result = similarity_searcher.check_duplicate(
+                            code=generated.code,
+                            name=generated.name,
+                            hypothesis=generated.description or "",
+                            threshold=dedup_threshold,
+                        )
+                        if is_duplicate and similar_result:
+                            similar_factor = similar_result.name
+                            logger.info(
+                                f"Factor '{generated.name}' is duplicate of "
+                                f"'{similar_factor}' (similarity: {similar_result.score:.2f})"
                             )
-                            if is_duplicate and similar_result:
-                                similar_factor = similar_result.factor_name
-                                logger.info(
-                                    f"Factor '{result.factor.name}' is duplicate of "
-                                    f"'{similar_factor}' (similarity: {similar_result.score:.2f})"
-                                )
-                        except Exception as e:
-                            logger.warning(f"Duplicate check failed: {e}")
+                    except Exception as e:
+                        logger.warning(f"Duplicate check failed: {e}")
 
-                    if is_duplicate:
-                        skipped_duplicates.append({
-                            "name": result.factor.name,
-                            "similar_to": similar_factor,
-                        })
-                    else:
-                        generated_factors.append(factor_data)
+                if is_duplicate:
+                    skipped_duplicates.append({
+                        "name": generated.name,
+                        "similar_to": similar_factor,
+                    })
+                    return
 
-                        # Store new factor in vector database
-                        if vector_store:
-                            try:
-                                factor_id = str(uuid.uuid4())
-                                vector_store.store_factor(
-                                    factor_id=factor_id,
-                                    name=result.factor.name,
-                                    code=result.factor.code,
-                                    hypothesis=result.factor.description or "",
-                                    family=result.factor.family,
-                                )
-                                logger.info(f"Stored factor '{result.factor.name}' in vector DB")
-                            except Exception as e:
-                                logger.warning(f"Failed to store factor in vector DB: {e}")
+                generated_factors.append(factor_data)
+
+                # Store new factor in vector database
+                if vector_store:
+                    try:
+                        factor_id = str(uuid.uuid4())
+                        vector_store.add_factor(
+                            factor_id=factor_id,
+                            name=generated.name,
+                            code=generated.code,
+                            hypothesis=generated.description or "",
+                            family=generated.family.value,
+                        )
+                        logger.info(f"Stored factor '{generated.name}' in vector DB")
+                    except Exception as e:
+                        logger.warning(f"Failed to store factor in vector DB: {e}")
 
             except Exception as e:
                 logger.warning(f"Factor generation failed: {e}")
+
+        if llm_provider_override is not None:
+            generation_agent = FactorGenerationAgent(
+                config=factor_config,
+                llm_provider=llm_provider_override,
+            )
+            for prompt in prompts[:5]:
+                await _generate_one(prompt, generation_agent)
+        else:
+            # Fallback to environment-configured provider for production.
+            from iqfmp.llm.provider import LLMConfig, LLMProvider
+
+            llm_config = LLMConfig.from_env()
+            async with LLMProvider(llm_config) as llm:
+                from iqfmp.llm.trace import TracingLLMProvider
+
+                traced_llm = TracingLLMProvider(
+                    llm,
+                    execution_id=str(context.get("execution_id", str(uuid.uuid4()))),
+                    conversation_id=str(context.get("conversation_id", "")) or None,
+                    agent="factor_generation",
+                )
+                generation_agent = FactorGenerationAgent(
+                    config=factor_config,
+                    llm_provider=traced_llm,
+                )
+                for prompt in prompts[:5]:
+                    await _generate_one(prompt, generation_agent)
 
         context["generated_factors"] = generated_factors
         context["skipped_duplicates"] = skipped_duplicates

@@ -7,6 +7,8 @@ trading factors using LLM, with deep understanding of:
 - Funding rate mechanics
 - Liquidation patterns
 - On-chain metrics
+
+P0 Fix: Dynamic field injection from FieldSchema
 """
 
 from typing import Any, Optional
@@ -16,6 +18,19 @@ from .base import (
     BasePromptTemplate,
     CryptoMarketType,
 )
+
+# Import dynamic capability system for field injection
+try:
+    from iqfmp.agents.field_capability import (
+        DataSourceType,
+        DynamicCapability,
+        create_capability_for_sources,
+        create_capability_context_for_prompt,
+    )
+    CAPABILITY_AVAILABLE = True
+except ImportError:
+    CAPABILITY_AVAILABLE = False
+    DataSourceType = None
 
 
 class FactorGenerationPrompt(BasePromptTemplate):
@@ -27,21 +42,73 @@ class FactorGenerationPrompt(BasePromptTemplate):
     2. 24/7 market dynamics
     3. High volatility handling
     4. Cross-exchange considerations
+
+    P0 Fix: Now uses dynamic field injection from FieldSchema instead of
+    hardcoded "ONLY 5 fields" limitation.
     """
+
+    # Prompt version for tracking (P2: Version tracking)
+    VERSION = "2.0.0"
+    PROMPT_ID = "factor_generation_crypto_v2"
 
     def __init__(
         self,
         market_type: CryptoMarketType = CryptoMarketType.PERPETUAL,
         include_advanced_fields: bool = True,
+        data_sources: Optional[list] = None,
     ) -> None:
         """Initialize factor generation prompt.
 
         Args:
             market_type: Target market type
             include_advanced_fields: Include all advanced data fields
+            data_sources: List of DataSourceType to include (default: OHLCV + DERIVATIVES)
         """
         super().__init__(AgentType.FACTOR_GENERATION, market_type)
         self.include_advanced_fields = include_advanced_fields
+
+        # P0 Fix: Initialize dynamic capability for field injection
+        self._capability: Optional[DynamicCapability] = None
+        self._data_sources = data_sources
+
+        if CAPABILITY_AVAILABLE:
+            if data_sources is None:
+                # Default: include OHLCV and derivatives (funding, OI, etc.)
+                data_sources = [DataSourceType.OHLCV, DataSourceType.DERIVATIVES]
+            self._capability = create_capability_for_sources(data_sources)
+
+    def _get_dynamic_fields_block(self) -> str:
+        """Get dynamically generated fields block from FieldSchema.
+
+        P0 Fix: Replaces hardcoded "ONLY 5 fields" with dynamic injection.
+        """
+        if self._capability is not None:
+            # Use full capability context (fields + operators)
+            return self._capability.generate_full_context()
+
+        # Fallback to legacy fields if capability not available
+        return self._get_legacy_fields_block()
+
+    def _get_legacy_fields_block(self) -> str:
+        """Legacy fields block for backward compatibility."""
+        return """## Available Data Fields (use $ prefix)
+
+**Core OHLCV Fields:**
+- `$open` - Opening price
+- `$high` - Highest price
+- `$low` - Lowest price
+- `$close` - Closing price
+- `$volume` - Trading volume
+
+**Derivative Fields (Perpetual Futures):**
+- `$funding_rate` - 8-hour funding rate (positive = longs pay shorts)
+- `$open_interest` - Total open interest in USD
+- `$liquidation_long` - Long liquidation volume
+- `$liquidation_short` - Short liquidation volume
+- `$mark_price` - Mark price for liquidation calculations
+
+If you need returns: `$close / Ref($close, -1) - 1`
+"""
 
     def get_system_prompt(self) -> str:
         """Get crypto-optimized system prompt for factor generation.
@@ -50,24 +117,19 @@ class FactorGenerationPrompt(BasePromptTemplate):
         - Provide ONLY syntax and operators, NO hardcoded indicator formulas
         - LLM should research and implement indicators itself
         - Intelligent feedback loop will guide LLM if indicators are missing
+
+        P0 Fix: Now uses dynamic field injection instead of hardcoded fields.
         """
+        # P0 Fix: Use dynamic fields block
+        fields_block = self._get_dynamic_fields_block()
+
         return f"""You are an expert quantitative factor developer specializing in **cryptocurrency markets**.
 
 Your task is to generate **Qlib expression** factors that implement the user's hypothesis.
 
 {self._get_crypto_context_block()}
 
-## Available Data Fields (use $ prefix)
-
-**ONLY these 5 fields are available. DO NOT use any other fields.**
-
-- `$open` - Opening price
-- `$high` - Highest price
-- `$low` - Lowest price
-- `$close` - Closing price
-- `$volume` - Trading volume
-
-If you need returns: `$close / Ref($close, -1) - 1`
+{fields_block}
 
 ## Qlib Expression Operators
 
@@ -365,7 +427,14 @@ Key considerations:
 
 
 class FactorRefinementPrompt(BasePromptTemplate):
-    """Prompt template for refining existing factors based on feedback."""
+    """Prompt template for refining existing factors based on feedback.
+
+    P2 Fix: Added version tracking.
+    """
+
+    # P2 Fix: Version tracking
+    VERSION = "2.0.0"
+    PROMPT_ID = "factor_refinement_crypto_v2"
 
     def __init__(self) -> None:
         super().__init__(AgentType.FACTOR_GENERATION, CryptoMarketType.PERPETUAL)

@@ -124,6 +124,25 @@ from iqfmp.agents.model_config import (
     get_agent_model,
     get_agent_temperature,
 )
+# B3/C9: Field capability and schema (Phase 2-3)
+from iqfmp.agents.field_capability import (
+    DataSourceType,
+    DynamicCapability,
+    FieldDefinition,
+    FieldRegistry,
+    FieldSchema,
+    OperatorCatalog,
+    TechnicalIndicatorCatalog,
+    INDICATOR_CATALOG,
+    create_capability_context_for_prompt,
+    create_capability_for_sources,
+    create_default_capability,
+    create_field_schema_for_crypto_perpetuals,
+    create_field_schema_from_availability,
+    create_full_capability,
+    generate_field_error_feedback,
+    validate_expression_fields,
+)
 
 __all__ = [
     # Orchestrator
@@ -229,4 +248,21 @@ __all__ = [
     "get_model_registry",
     "get_agent_model",
     "get_agent_temperature",
+    # B3/C9: Field Capability & Schema
+    "DataSourceType",
+    "DynamicCapability",
+    "FieldDefinition",
+    "FieldRegistry",
+    "FieldSchema",
+    "OperatorCatalog",
+    "TechnicalIndicatorCatalog",
+    "INDICATOR_CATALOG",
+    "create_capability_context_for_prompt",
+    "create_capability_for_sources",
+    "create_default_capability",
+    "create_field_schema_for_crypto_perpetuals",
+    "create_field_schema_from_availability",
+    "create_full_capability",
+    "generate_field_error_feedback",
+    "validate_expression_fields",
 ]

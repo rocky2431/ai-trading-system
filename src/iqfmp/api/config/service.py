@@ -62,7 +62,7 @@ class ConfigService:
             "agent_id": "factor_generation",
             "agent_name": "Factor Generation Agent",
             "description": "LLM-driven factor code generation",
-            "default_model": "deepseek/deepseek-coder-v3",  # Best for code
+            "default_model": "deepseek/deepseek-v3.2-speciale",  # Best for code generation
         },
         {
             "agent_id": "factor_evaluation",
@@ -611,7 +611,7 @@ class ConfigService:
     async def test_llm(self) -> TestLLMResponse:
         """Test LLM connection."""
         api_key = self._config.get("api_key")
-        model = self._config.get("model", "deepseek/deepseek-chat-v3-0324")
+        model = self._config.get("model", "deepseek/deepseek-v3.2-speciale")
 
         if not api_key:
             return TestLLMResponse(

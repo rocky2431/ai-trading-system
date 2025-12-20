@@ -223,6 +223,11 @@ async def create_mining_task(
             factor_families=request.factor_families,
             target_count=request.target_count,
             auto_evaluate=request.auto_evaluate,
+            # Advanced configuration (optional)
+            data_config=request.data_config.model_dump() if request.data_config else None,
+            benchmark_config=request.benchmark_config.model_dump() if request.benchmark_config else None,
+            ml_config=request.ml_config.model_dump() if request.ml_config else None,
+            robustness_config=request.robustness_config.model_dump() if request.robustness_config else None,
         )
         return MiningTaskCreateResponse(
             success=True,

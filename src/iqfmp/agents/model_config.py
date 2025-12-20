@@ -85,10 +85,10 @@ DEFAULT_AGENT_MODELS: dict[AgentType, AgentModelConfig] = {
     ),
     AgentType.FACTOR_GENERATION: AgentModelConfig(
         agent_type=AgentType.FACTOR_GENERATION,
-        model_id="deepseek/deepseek-coder-v3",
+        model_id="deepseek/deepseek-v3.2-speciale",  # Updated: V3.2 Speciale for better code generation
         temperature=0.3,  # Lower for precise code generation
         max_tokens=4096,
-        description="DeepSeek Coder V3 is optimized for code generation with Qlib syntax",
+        description="DeepSeek V3.2 Speciale is optimized for code generation with Qlib syntax",
     ),
     AgentType.EVALUATION: AgentModelConfig(
         agent_type=AgentType.EVALUATION,
@@ -164,58 +164,73 @@ class AgentModelRegistry:
             self._load_from_config_service()
 
     def _load_from_config_service(self) -> None:
-        """Load agent configurations from ConfigService.
+        """Load agent configurations from config file.
 
-        Loads model_id, temperature, and system_prompt from ConfigService.
-        Falls back to defaults if ConfigService is unavailable or values are not set.
+        Loads model_id, temperature, and system_prompt directly from ~/.iqfmp/config.json.
+        This ensures we always get the latest config, even in Celery workers.
+        Falls back to defaults if config file is unavailable or values are not set.
         """
+        import json
+        from pathlib import Path
+
+        config_file = Path.home() / ".iqfmp" / "config.json"
+
         try:
-            self._config_service = get_config_service()
-            if self._config_service is None:
+            if not config_file.exists():
+                logger.info("Config file not found, using default agent configs")
                 return
 
-            agent_config = self._config_service.get_agent_config()
+            with open(config_file) as f:
+                saved_config = json.load(f)
 
-            for agent in agent_config.agents:
+            agent_configs = saved_config.get("agents", {})
+
+            # Agent default temperatures (same as ConfigService.AGENT_DEFAULT_TEMPERATURES)
+            default_temps = {
+                "factor_generation": 0.3,
+                "factor_evaluation": 0.5,
+                "strategy_assembly": 0.7,
+                "backtest_optimization": 0.3,
+                "risk_check": 0.4,
+            }
+
+            for agent_id, agent_config in agent_configs.items():
                 # Map agent_id to AgentType
-                agent_type = AGENT_ID_MAP.get(agent.agent_id)
+                agent_type = AGENT_ID_MAP.get(agent_id)
                 if agent_type is None:
                     continue
 
+                model_id = agent_config.get("model_id")
+                enabled = agent_config.get("enabled", True)
+
                 # Only update if a model is configured and agent is enabled
-                if agent.model_id and agent.enabled:
+                if model_id and enabled:
                     default_config = DEFAULT_AGENT_MODELS[agent_type]
 
-                    # Use ConfigService temperature if set, otherwise use default
-                    temperature = (
-                        agent.temperature
-                        if hasattr(agent, "temperature") and agent.temperature is not None
-                        else default_config.temperature
-                    )
+                    # Use config temperature if set, otherwise use default
+                    temperature = agent_config.get("temperature")
+                    if temperature is None:
+                        temperature = default_temps.get(agent_id, default_config.temperature)
 
-                    # Use ConfigService system_prompt if set (None means use default)
-                    system_prompt = (
-                        agent.system_prompt
-                        if hasattr(agent, "system_prompt")
-                        else None
-                    )
+                    # Use config system_prompt if set (None means use default)
+                    system_prompt = agent_config.get("system_prompt")
 
                     self._configs[agent_type] = AgentModelConfig(
                         agent_type=agent_type,
-                        model_id=agent.model_id,
+                        model_id=model_id,
                         temperature=temperature,
                         max_tokens=default_config.max_tokens,
-                        description=agent.description or default_config.description,
+                        description=default_config.description,
                         system_prompt=system_prompt,
                     )
                     logger.info(
-                        f"Loaded config for {agent.agent_id}: "
-                        f"model={agent.model_id}, temp={temperature}, "
+                        f"Loaded config for {agent_id}: "
+                        f"model={model_id}, temp={temperature}, "
                         f"prompt={'custom' if system_prompt else 'default'}"
                     )
 
         except Exception as e:
-            logger.warning(f"Failed to load from ConfigService: {e}, using defaults")
+            logger.warning(f"Failed to load from config file: {e}, using defaults")
 
     def reload_from_config_service(self) -> None:
         """Force reload configurations from ConfigService."""

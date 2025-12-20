@@ -44,704 +44,189 @@ class FactorGenerationPrompt(BasePromptTemplate):
         self.include_advanced_fields = include_advanced_fields
 
     def get_system_prompt(self) -> str:
-        """Get crypto-optimized system prompt for factor generation."""
+        """Get crypto-optimized system prompt for factor generation.
+
+        Design Philosophy:
+        - Provide ONLY syntax and operators, NO hardcoded indicator formulas
+        - LLM should research and implement indicators itself
+        - Intelligent feedback loop will guide LLM if indicators are missing
+        """
         return f"""You are an expert quantitative factor developer specializing in **cryptocurrency markets**.
 
-Your task is to generate Python factor code for the Qlib-compatible IQFMP system.
+Your task is to generate **Qlib expression** factors that implement the user's hypothesis.
 
 {self._get_crypto_context_block()}
 
-{self._get_available_fields_block(include_all=self.include_advanced_fields)}
+## Available Data Fields (use $ prefix)
 
-## Factor Development Guidelines
+**ONLY these 5 fields are available. DO NOT use any other fields.**
 
-### Code Standards:
-1. **Function signature**: `def factor_name(df: pd.DataFrame) -> pd.Series`
-2. **Input**: DataFrame with columns from Available Data Fields
-3. **Output**: pd.Series with same index, values typically z-scored or normalized
-4. **Dependencies**: Only use `pandas`, `numpy` (pre-imported)
-5. **NaN handling**: Use `.fillna(0)` or appropriate method
-6. **Lookback**: Be explicit about lookback periods
+- `$open` - Opening price
+- `$high` - Highest price
+- `$low` - Lowest price
+- `$close` - Closing price
+- `$volume` - Trading volume
 
-### Crypto-Specific Best Practices:
-1. **No overnight gaps**: Crypto trades 24/7, no gap handling needed
-2. **Funding rate**: Available every 8 hours, use rolling mean for intraday
-3. **Volume**: Use `quote_volume` (USDT) for cross-asset comparisons
-4. **Volatility**: Crypto vol is ~5-10x equity vol, adjust thresholds
-5. **Regime detection**: Bull/bear/ranging markets behave very differently
-6. **Exchange hours**: Consider Asia (00:00-08:00 UTC) vs US (13:00-21:00 UTC)
+If you need returns: `$close / Ref($close, -1) - 1`
 
-### Factor Normalization:
-- Z-score: `(x - x.rolling(60).mean()) / (x.rolling(60).std() + 1e-10)`
-- Rank: `x.rank(pct=True) - 0.5`
-- Min-max: `(x - x.min()) / (x.max() - x.min() + 1e-10)`
+## Qlib Expression Operators
 
-### Output Format:
-Return ONLY the Python code in a ```python code block.
-Include a detailed docstring explaining:
-- What the factor captures
-- Why it might predict returns in crypto
-- Any crypto-specific considerations
+You MUST use Qlib expression syntax. DO NOT write Python functions.
+
+### Time-Series Operators:
+- `Ref($field, -N)` - Reference N periods ago
+- `Mean($field, N)` - Rolling mean (SMA)
+- `Std($field, N)` - Rolling standard deviation
+- `Sum($field, N)` - Rolling sum
+- `Max($field, N)` - Rolling maximum (or element-wise: Max(a, b))
+- `Min($field, N)` - Rolling minimum (or element-wise: Min(a, b))
+- `Delta($field, N)` - Change over N periods
+- `EMA($field, N)` - Exponential moving average
+- `WMA($field, N)` - Weighted moving average
+
+### Technical Indicators:
+- `RSI($field, N)` - Relative Strength Index
+- `MACD($field, fast, slow, signal)` - MACD histogram
+
+### Math & Logic:
+- `Abs(expr)`, `Log(expr)`, `Sign(expr)` - Math functions
+- `Rank($field)` - Cross-sectional rank
+- `Corr($f1, $f2, N)`, `Cov($f1, $f2, N)` - Correlation/Covariance
+- `If(condition, true_val, false_val)` - Conditional logic
+- `+`, `-`, `*`, `/`, `>`, `<` - Arithmetic and comparison
+
+## Your Task
+
+**CRITICAL**: You MUST implement ALL indicators mentioned in the user's request.
+
+If the user mentions indicators like WR, SSL, MACD, Zigzag, Bollinger, etc.:
+1. Research the indicator's mathematical formula
+2. Translate it to Qlib expression syntax using available operators
+3. Combine multiple indicators if requested
+
+**Do NOT skip any indicator.** If you're unsure how to implement one, make your best attempt.
+The system will provide feedback if your implementation is incomplete.
+
+## Output Format
+
+Return ONLY a single Qlib expression. No Python code, no markdown, no explanation before.
+
+Example output:
+(EMA($close, 12) - EMA($close, 26)) / $close
+
+You may add a brief comment after the expression starting with #
 """
 
     def get_examples(self) -> list[dict[str, str]]:
-        """Get crypto-specific few-shot examples."""
+        """Get crypto-specific few-shot examples using Qlib expressions."""
         return [
             {
                 "role": "user",
-                "content": "Create a factor that captures funding rate momentum"
+                "content": "Create a momentum factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def funding_rate_momentum(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Funding Rate Momentum Factor.
-
-    Captures the trend in perpetual futures funding rates.
-
-    Crypto-specific insight:
-    - Positive funding = longs pay shorts (bullish sentiment, crowded longs)
-    - Rising funding = increasing bullish sentiment
-    - BUT extreme positive funding often precedes reversals
-
-    Signal interpretation:
-    - Positive momentum in funding → Short-term bullish, but watch for extremes
-    - We use z-score to identify extreme readings
-
-    Args:
-        df: DataFrame with 'funding_rate' column
-
-    Returns:
-        Z-scored funding rate momentum
-    \"\"\"
-    if 'funding_rate' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    funding = df['funding_rate']
-
-    # 3-period momentum (24 hours for 8h funding)
-    funding_momentum = funding.diff(3)
-
-    # Z-score for normalization
-    mean = funding_momentum.rolling(30).mean()
-    std = funding_momentum.rolling(30).std()
-    z_score = (funding_momentum - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
+                "content": """Ref($close, -20) / $close - 1
+# 20-period momentum: current price relative to 20 periods ago"""
             },
             {
                 "role": "user",
-                "content": "Create a factor based on liquidation imbalance"
+                "content": "Create a mean reversion factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def liquidation_pressure(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Liquidation Pressure Factor.
-
-    Measures the imbalance between long and short liquidations.
-
-    Crypto-specific insight:
-    - Crypto markets have high leverage (up to 125x)
-    - Liquidation cascades can cause sharp moves
-    - Net long liquidations → potential buying opportunity (forced sellers exhausted)
-    - Net short liquidations → potential shorting opportunity (forced buyers exhausted)
-
-    Signal interpretation:
-    - Positive value = more longs liquidated → contrarian long signal
-    - Negative value = more shorts liquidated → contrarian short signal
-    - Works best after the cascade completes (use lagged values)
-
-    Args:
-        df: DataFrame with 'liquidation_long' and 'liquidation_short' columns
-
-    Returns:
-        Normalized liquidation pressure signal
-    \"\"\"
-    import numpy as np
-
-    if 'liquidation_long' not in df.columns or 'liquidation_short' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    liq_long = df['liquidation_long'].fillna(0)
-    liq_short = df['liquidation_short'].fillna(0)
-    liq_total = liq_long + liq_short + 1e-10
-
-    # Net liquidation imbalance: positive = more longs liquidated
-    imbalance = (liq_long - liq_short) / liq_total
-
-    # Rolling sum for smoother signal (last 6 periods)
-    rolling_imbalance = imbalance.rolling(6).sum()
-
-    # Z-score normalization
-    mean = rolling_imbalance.rolling(48).mean()
-    std = rolling_imbalance.rolling(48).std()
-    z_score = (rolling_imbalance - mean) / (std + 1e-10)
-
-    # Lag by 1 period - trade AFTER the cascade
-    signal = z_score.shift(1)
-
-    return signal.fillna(0)
-```"""
+                "content": """($close - Mean($close, 20)) / Std($close, 20)
+# Z-score mean reversion: how many std devs price is from 20-period mean"""
             },
             {
                 "role": "user",
-                "content": "Create a factor that combines volume and price for crypto"
+                "content": "Create a volume surge factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def volume_price_confirmation(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Volume-Price Confirmation Factor.
-
-    Measures whether price moves are confirmed by volume.
-
-    Crypto-specific insight:
-    - Crypto volume can be manipulated (wash trading)
-    - Use quote_volume (USDT) for cross-asset comparison
-    - High volume on up-moves = genuine buying pressure
-    - High volume on down-moves = genuine selling pressure
-    - Low volume moves tend to reverse
-
-    Signal interpretation:
-    - Positive = upward price move with high volume (bullish confirmation)
-    - Negative = downward price move with high volume (bearish confirmation)
-    - Near zero = unconfirmed move (potential reversal)
-
-    Args:
-        df: DataFrame with 'close' and 'volume' (or 'quote_volume') columns
-
-    Returns:
-        Volume-confirmed momentum signal
-    \"\"\"
-    import numpy as np
-
-    # Use quote_volume if available (more reliable cross-asset)
-    vol_col = 'quote_volume' if 'quote_volume' in df.columns else 'volume'
-
-    if vol_col not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    # Price return (5-period for crypto's higher frequency)
-    returns = df['close'].pct_change(5)
-
-    # Volume ratio: current vs 20-period average
-    vol = df[vol_col]
-    vol_ratio = vol / vol.rolling(20).mean()
-
-    # Log volume ratio to reduce impact of volume spikes
-    vol_signal = np.log1p(vol_ratio - 1)
-
-    # Combine: direction from returns, magnitude from volume
-    raw_signal = np.sign(returns) * vol_signal.abs()
-
-    # Smooth and normalize
-    smoothed = raw_signal.rolling(3).mean()
-    mean = smoothed.rolling(60).mean()
-    std = smoothed.rolling(60).std()
-    z_score = (smoothed - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
+                "content": """$volume / Mean($volume, 20)
+# Volume ratio: current volume relative to 20-period average"""
             },
             {
                 "role": "user",
-                "content": "Create a factor based on open interest changes"
+                "content": "Create a volatility factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def open_interest_momentum(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Open Interest Momentum Factor.
-
-    Tracks changes in futures open interest to gauge market participation.
-
-    Crypto-specific insight:
-    - Rising OI + rising price = new longs entering (bullish)
-    - Rising OI + falling price = new shorts entering (bearish)
-    - Falling OI + rising price = short covering (weak rally)
-    - Falling OI + falling price = long liquidation (weak decline)
-
-    The factor captures conviction behind price moves.
-
-    Signal interpretation:
-    - High positive = rising OI confirms price direction
-    - High negative = falling OI suggests weak move
-    - Combined with price direction for final signal
-
-    Args:
-        df: DataFrame with 'close' and 'open_interest' columns
-
-    Returns:
-        OI-confirmed momentum signal
-    \"\"\"
-    import numpy as np
-
-    if 'open_interest' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    oi = df['open_interest']
-    price = df['close']
-
-    # OI change (percentage)
-    oi_pct_change = oi.pct_change(3)
-
-    # Price direction
-    price_direction = np.sign(price.pct_change(3))
-
-    # Raw signal: OI change magnitude * price direction
-    # Positive when OI rising with price, negative when OI falling
-    raw_signal = oi_pct_change * price_direction
-
-    # Z-score normalization
-    mean = raw_signal.rolling(48).mean()
-    std = raw_signal.rolling(48).std()
-    z_score = (raw_signal - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
+                "content": """Std($close, 20) / Std($close, 60)
+# Volatility ratio: short-term vs long-term volatility regime"""
             },
             {
                 "role": "user",
-                "content": "Create a crypto volatility regime factor"
+                "content": "Create an RSI-based factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def volatility_regime(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Volatility Regime Factor.
-
-    Classifies the current volatility regime for regime-adaptive trading.
-
-    Crypto-specific insight:
-    - Crypto volatility is 5-10x higher than equities
-    - Mean reversion works better in high vol regimes
-    - Momentum works better in trending low-vol regimes
-    - Extremely low vol often precedes explosive moves
-
-    Regime definitions (annualized vol):
-    - Low: < 40% (consolidation, breakout imminent)
-    - Normal: 40-80% (typical crypto conditions)
-    - High: 80-120% (elevated, good for mean reversion)
-    - Extreme: > 120% (crisis/euphoria, reduced position sizing)
-
-    Signal interpretation:
-    - Factor returns the normalized vol regime indicator
-    - Positive = above-normal volatility
-    - Negative = below-normal volatility (breakout watch)
-
-    Args:
-        df: DataFrame with 'close' column
-
-    Returns:
-        Volatility regime indicator
-    \"\"\"
-    import numpy as np
-
-    price = df['close']
-    returns = price.pct_change()
-
-    # Realized volatility (20-period, annualized for crypto = sqrt(365*24))
-    vol_20 = returns.rolling(20).std() * np.sqrt(365 * 24)
-
-    # Long-term vol for regime comparison (60-period)
-    vol_60 = returns.rolling(60).std() * np.sqrt(365 * 24)
-
-    # Regime indicator: current vs long-term
-    vol_ratio = vol_20 / (vol_60 + 1e-10)
-
-    # Log transform for better distribution
-    log_ratio = np.log(vol_ratio + 1e-10)
-
-    # Z-score normalize
-    mean = log_ratio.rolling(120).mean()
-    std = log_ratio.rolling(120).std()
-    z_score = (log_ratio - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
-            },
-            # === NEW CRYPTO-SPECIFIC EXAMPLES ===
-            {
-                "role": "user",
-                "content": "Create an orderbook depth imbalance factor"
-            },
-            {
-                "role": "assistant",
-                "content": """```python
-def orderbook_imbalance(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Orderbook Depth Imbalance Factor.
-
-    Measures the bid-ask imbalance in the orderbook.
-
-    Crypto-specific insight:
-    - Crypto orderbooks are thinner than equity markets
-    - Imbalance often predicts short-term price direction
-    - Large bid walls can be spoofed (use with caution)
-    - Combine with volume for confirmation
-
-    Signal interpretation:
-    - Positive = more bids than asks (bullish pressure)
-    - Negative = more asks than bids (bearish pressure)
-    - Extreme readings often precede moves in that direction
-
-    Args:
-        df: DataFrame with 'bid_volume' and 'ask_volume' columns
-
-    Returns:
-        Z-scored orderbook imbalance
-    \"\"\"
-    if 'bid_volume' not in df.columns or 'ask_volume' not in df.columns:
-        # Fallback to depth_imbalance if available
-        if 'depth_imbalance' in df.columns:
-            imbalance = df['depth_imbalance']
-        else:
-            return pd.Series(0, index=df.index)
-    else:
-        bid_vol = df['bid_volume'].fillna(0)
-        ask_vol = df['ask_volume'].fillna(0)
-        total = bid_vol + ask_vol + 1e-10
-
-        # Imbalance: (bid - ask) / (bid + ask)
-        imbalance = (bid_vol - ask_vol) / total
-
-    # Smooth to reduce noise (orderbooks are noisy)
-    smoothed = imbalance.rolling(5).mean()
-
-    # Z-score normalization
-    mean = smoothed.rolling(60).mean()
-    std = smoothed.rolling(60).std()
-    z_score = (smoothed - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
+                "content": """RSI($close, 14)
+# 14-period RSI: values > 70 overbought, < 30 oversold"""
             },
             {
                 "role": "user",
-                "content": "Create a taker buy ratio sentiment factor"
+                "content": "Create a MACD factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def taker_sentiment(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Taker Buy/Sell Ratio Sentiment Factor.
-
-    Measures aggressive buying vs selling pressure.
-
-    Crypto-specific insight:
-    - Taker = market order that crosses the spread
-    - Taker buy ratio > 0.5 = net aggressive buying
-    - Taker buy ratio < 0.5 = net aggressive selling
-    - Extreme readings (> 0.65 or < 0.35) often reverse
-    - More reliable than passive orderbook analysis
-
-    Signal interpretation:
-    - Use as momentum (follow the flow) at moderate levels
-    - Use as contrarian at extreme levels
-    - This factor uses z-score, so it auto-adjusts
-
-    Args:
-        df: DataFrame with 'taker_buy_ratio' column
-
-    Returns:
-        Z-scored taker sentiment signal
-    \"\"\"
-    if 'taker_buy_ratio' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    taker = df['taker_buy_ratio'].fillna(0.5)
-
-    # Center around 0 (0.5 is neutral)
-    centered = taker - 0.5
-
-    # Rolling momentum of taker flow
-    momentum = centered.diff(3)
-
-    # Z-score
-    mean = momentum.rolling(48).mean()
-    std = momentum.rolling(48).std()
-    z_score = (momentum - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
+                "content": """MACD($close, 12, 26, 9)
+# MACD histogram: difference between MACD line and signal line"""
             },
             {
                 "role": "user",
-                "content": "Create a funding rate extreme mean reversion factor"
+                "content": "Create a price range factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def funding_extreme_reversal(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Funding Rate Extreme Mean Reversion Factor.
-
-    Captures mean reversion opportunities from extreme funding rates.
-
-    Crypto-specific insight:
-    - Normal funding: -0.01% to +0.01% per 8h
-    - Elevated: ±0.01% to ±0.05%
-    - Extreme: > ±0.05% per 8h
-    - Extreme positive funding = crowded longs = SHORT signal
-    - Extreme negative funding = crowded shorts = LONG signal
-
-    This factor is CONTRARIAN:
-    - Positive value = extreme positive funding = signal to SHORT
-    - Negative value = extreme negative funding = signal to LONG
-
-    Args:
-        df: DataFrame with 'funding_rate' column
-
-    Returns:
-        Contrarian signal based on funding extremes
-    \"\"\"
-    import numpy as np
-
-    if 'funding_rate' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    funding = df['funding_rate']
-
-    # Z-score of funding rate
-    mean = funding.rolling(90).mean()  # 30 days of 8h data
-    std = funding.rolling(90).std()
-    z_score = (funding - mean) / (std + 1e-10)
-
-    # Contrarian signal: extreme positive funding → negative signal
-    # Apply sigmoid-like transformation for stronger extremes
-    signal = -np.tanh(z_score)  # Negative because contrarian
-
-    # Only trade extremes: dampen signal near zero
-    extreme_mask = np.abs(z_score) > 1.5
-    dampened = signal * extreme_mask.astype(float)
-
-    # Smooth for stability
-    smoothed = dampened.rolling(3).mean()
-
-    return smoothed.fillna(0)
-```"""
+                "content": """($high - $low) / $close
+# Intraday price range normalized by close price"""
             },
             {
                 "role": "user",
-                "content": "Create an exchange netflow on-chain factor"
+                "content": "Create a trend strength factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def exchange_flow_signal(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Exchange Net Flow On-Chain Factor.
-
-    Tracks tokens flowing into/out of exchanges.
-
-    Crypto-specific insight (on-chain data):
-    - Inflow to exchange = potential sell pressure (coins ready to sell)
-    - Outflow from exchange = accumulation (coins moving to cold storage)
-    - Works best for major coins (BTC, ETH) with reliable on-chain data
-    - Has lead time of hours to days over price
-
-    Signal interpretation:
-    - Negative netflow (outflow > inflow) = bullish (accumulation)
-    - Positive netflow (inflow > outflow) = bearish (distribution)
-    - We INVERT the sign so positive signal = bullish
-
-    Args:
-        df: DataFrame with 'exchange_netflow' or 'exchange_inflow'/'exchange_outflow'
-
-    Returns:
-        Z-scored exchange flow signal (positive = bullish)
-    \"\"\"
-    import numpy as np
-
-    # Try netflow column first
-    if 'exchange_netflow' in df.columns:
-        netflow = df['exchange_netflow']
-    elif 'exchange_inflow' in df.columns and 'exchange_outflow' in df.columns:
-        netflow = df['exchange_inflow'] - df['exchange_outflow']
-    else:
-        return pd.Series(0, index=df.index)
-
-    netflow = netflow.fillna(0)
-
-    # Cumulative flow over rolling window (7 days = 168 hours)
-    rolling_flow = netflow.rolling(168).sum()
-
-    # Z-score (long window due to on-chain data noise)
-    mean = rolling_flow.rolling(720).mean()  # 30 days
-    std = rolling_flow.rolling(720).std()
-    z_score = (rolling_flow - mean) / (std + 1e-10)
-
-    # INVERT: negative netflow (outflow) is bullish
-    signal = -z_score
-
-    return signal.fillna(0)
-```"""
+                "content": """Abs(Delta($close, 10)) / Mean(Abs(Delta($close, 1)), 10)
+# Trend strength: 10-day move relative to average daily moves"""
             },
             {
                 "role": "user",
-                "content": "Create a long/short ratio contrarian factor"
+                "content": "Create a volume-price correlation factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def long_short_contrarian(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Long/Short Ratio Contrarian Factor.
-
-    Uses retail positioning as a contrarian indicator.
-
-    Crypto-specific insight:
-    - Long/short ratio > 1 = more accounts are long
-    - Long/short ratio < 1 = more accounts are short
-    - Retail is often wrong at extremes
-    - Extreme long positioning = bearish contrarian signal
-    - Extreme short positioning = bullish contrarian signal
-
-    Signal interpretation:
-    - Positive value = extreme long positioning = potential SHORT
-    - Negative value = extreme short positioning = potential LONG
-    - Works best at extremes, neutral signal near average
-
-    Args:
-        df: DataFrame with 'long_short_ratio' column
-
-    Returns:
-        Contrarian positioning signal
-    \"\"\"
-    import numpy as np
-
-    if 'long_short_ratio' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    ls_ratio = df['long_short_ratio'].fillna(1.0)
-
-    # Log transform (ratio of 2 = -ratio of 0.5)
-    log_ratio = np.log(ls_ratio + 1e-10)
-
-    # Z-score
-    mean = log_ratio.rolling(72).mean()  # 3 days
-    std = log_ratio.rolling(72).std()
-    z_score = (log_ratio - mean) / (std + 1e-10)
-
-    # Contrarian signal (extreme longs = short signal)
-    # But only at extremes (|z| > 1.5)
-    contrarian = -np.tanh(z_score * 0.5)
-
-    # Dampen non-extreme signals
-    extreme_weight = np.minimum(np.abs(z_score) / 1.5, 1.0)
-    signal = contrarian * extreme_weight
-
-    return signal.fillna(0)
-```"""
+                "content": """Corr($close, $volume, 20)
+# 20-period correlation between price and volume"""
             },
             {
                 "role": "user",
-                "content": "Create a perpetual basis spread factor"
+                "content": "Create a short-term reversal factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def perpetual_basis(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Perpetual Futures Basis Spread Factor.
-
-    Measures the spread between perpetual mark price and spot index.
-
-    Crypto-specific insight:
-    - Mark price = fair price for perpetual futures
-    - Index price = spot price from major exchanges
-    - Positive basis (mark > index) = futures premium = bullish sentiment
-    - Negative basis (mark < index) = futures discount = bearish sentiment
-    - Extreme basis often mean reverts (arbitrage)
-
-    Signal interpretation:
-    - Positive = premium (can be momentum or mean-reversion signal)
-    - This factor uses it as momentum: follow the sentiment
-    - For mean-reversion, negate the output
-
-    Args:
-        df: DataFrame with 'mark_price' and 'index_price' columns
-
-    Returns:
-        Z-scored basis spread signal
-    \"\"\"
-    import numpy as np
-
-    if 'mark_price' not in df.columns or 'index_price' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    mark = df['mark_price']
-    index = df['index_price']
-
-    # Basis in percentage terms
-    basis = (mark - index) / (index + 1e-10) * 100
-
-    # Annualized basis (funding is 3x daily)
-    annualized_basis = basis * 3 * 365
-
-    # Z-score
-    mean = annualized_basis.rolling(48).mean()
-    std = annualized_basis.rolling(48).std()
-    z_score = (annualized_basis - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
+                "content": """(Mean($close, 5) - Mean($close, 20)) / Std($close, 20)
+# Short-term vs long-term MA difference, normalized by volatility"""
             },
             {
                 "role": "user",
-                "content": "Create a whale transaction on-chain factor"
+                "content": "Create a breakout factor"
             },
             {
                 "role": "assistant",
-                "content": """```python
-def whale_activity(df: pd.DataFrame) -> pd.Series:
-    \"\"\"Whale Transaction Activity Factor.
-
-    Tracks large transactions as a proxy for institutional activity.
-
-    Crypto-specific insight (on-chain data):
-    - Whale = transaction > $100k (or $1M for BTC)
-    - High whale activity during downtrend = accumulation
-    - High whale activity during uptrend = distribution
-    - Combine with price direction for context
-
-    Signal interpretation:
-    - We use whale activity * inverse price direction
-    - High activity + falling price = buying opportunity (accumulation)
-    - High activity + rising price = selling signal (distribution)
-
-    Args:
-        df: DataFrame with 'whale_transactions' and 'close' columns
-
-    Returns:
-        Context-aware whale activity signal
-    \"\"\"
-    import numpy as np
-
-    if 'whale_transactions' not in df.columns:
-        return pd.Series(0, index=df.index)
-
-    whale_tx = df['whale_transactions'].fillna(0)
-    price = df['close']
-
-    # Normalize whale activity
-    whale_mean = whale_tx.rolling(168).mean()  # 7 days
-    whale_std = whale_tx.rolling(168).std()
-    whale_z = (whale_tx - whale_mean) / (whale_std + 1e-10)
-
-    # Price direction (7-day return)
-    price_direction = np.sign(price.pct_change(168))
-
-    # Contrarian signal: high whale activity during downtrend = bullish
-    signal = whale_z * (-price_direction)
-
-    # Smooth for stability
-    smoothed = signal.rolling(24).mean()
-
-    # Final z-score
-    mean = smoothed.rolling(720).mean()
-    std = smoothed.rolling(720).std()
-    z_score = (smoothed - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```"""
+                "content": """($close - Max($high, 20)) / Std($close, 20)
+# Distance from 20-period high, negative means below recent highs"""
+            },
+            {
+                "role": "user",
+                "content": "Create an EMA crossover factor"
+            },
+            {
+                "role": "assistant",
+                "content": """(EMA($close, 12) - EMA($close, 26)) / $close
+# EMA difference normalized by price, positive = bullish crossover"""
             },
         ]
 
@@ -778,11 +263,12 @@ def whale_activity(df: pd.DataFrame) -> pd.Series:
         if extra_context:
             parts.append(f"\n## Additional Context\n{extra_context}")
 
-        # Add instruction
+        # Add instruction - MUST match system prompt (Qlib expression, NOT Python)
         parts.append(
             "\n## Task\n"
-            "Generate a Python factor function following the guidelines in the system prompt.\n"
-            "Ensure the factor is optimized for cryptocurrency markets."
+            "Generate a **Qlib expression** that implements the requested factor.\n"
+            "Output ONLY the expression, no Python code, no markdown code blocks.\n"
+            "You may add a brief comment after the expression starting with #"
         )
 
         return "\n".join(parts)
@@ -913,8 +399,8 @@ Your task is to REFINE an existing factor based on backtest feedback.
    - Consider funding rate regime
 
 ## Output Format:
-Return the REFINED Python code in a ```python code block.
-Explain what changes were made and why.
+Return the REFINED Qlib expression ONLY. No Python code, no markdown code blocks.
+You may add a brief comment after the expression starting with # to explain changes.
 """
 
     def get_examples(self) -> list[dict[str, str]]:
@@ -937,11 +423,9 @@ Explain what changes were made and why.
         Returns:
             Complete refinement prompt
         """
-        return f"""## Original Factor Code
+        return f"""## Original Factor Expression
 
-```python
 {original_code}
-```
 
 ## Backtest Feedback
 

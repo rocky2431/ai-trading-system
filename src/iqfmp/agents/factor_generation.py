@@ -18,6 +18,24 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional, Protocol
 
+from iqfmp.llm.validation import (
+    ExpressionGate,
+    ExpressionValidationResult,
+    FieldSet,
+)
+from iqfmp.agents.field_capability import (
+    DataSourceType,
+    DynamicCapability,
+    FieldRegistry,
+    OperatorCatalog,
+    TechnicalIndicatorCatalog,
+    INDICATOR_CATALOG,
+    create_default_capability,
+    create_capability_for_sources,
+    validate_expression_fields,
+    generate_field_error_feedback,
+)
+
 
 class FactorGenerationError(Exception):
     """Base error for factor generation failures."""
@@ -324,14 +342,25 @@ class FactorPromptTemplate:
 
     For direct access to the enhanced prompts, use:
         from iqfmp.llm.prompts import FactorGenerationPrompt
+
+    B3 Feature: Dynamic field capability injection
+    - Automatically detects available data sources
+    - Injects field constraints into prompts
+    - Provides operator reference for LLM
     """
 
-    def __init__(self, use_crypto_prompts: bool = True) -> None:
+    def __init__(
+        self,
+        use_crypto_prompts: bool = True,
+        data_sources: list[DataSourceType] | None = None,
+    ) -> None:
         """Initialize prompt template.
 
         Args:
             use_crypto_prompts: If True, use crypto-optimized prompts from
                 iqfmp.llm.prompts module. If False, use legacy prompts.
+            data_sources: List of data sources to enable. If None, uses
+                OHLCV + DERIVATIVES by default.
         """
         self._use_crypto = use_crypto_prompts
         self._crypto_prompt = None
@@ -343,6 +372,12 @@ class FactorPromptTemplate:
             except ImportError:
                 self._use_crypto = False
 
+        # B3: Initialize dynamic capability with configured data sources
+        if data_sources is None:
+            self._capability = create_default_capability()
+        else:
+            self._capability = create_capability_for_sources(data_sources)
+
         # Legacy prompts as fallback
         self._system_prompt = self._build_system_prompt()
         self._examples = self._build_examples()
@@ -351,37 +386,34 @@ class FactorPromptTemplate:
         """Build the system prompt for factor generation.
 
         Returns crypto-optimized prompt if available, otherwise legacy.
+        B3: Now uses dynamic field capability injection.
         """
         if self._crypto_prompt:
             return self._crypto_prompt.get_system_prompt()
 
-        # Legacy prompt (fallback)
-        return """You are an expert quantitative factor developer specializing in cryptocurrency markets.
+        # B3: Build system prompt with dynamic field constraints
+        base_prompt = """You are an expert quantitative factor developer specializing in cryptocurrency markets.
 
-Your task is to generate Python factor code for the Qlib-compatible IQFMP system.
+Your task is to generate **Qlib expression** factors that implement the user's hypothesis.
 
-## Crypto Market Context
-- 24/7 trading (no market close)
-- High leverage available (up to 125x)
-- Funding rate mechanism in perpetuals
-- Typical daily volatility: ~5%
+"""
+        # Inject dynamic field constraints and operators from capability
+        capability_context = self._capability.generate_full_context()
 
-## Guidelines
-1. Generate clean, well-documented Python code
-2. Use pandas and numpy for calculations
-3. Function signature: def factor_name(df: pd.DataFrame) -> pd.Series
-4. Handle edge cases (NaN values, empty data)
-5. Z-score normalize the output: (x - x.rolling(60).mean()) / (x.rolling(60).std() + 1e-10)
+        additional_instructions = """
+## CRITICAL REQUIREMENT
 
-## Available Crypto Fields
-- Core: open, high, low, close, volume, quote_volume
-- Perpetual: funding_rate, mark_price, open_interest
-- Sentiment: long_short_ratio, taker_buy_ratio
-- Liquidation: liquidation_long, liquidation_short
+You MUST implement ALL indicators the user mentions (WR, SSL, MACD, Zigzag, Bollinger, etc.).
+Research each indicator's formula and translate it to Qlib expression syntax.
+The system will provide feedback if your implementation is incomplete.
 
-Output format:
-- Return ONLY the Python code in a ```python code block
-- Include detailed docstring explaining the crypto-specific logic"""
+## Output Format
+
+Return ONLY a single Qlib expression. No Python code, no markdown.
+
+You may add a brief comment after the expression starting with #"""
+
+        return base_prompt + capability_context + additional_instructions
 
     def _build_examples(self) -> str:
         """Build example factors for few-shot learning."""
@@ -394,64 +426,27 @@ Output format:
                     parts.append(f"Example {i}:\n{ex.get('content', '')}")
             return "\n\n".join(parts[:3])  # Limit to 3 examples
 
-        # Legacy examples (fallback)
+        # Legacy examples (fallback) - now uses Qlib expressions
         return '''
-Example 1 - Funding Rate Momentum:
-```python
-def funding_momentum(df):
-    """Funding rate momentum factor for crypto perpetuals.
+Example 1 - Momentum:
+Ref($close, -20) / $close - 1
+# 20-period momentum
 
-    Crypto-specific: Positive funding = longs pay shorts.
-    Rising funding indicates increasing bullish sentiment.
+Example 2 - Mean Reversion:
+($close - Mean($close, 20)) / Std($close, 20)
+# Z-score mean reversion
 
-    Args:
-        df: DataFrame with 'funding_rate' column
+Example 3 - Volatility Regime:
+Std($close, 20) / Std($close, 60)
+# Short-term vs long-term volatility
 
-    Returns:
-        Z-scored funding rate momentum
-    """
-    if 'funding_rate' not in df.columns:
-        return pd.Series(0, index=df.index)
+Example 4 - Volume Surge:
+$volume / Mean($volume, 20)
+# Volume ratio relative to average
 
-    funding = df['funding_rate']
-    momentum = funding.diff(3)
-
-    mean = momentum.rolling(30).mean()
-    std = momentum.rolling(30).std()
-    z_score = (momentum - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```
-
-Example 2 - Crypto Volatility Regime:
-```python
-def volatility_regime(df):
-    """Volatility regime factor for crypto markets.
-
-    Crypto-specific: Vol is 5-10x higher than equities.
-    Low vol periods often precede explosive moves.
-
-    Args:
-        df: DataFrame with 'close' column
-
-    Returns:
-        Normalized volatility regime indicator
-    """
-    import numpy as np
-
-    returns = df['close'].pct_change()
-    vol_20 = returns.rolling(20).std() * np.sqrt(365 * 24)
-    vol_60 = returns.rolling(60).std() * np.sqrt(365 * 24)
-
-    vol_ratio = vol_20 / (vol_60 + 1e-10)
-    log_ratio = np.log(vol_ratio + 1e-10)
-
-    mean = log_ratio.rolling(120).mean()
-    std = log_ratio.rolling(120).std()
-    z_score = (log_ratio - mean) / (std + 1e-10)
-
-    return z_score.fillna(0)
-```
+Example 5 - RSI:
+RSI($close, 14)
+# 14-period RSI
 '''
 
     def get_system_prompt(self) -> str:
@@ -464,6 +459,7 @@ def volatility_regime(df):
         factor_family: Optional[FactorFamily] = None,
         include_examples: bool = False,
         include_field_constraints: bool = False,
+        include_capability_context: bool = True,
     ) -> str:
         """Render the full prompt for factor generation.
 
@@ -472,6 +468,7 @@ def volatility_regime(df):
             factor_family: Optional factor family constraint
             include_examples: Whether to include few-shot examples
             include_field_constraints: Whether to include strict field constraints
+            include_capability_context: Whether to include dynamic capability context (B3)
 
         Returns:
             Rendered prompt string
@@ -498,14 +495,53 @@ def volatility_regime(df):
                     constraint_text += f"\n- {field_name}: {desc}"
                 parts.append(constraint_text)
 
+        # B3: Include dynamic capability context
+        if include_capability_context:
+            parts.append(f"\n{self._capability.generate_full_context()}")
+
         if include_examples:
             parts.append(f"\n{self._examples}")
 
         parts.append(
-            "\nGenerate the Python factor code following the guidelines above."
+            "\nGenerate the Qlib expression following the guidelines above."
         )
 
         return "\n".join(parts)
+
+    def get_capability(self) -> DynamicCapability:
+        """Get the dynamic capability instance.
+
+        Returns:
+            DynamicCapability instance for field validation
+        """
+        return self._capability
+
+    def enable_data_source(self, source: DataSourceType) -> None:
+        """Enable an additional data source.
+
+        Args:
+            source: Data source type to enable
+        """
+        self._capability.field_registry.enable_source(source)
+        # Rebuild system prompt with new fields
+        self._system_prompt = self._build_system_prompt()
+
+    def add_custom_field(
+        self,
+        name: str,
+        description: str,
+        data_type: str = "float",
+    ) -> None:
+        """Add a custom field to the capability.
+
+        Args:
+            name: Field name (with or without $ prefix)
+            description: Field description
+            data_type: Data type (float, int, bool)
+        """
+        self._capability.add_custom_field(name, description, data_type)
+        # Rebuild system prompt with new fields
+        self._system_prompt = self._build_system_prompt()
 
 
 class LLMProviderProtocol(Protocol):
@@ -751,6 +787,8 @@ class FactorGenerationAgent:
         self.template = FactorPromptTemplate()
         self.security_checker = ASTSecurityChecker()
         self.field_validator = FactorFieldValidator()
+        # Use CRYPTO field set for cryptocurrency trading system
+        self.expression_gate = ExpressionGate(field_set=FieldSet.CRYPTO)
 
     async def generate(
         self,
@@ -823,16 +861,33 @@ class FactorGenerationAgent:
             print(f"DEBUG: Failed to extract code. Full response:\n{raw_content[:1000] if raw_content else 'EMPTY'}")
             raise InvalidFactorError("No code found in LLM response")
 
-        # Security check
-        if self.config.security_check_enabled:
+        # Determine if this is a Qlib expression or Python code
+        is_python_code = (
+            code.strip().startswith("def ")
+            or code.strip().startswith("import ")
+            or code.strip().startswith("from ")
+            or "\ndef " in code
+        )
+
+        # Security check - only for Python code (Qlib expressions are safe by design)
+        if self.config.security_check_enabled and is_python_code:
             is_safe, violations = self.security_checker.check(code)
             if not is_safe:
                 raise SecurityViolationError(
                     f"Security violations: {', '.join(violations)}"
                 )
 
-        # Field constraint validation
-        if self.config.field_constraint_enabled and factor_family:
+        # Validate Qlib expression syntax using ExpressionGate
+        if not is_python_code:
+            expr_result = self._validate_qlib_expression(code)
+            if not expr_result.is_valid:
+                raise InvalidFactorError(
+                    f"Invalid Qlib expression: {expr_result.error_message}. "
+                    f"Expression: {code[:100]}..."
+                )
+
+        # Field constraint validation (skip for Qlib expressions - they use $ prefix)
+        if self.config.field_constraint_enabled and factor_family and is_python_code:
             validation_result = self.field_validator.validate(code, factor_family)
             if not validation_result.is_valid:
                 raise FieldConstraintViolationError(
@@ -861,63 +916,123 @@ class FactorGenerationAgent:
         )
 
     def _extract_code(self, content: str) -> str:
-        """Extract Python code from LLM response.
+        """Extract Qlib expression or Python code from LLM response.
 
         Args:
             content: Raw LLM response content
 
         Returns:
-            Extracted Python code or empty string
+            Extracted Qlib expression or Python code
         """
-        # Try to extract from markdown code blocks
-        pattern = r"```(?:python)?\s*\n?(.*?)```"
+        if not content:
+            return ""
+
+        content = content.strip()
+
+        # First, try to extract Qlib expression (new format)
+        # Remove markdown code blocks if present
+        pattern = r"```(?:python|qlib)?\s*\n?(.*?)```"
         matches = re.findall(pattern, content, re.DOTALL)
         if matches:
-            return matches[0].strip()
+            content = matches[0].strip()
 
-        # Try to find function definition directly
+        # Split into lines and process
+        lines = content.split("\n")
+
+        # Check if it's a Python function (old format) - this should fail validation later
         if "def " in content and "return " in content:
-            # Find the function definition
-            lines = content.split("\n")
             code_lines: list[str] = []
             in_function = False
-
             for line in lines:
                 if line.strip().startswith("def "):
                     in_function = True
                 if in_function:
                     code_lines.append(line)
-
             if code_lines:
                 return "\n".join(code_lines).strip()
+
+        # Extract Qlib expression (new format)
+        # Skip comment lines and empty lines, take first non-comment line
+        expression_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("#"):
+                # Stop at first comment after expression
+                if expression_lines:
+                    break
+                continue
+            expression_lines.append(stripped)
+
+        if expression_lines:
+            # Join expression lines (in case of multi-line expressions)
+            expression = " ".join(expression_lines)
+            # Clean up any extra whitespace
+            expression = re.sub(r'\s+', ' ', expression).strip()
+            return expression
+
+        # Fallback: return the entire content if it looks like a Qlib expression
+        if "$" in content or any(op in content for op in ["Mean(", "Std(", "Ref(", "Sum(", "RSI(", "MACD("]):
+            # Extract just the first line that looks like an expression
+            for line in lines:
+                stripped = line.strip()
+                if stripped and not stripped.startswith("#") and ("$" in stripped or "(" in stripped):
+                    return stripped
+            return content.split("\n")[0].strip()
 
         return ""
 
     def _extract_factor_name(self, code: str) -> str:
-        """Extract factor name from code.
+        """Extract factor name from code or generate based on expression.
 
         Args:
-            code: Python code
+            code: Qlib expression or Python code
 
         Returns:
-            Factor function name
+            Factor name
         """
+        # Check for Python function definition (legacy format)
         match = re.search(r"def\s+(\w+)\s*\(", code)
         if match:
             return match.group(1)
-        return "generated_factor"
+
+        # For Qlib expressions, generate name based on content
+        code_lower = code.lower()
+        if "rsi(" in code_lower:
+            return "rsi_factor"
+        elif "macd(" in code_lower:
+            return "macd_factor"
+        elif "ema(" in code_lower or "wma(" in code_lower:
+            return "ma_factor"
+        elif "std(" in code_lower:
+            if "mean(" in code_lower:
+                return "zscore_factor"
+            return "volatility_factor"
+        elif "ref(" in code_lower:
+            return "momentum_factor"
+        elif "corr(" in code_lower:
+            return "correlation_factor"
+        elif "rank(" in code_lower:
+            return "rank_factor"
+        elif "$volume" in code_lower:
+            return "volume_factor"
+        elif "max(" in code_lower or "min(" in code_lower:
+            return "range_factor"
+
+        return "qlib_factor"
 
     def _extract_description(self, code: str, user_request: str) -> str:
-        """Extract description from code docstring or user request.
+        """Extract description from code docstring/comment or user request.
 
         Args:
-            code: Python code
+            code: Qlib expression or Python code
             user_request: Original user request
 
         Returns:
             Factor description
         """
-        # Try to extract docstring
+        # Try to extract Python docstring (legacy format)
         match = re.search(r'"""(.*?)"""', code, re.DOTALL)
         if match:
             return match.group(1).strip().split("\n")[0]
@@ -926,7 +1041,48 @@ class FactorGenerationAgent:
         if match:
             return match.group(1).strip().split("\n")[0]
 
+        # Try to extract comment from Qlib expression
+        # Format: expression\n# comment
+        for line in code.split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                return stripped[1:].strip()[:100]
+
         return user_request[:100]
+
+    def _validate_qlib_expression(
+        self,
+        expression: str,
+        allowed_fields: Optional[list[str]] = None,
+    ) -> ExpressionValidationResult:
+        """Validate Qlib expression syntax using ExpressionGate.
+
+        Args:
+            expression: Qlib expression string
+            allowed_fields: List of allowed field names (without $ prefix).
+                           If None, defaults to OHLCV fields.
+
+        Returns:
+            ExpressionValidationResult with detailed validation status.
+        """
+        return self.expression_gate.validate(expression, allowed_fields)
+
+    def _is_valid_qlib_expression(
+        self,
+        expression: str,
+        allowed_fields: Optional[list[str]] = None,
+    ) -> bool:
+        """Quick check if expression is valid.
+
+        Args:
+            expression: Qlib expression string
+            allowed_fields: List of allowed field names
+
+        Returns:
+            True if valid, False otherwise
+        """
+        result = self._validate_qlib_expression(expression, allowed_fields)
+        return result.is_valid
 
     def _infer_family(self, user_request: str) -> FactorFamily:
         """Infer factor family from user request.
@@ -954,3 +1110,137 @@ class FactorGenerationAgent:
                     return family
 
         return FactorFamily.MOMENTUM  # Default
+
+    async def refine(
+        self,
+        original_code: str,
+        error_message: str,
+        user_request: str,
+        factor_family: Optional[FactorFamily] = None,
+    ) -> GeneratedFactor:
+        """Refine a failed factor based on error feedback.
+
+        This implements the error feedback loop: when a factor fails to compute
+        or evaluate, this method takes the error information and generates
+        an improved version.
+
+        Args:
+            original_code: The original Qlib expression that failed
+            error_message: The error message or feedback explaining why it failed
+            user_request: Original user request for context
+            factor_family: Optional factor family constraint
+
+        Returns:
+            Refined GeneratedFactor with improved code
+
+        Raises:
+            FactorGenerationError: If refinement fails after max retries
+        """
+        # Build refinement prompt with error feedback
+        refinement_prompt = f"""## Original Factor Expression (FAILED)
+
+{original_code}
+
+## Error / Feedback
+
+{error_message}
+
+## Original Request
+
+{user_request}
+
+## Task
+
+The above factor expression failed. Analyze the error and generate an IMPROVED Qlib expression.
+
+**IMPORTANT RULES:**
+1. You can ONLY use these 5 fields: $open, $high, $low, $close, $volume
+2. DO NOT use fields like $returns, $quote_volume, $funding_rate - they don't exist!
+3. If you need returns, calculate: `$close / Ref($close, -1) - 1`
+4. Return ONLY a single Qlib expression, no Python code
+
+**Common Fixes:**
+- If "$returns" error: replace with `$close / Ref($close, -1) - 1`
+- If "$quote_volume" error: replace with `$volume`
+- If "Ts" operator error: Ts is not a valid operator, use proper time-series operators
+- If syntax error: check parentheses balance and operator syntax
+
+Return the corrected expression:"""
+
+        system_prompt = """You are an expert quantitative factor developer.
+Your task is to fix a failed Qlib expression based on error feedback.
+
+Available Fields (ONLY these 5):
+- $open, $high, $low, $close, $volume
+
+Available Operators:
+- Ref($field, -N) - Reference N periods ago
+- Mean($field, N) - Rolling mean
+- Std($field, N) - Rolling standard deviation
+- Sum($field, N) - Rolling sum
+- Max($field, N), Min($field, N) - Rolling max/min
+- Delta($field, N) - Change over N periods
+- Rank($field) - Cross-sectional rank
+- Abs(), Log(), Sign() - Math operations
+- Corr($f1, $f2, N), Cov($f1, $f2, N) - Rolling correlation/covariance
+- EMA($field, N), WMA($field, N) - Moving averages
+- RSI($field, N) - Relative Strength Index
+- MACD($field, fast, slow, signal) - MACD histogram
+
+Arithmetic: +, -, *, /, >, <
+
+Output: ONLY return the corrected Qlib expression. No explanation needed."""
+
+        try:
+            # Get model configuration
+            from iqfmp.agents.model_config import get_agent_full_config
+            model_id, config_temperature, custom_system_prompt = get_agent_full_config(
+                "factor_generation"
+            )
+
+            model = self.config.model or model_id
+            temperature = self.config.temperature or config_temperature
+
+            response = await self.llm_provider.complete(
+                prompt=refinement_prompt,
+                system_prompt=custom_system_prompt if custom_system_prompt else system_prompt,
+                model=model,
+                temperature=temperature,
+            )
+            raw_content = response.content if hasattr(response, "content") else str(response)
+            print(f"DEBUG Refinement Response: {raw_content[:500] if raw_content else 'EMPTY'}")
+
+        except Exception as e:
+            raise FactorGenerationError(f"LLM refinement call failed: {e}") from e
+
+        # Extract the refined code
+        code = self._extract_code(raw_content)
+        if not code:
+            raise InvalidFactorError("No refined code found in LLM response")
+
+        # Validate Qlib expression using ExpressionGate
+        expr_result = self._validate_qlib_expression(code)
+        if not expr_result.is_valid:
+            raise InvalidFactorError(
+                f"Invalid refined Qlib expression: {expr_result.error_message}. "
+                f"Expression: {code[:100]}..."
+            )
+
+        # Extract metadata
+        name = self._extract_factor_name(code)
+        description = self._extract_description(code, user_request)
+        family = factor_family or self._infer_family(user_request)
+
+        return GeneratedFactor(
+            name=name,
+            description=description,
+            code=code,
+            family=family,
+            metadata={
+                "user_request": user_request,
+                "original_code": original_code,
+                "error_message": error_message,
+                "is_refined": True,
+                "security_checked": False,  # Qlib expressions are safe
+            },
+        )

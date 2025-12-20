@@ -520,6 +520,42 @@ class SymbolInfoORM(Base):
     )
 
 
+class PromptCacheORM(Base):
+    """Prompt cache table - stores LLM responses for deduplication (knowledge schema)."""
+
+    __tablename__ = "prompt_cache"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)  # MD5 hash
+    value: Mapped[str] = mapped_column(Text, nullable=False)  # LLM response
+    model: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    tokens_saved: Mapped[int] = mapped_column(Integer, default=0)
+    access_count: Mapped[int] = mapped_column(Integer, default=1)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    accessed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_prompt_cache_accessed_at", "accessed_at"),
+        Index("ix_prompt_cache_model", "model"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "key": self.key,
+            "model": self.model,
+            "tokens_saved": self.tokens_saved,
+            "access_count": self.access_count,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "accessed_at": self.accessed_at.isoformat() if self.accessed_at else None,
+        }
+
+
 class AgentConfigORM(Base):
     """Agent configuration table - stores AI agent settings and prompts."""
 

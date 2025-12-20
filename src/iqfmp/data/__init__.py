@@ -28,6 +28,14 @@ from .alignment import (
     calculate_funding_features,
     validate_time_alignment,
 )
+from .provider import (
+    DataLoadConfig,
+    DataLoadResult,
+    DerivativeType,
+    UnifiedMarketDataProvider,
+    check_data_availability,
+    load_unified_data,
+)
 
 __all__ = [
     # OHLCV downloader
@@ -49,4 +57,11 @@ __all__ = [
     "merge_derivative_data",
     "calculate_funding_features",
     "validate_time_alignment",
+    # Unified provider (C1)
+    "DataLoadConfig",
+    "DataLoadResult",
+    "DerivativeType",
+    "UnifiedMarketDataProvider",
+    "check_data_availability",
+    "load_unified_data",
 ]

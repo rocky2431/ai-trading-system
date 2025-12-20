@@ -1221,6 +1221,11 @@ class FactorService:
         factor_families: list[str],
         target_count: int,
         auto_evaluate: bool,
+        # Advanced configuration (optional)
+        data_config: dict | None = None,
+        benchmark_config: dict | None = None,
+        ml_config: dict | None = None,
+        robustness_config: dict | None = None,
     ) -> str:
         """Create and start a factor mining task.
 
@@ -1232,6 +1237,10 @@ class FactorService:
             factor_families: Factor families to mine
             target_count: Target number of factors to generate
             auto_evaluate: Whether to auto-evaluate generated factors
+            data_config: Data configuration (symbols, timeframes, date range)
+            benchmark_config: Benchmark configuration (factor set, correlation threshold)
+            ml_config: ML model configuration (models, optimization)
+            robustness_config: Robustness configuration (walk-forward, IC decay)
 
         Returns:
             Task ID
@@ -1240,11 +1249,16 @@ class FactorService:
             ValueError: If LLM API key is not configured
         """
         # Validate LLM configuration before creating task
-        api_key = os.getenv("OPENROUTER_API_KEY")
+        # 优先从 ConfigService 获取 API key（用户在前端配置的），如果没有则从环境变量获取
+        from iqfmp.api.config.service import get_config_service
+        config_service = get_config_service()
+        api_key = config_service._config.get("api_key") or os.getenv("OPENROUTER_API_KEY")
         if not api_key:
             raise ValueError(
                 "LLM API key not configured. Please configure OpenRouter API key in Settings page first."
             )
+        # 确保环境变量也设置了（供 Celery worker 使用）
+        os.environ["OPENROUTER_API_KEY"] = api_key
 
         task_id = str(uuid.uuid4())
 
@@ -1257,6 +1271,16 @@ class FactorService:
             target_count=target_count,
             auto_evaluate=auto_evaluate,
         )
+
+        # Add advanced configuration to task_data for Celery worker
+        if data_config:
+            task_data["data_config"] = data_config
+        if benchmark_config:
+            task_data["benchmark_config"] = benchmark_config
+        if ml_config:
+            task_data["ml_config"] = ml_config
+        if robustness_config:
+            task_data["robustness_config"] = robustness_config
 
         # C2 FIX: Use Celery task for persistent task queue
         # Tasks are persisted to Redis and survive service restarts

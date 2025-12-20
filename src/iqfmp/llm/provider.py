@@ -4,12 +4,14 @@ This module provides a unified interface for accessing multiple LLM models
 through OpenRouter, with support for:
 - Multi-model switching (DeepSeek, Claude, GPT)
 - Fallback chains for reliability
-- Request caching for efficiency
+- Request caching for efficiency (in-memory + persistent Redis/PostgreSQL)
 - Rate limiting for cost control
+- Auto-continue for truncated responses
 """
 
 import asyncio
 import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -18,6 +20,20 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import httpx
+
+from iqfmp.llm.cache import PromptCache, PromptCacheStats, get_prompt_cache
+from iqfmp.llm.retry import (
+    ErrorCategory,
+    ErrorClassifier,
+    RetryConfig,
+    RetryHandler,
+    RetryResult,
+)
+from iqfmp.llm.validation import (
+    JSONSchemaValidator,
+    OutputType,
+    SchemaValidationResult,
+)
 
 
 # === Error Classes ===
@@ -64,12 +80,31 @@ MODEL_ID_MAP: dict[ModelType, str] = {
 
 @dataclass
 class LLMResponse:
-    """Response from LLM API call."""
+    """Response from LLM API call.
+
+    Extended with metadata for auto-continue and debugging support.
+    """
     content: str
     model: str
     usage: dict[str, int]
     latency_ms: Optional[float] = None
     cached: bool = False
+    # New fields for RD-Agent parity
+    finish_reason: Optional[str] = None  # "stop" | "length" | "content_filter"
+    raw_response: Optional[dict] = None  # Original API response (for debugging)
+    model_id: Optional[str] = None  # Actual OpenRouter model ID used
+    cost_estimate: Optional[float] = None  # Estimated cost in USD
+    request_id: Optional[str] = None  # Request tracking ID
+
+    @property
+    def is_truncated(self) -> bool:
+        """Check if response was truncated due to length."""
+        return self.finish_reason == "length"
+
+    @property
+    def needs_continuation(self) -> bool:
+        """Check if response needs auto-continuation."""
+        return self.finish_reason == "length"
 
 
 @dataclass
@@ -201,7 +236,12 @@ class RateLimiter:
 class LLMProvider:
     """Unified LLM provider for OpenRouter API."""
 
-    def __init__(self, config: LLMConfig) -> None:
+    def __init__(
+        self,
+        config: LLMConfig,
+        use_persistent_cache: bool = True,
+        retry_config: Optional[RetryConfig] = None,
+    ) -> None:
         self._config = config
         self._client = httpx.AsyncClient(
             base_url=config.base_url,
@@ -212,12 +252,36 @@ class LLMProvider:
                 "X-Title": "IQFMP",
             },
         )
+        # In-memory cache for fast lookups within session
         self._cache: dict[str, tuple[LLMResponse, float]] = {}
+        # Persistent two-tier cache for cross-session deduplication
+        # L1: Redis (hot cache, ~1ms latency)
+        # L2: PostgreSQL (persistent, ~10ms latency)
+        self._use_persistent_cache = use_persistent_cache
+        self._persistent_cache: Optional[PromptCache] = None
+        if use_persistent_cache:
+            try:
+                self._persistent_cache = get_prompt_cache()
+            except Exception:
+                # Fallback to in-memory only if cache init fails
+                self._persistent_cache = None
         self._rate_limiter = RateLimiter()
+        # Retry handler with error classification and exponential backoff
+        self._retry_config = retry_config or RetryConfig(
+            max_retries=3,
+            initial_delay=1.0,
+            max_delay=60.0,
+            rate_limit_delay=30.0,
+            server_error_delay=5.0,
+        )
+        self._retry_handler = RetryHandler(self._retry_config)
+        self._error_classifier = ErrorClassifier()
         self._usage_stats = {
             "total_prompt_tokens": 0,
             "total_completion_tokens": 0,
             "total_requests": 0,
+            "retried_requests": 0,
+            "failed_requests": 0,
         }
 
     def __repr__(self) -> str:
@@ -235,6 +299,8 @@ class LLMProvider:
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
         system_prompt: Optional[str] = None,
+        auto_continue: bool = True,
+        max_continue_rounds: int = 5,
         **kwargs: Any,
     ) -> LLMResponse:
         """Generate a completion for the given prompt.
@@ -246,6 +312,8 @@ class LLMProvider:
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
             system_prompt: Optional system prompt to guide the model.
+            auto_continue: If True, automatically continue truncated responses (default True).
+            max_continue_rounds: Maximum continuation rounds for auto_continue (default 5).
 
         Returns:
             LLMResponse with generated content.
@@ -262,13 +330,23 @@ class LLMProvider:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
-        return await self._execute_with_fallback(
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            **kwargs,
-        )
+        if auto_continue:
+            return await self._execute_with_auto_continue(
+                messages=messages,
+                model=model,
+                max_continue_rounds=max_continue_rounds,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs,
+            )
+        else:
+            return await self._execute_with_fallback(
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs,
+            )
 
     async def chat(
         self,
@@ -276,6 +354,8 @@ class LLMProvider:
         model: Optional[ModelType | str] = None,
         max_tokens: Optional[int] = None,
         temperature: float = 0.7,
+        auto_continue: bool = True,
+        max_continue_rounds: int = 5,
         **kwargs: Any,
     ) -> LLMResponse:
         """Generate a chat completion.
@@ -285,17 +365,29 @@ class LLMProvider:
             model: Optional model to use - can be ModelType enum or OpenRouter model ID string.
             max_tokens: Maximum tokens in response.
             temperature: Sampling temperature.
+            auto_continue: If True, automatically continue truncated responses (default True).
+            max_continue_rounds: Maximum continuation rounds for auto_continue (default 5).
 
         Returns:
             LLMResponse with generated content.
         """
-        return await self._execute_with_fallback(
-            messages=messages,
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            **kwargs,
-        )
+        if auto_continue:
+            return await self._execute_with_auto_continue(
+                messages=messages,
+                model=model,
+                max_continue_rounds=max_continue_rounds,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs,
+            )
+        else:
+            return await self._execute_with_fallback(
+                messages=messages,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs,
+            )
 
     async def _execute_with_fallback(
         self,
@@ -311,11 +403,12 @@ class LLMProvider:
         """
         # Determine target model (string ID or ModelType)
         target_model: ModelType | str = model or self._config.default_model
+        model_str = target_model.value if isinstance(target_model, ModelType) else target_model
+        temperature = kwargs.get("temperature", 0.7)
 
-        # Check cache first
+        # Check in-memory cache first
+        cache_key = ""
         if self._config.cache_enabled:
-            # For cache key, convert to string representation
-            model_str = target_model.value if isinstance(target_model, ModelType) else target_model
             cache_key = self._generate_cache_key(
                 str(messages),
                 model_str,
@@ -324,6 +417,27 @@ class LLMProvider:
             cached = self._get_from_cache(cache_key)
             if cached:
                 return cached
+
+        # Check persistent cache (cross-session)
+        if self._use_persistent_cache:
+            cached_content = self._get_from_persistent_cache(
+                messages=messages,
+                model=model_str,
+                temperature=temperature,
+            )
+            if cached_content:
+                # Return cached response with cached=True flag
+                cached_response = LLMResponse(
+                    content=cached_content,
+                    model=model_str,
+                    usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+                    cached=True,
+                    finish_reason="stop",
+                )
+                # Also add to in-memory cache for faster subsequent lookups
+                if self._config.cache_enabled and cache_key:
+                    self._save_to_cache(cache_key, cached_response)
+                return cached_response
 
         # Build fallback chain - only for ModelType models
         # String model IDs (from frontend config) don't use fallback
@@ -340,39 +454,146 @@ class LLMProvider:
         last_error: Optional[Exception] = None
 
         for attempt_model in models_to_try:
-            try:
-                response = await self._call_api(
+            # Use retry handler for intelligent retry with backoff
+            async def _make_api_call() -> LLMResponse:
+                return await self._call_api(
                     messages=messages,
                     model=attempt_model,
                     **kwargs,
                 )
 
-                # Cache successful response
-                if self._config.cache_enabled:
+            retry_result = await self._retry_handler.execute_async(_make_api_call)
+
+            if retry_result.success:
+                response = retry_result.value
+
+                # Track retry statistics
+                if retry_result.attempts > 1:
+                    self._usage_stats["retried_requests"] += 1
+
+                # Cache successful response (in-memory)
+                if self._config.cache_enabled and cache_key:
                     self._save_to_cache(cache_key, response)
+
+                # Save to persistent cache (cross-session)
+                if self._use_persistent_cache:
+                    tokens_saved = response.usage.get("total_tokens", 0)
+                    self._save_to_persistent_cache(
+                        messages=messages,
+                        model=model_str,
+                        response=response.content,
+                        tokens_saved=tokens_saved,
+                        temperature=temperature,
+                    )
 
                 return response
 
-            except ModelNotAvailableError as e:
-                last_error = e
-                continue
-            except RateLimitError as e:
-                last_error = e
-                continue
-            except asyncio.TimeoutError as e:
-                last_error = LLMError("Timeout: Request timed out")
-                break
-            except ConnectionError as e:
-                last_error = LLMError(f"Network: {e}")
-                break
-            except Exception as e:
-                last_error = e
+            # Retry failed - check if we should try next model in fallback chain
+            last_error = retry_result.error
+            error_category = retry_result.error_category
+
+            # Log failure details
+            import logging
+            logging.getLogger(__name__).warning(
+                f"Model {attempt_model} failed after {retry_result.attempts} attempts: "
+                f"{last_error} (category={error_category.value if error_category else 'unknown'})"
+            )
+
+            # Track failed requests
+            self._usage_stats["failed_requests"] += 1
+
+            # For non-retryable errors (auth, invalid request), don't try next model
+            if error_category and error_category not in {
+                ErrorCategory.RATE_LIMIT,
+                ErrorCategory.SERVER_ERROR,
+                ErrorCategory.TIMEOUT,
+                ErrorCategory.NETWORK,
+                ErrorCategory.TRANSIENT,
+            }:
                 break
 
         # All models failed
         if self._config.fallback_chain and isinstance(target_model, ModelType):
             raise LLMError(f"All fallback models failed: {last_error}")
         raise last_error or LLMError("Unknown error")
+
+    async def _execute_with_auto_continue(
+        self,
+        messages: list[dict[str, str]],
+        model: Optional[ModelType | str] = None,
+        max_continue_rounds: int = 5,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        """Execute request with automatic continuation for truncated responses.
+
+        When finish_reason is "length", automatically append "continue" and
+        concatenate the responses (RD-Agent pattern).
+
+        Args:
+            messages: Chat messages.
+            model: Model to use.
+            max_continue_rounds: Maximum continuation rounds (default 5).
+            **kwargs: Additional arguments for API call.
+
+        Returns:
+            LLMResponse with concatenated content from all rounds.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        all_content = ""
+        all_usage: dict[str, int] = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        current_messages = [msg.copy() for msg in messages]  # Deep copy
+        final_response: Optional[LLMResponse] = None
+        total_cost = 0.0
+
+        for round_idx in range(max_continue_rounds):
+            # Call with fallback
+            response = await self._execute_with_fallback(
+                messages=current_messages,
+                model=model,
+                **kwargs,
+            )
+
+            all_content += response.content
+            final_response = response
+
+            # Accumulate usage
+            for key in all_usage:
+                all_usage[key] += response.usage.get(key, 0)
+
+            # Accumulate cost
+            if response.cost_estimate:
+                total_cost += response.cost_estimate
+
+            # Check if we need to continue
+            if response.finish_reason != "length":
+                logger.debug(f"Auto-continue complete after {round_idx + 1} round(s)")
+                break
+
+            # Response was truncated, prepare continuation
+            logger.info(f"Response truncated, continuing (round {round_idx + 2}/{max_continue_rounds})")
+            current_messages.append({"role": "assistant", "content": response.content})
+            current_messages.append({"role": "user", "content": "continue"})
+        else:
+            # Reached max rounds
+            logger.warning(f"Reached max continuation rounds ({max_continue_rounds})")
+
+        # Build final response with combined content
+        if final_response is None:
+            raise LLMError("No response received")
+
+        return LLMResponse(
+            content=all_content,
+            model=final_response.model,
+            usage=all_usage,
+            latency_ms=final_response.latency_ms,
+            finish_reason=final_response.finish_reason,
+            raw_response=final_response.raw_response,
+            model_id=final_response.model_id,
+            cost_estimate=total_cost if total_cost > 0 else None,
+            request_id=final_response.request_id,
+        )
 
     async def _call_api(
         self,
@@ -392,6 +613,11 @@ class LLMProvider:
 
         # Get model ID - either from enum mapping or use string directly
         model_id = self.get_model_id(model)
+
+        # Log the actual model being used for debugging
+        import logging
+        logging.getLogger(__name__).info(f"LLM API call using model: {model_id}")
+
         payload: dict[str, Any] = {
             "model": model_id,
             "messages": messages,
@@ -422,9 +648,24 @@ class LLMProvider:
 
             data = response.json()
 
-            # Extract response
-            content = data["choices"][0]["message"]["content"]
+            # Extract response with extended metadata
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
             usage = data.get("usage", {})
+            finish_reason = choice.get("finish_reason", "stop")
+
+            # Extract request ID from headers if available
+            request_id = response.headers.get("x-request-id")
+
+            # Estimate cost (OpenRouter provides this in some responses)
+            # Fallback to rough estimate based on tokens
+            cost_estimate = None
+            if "cost" in data:
+                cost_estimate = data["cost"]
+            elif usage:
+                # Rough estimate: $0.002 per 1K tokens (varies by model)
+                total_tokens = usage.get("total_tokens", 0)
+                cost_estimate = total_tokens * 0.000002
 
             # Track usage
             self.record_usage(
@@ -432,11 +673,22 @@ class LLMProvider:
                 completion_tokens=usage.get("completion_tokens", 0),
             )
 
+            # Log if response was truncated
+            import logging
+            logger = logging.getLogger(__name__)
+            if finish_reason == "length":
+                logger.warning(f"Response truncated (finish_reason=length), may need continuation")
+
             return LLMResponse(
                 content=content,
                 model=model_id,
                 usage=usage,
                 latency_ms=latency_ms,
+                finish_reason=finish_reason,
+                raw_response=data,
+                model_id=model_id,
+                cost_estimate=cost_estimate,
+                request_id=request_id,
             )
 
         except httpx.TimeoutException:
@@ -492,6 +744,65 @@ class LLMProvider:
         response.cached = True
         return response
 
+    def _get_from_persistent_cache(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        temperature: float,
+    ) -> Optional[str]:
+        """Get response from persistent cache (Redis L1 + PostgreSQL L2).
+
+        Args:
+            messages: Chat messages
+            model: Model identifier
+            temperature: Sampling temperature
+
+        Returns:
+            Cached response content or None
+        """
+        if self._persistent_cache is None:
+            return None
+        try:
+            # Use sync wrapper for compatibility with both sync and async contexts
+            return self._persistent_cache.get_sync(
+                messages=messages,
+                model=model,
+                temperature=temperature,
+            )
+        except Exception:
+            return None
+
+    def _save_to_persistent_cache(
+        self,
+        messages: list[dict[str, str]],
+        model: str,
+        response: str,
+        tokens_saved: int,
+        temperature: float,
+    ) -> None:
+        """Save response to persistent cache (Redis L1 + PostgreSQL L2).
+
+        Args:
+            messages: Chat messages
+            model: Model identifier
+            response: Response content
+            tokens_saved: Estimated tokens saved
+            temperature: Sampling temperature
+        """
+        if self._persistent_cache is None:
+            return
+        try:
+            # Use sync wrapper for compatibility with both sync and async contexts
+            self._persistent_cache.set_sync(
+                messages=messages,
+                model=model,
+                response=response,
+                tokens_saved=tokens_saved,
+                temperature=temperature,
+            )
+        except Exception:
+            pass  # Silently fail cache writes
+
     def _save_to_cache(self, key: str, response: LLMResponse) -> None:
         """Save response to cache."""
         self._cache[key] = (response, time.time())
@@ -509,6 +820,166 @@ class LLMProvider:
     def get_usage_stats(self) -> dict[str, int]:
         """Get usage statistics."""
         return self._usage_stats.copy()
+
+    def get_cache_stats(self) -> Optional[PromptCacheStats]:
+        """Get persistent cache statistics.
+
+        Returns:
+            PromptCacheStats with hit rate, entries, tokens saved, L1/L2 hits, etc.
+            Returns None if persistent cache is not enabled.
+        """
+        if self._persistent_cache is None:
+            return None
+        try:
+            # Use sync wrapper for compatibility
+            return self._persistent_cache.get_stats_sync()
+        except Exception:
+            return None
+
+    async def complete_structured(
+        self,
+        prompt: str,
+        output_type: OutputType,
+        model: Optional[ModelType | str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: float = 0.7,
+        system_prompt: Optional[str] = None,
+        max_retries: int = 3,
+        auto_repair: bool = True,
+        **kwargs: Any,
+    ) -> tuple[LLMResponse, SchemaValidationResult]:
+        """Generate structured output with JSON schema validation.
+
+        Combines LLM completion with automatic schema validation and retry.
+        Implements RD-Agent pattern for reliable structured outputs.
+
+        Args:
+            prompt: Input prompt (should request JSON output)
+            output_type: Expected output type for schema validation
+            model: Model to use
+            max_tokens: Maximum tokens
+            temperature: Sampling temperature
+            system_prompt: Optional system prompt
+            max_retries: Maximum retries on validation failure (default: 3)
+            auto_repair: Attempt to repair common JSON issues (default: True)
+            **kwargs: Additional arguments
+
+        Returns:
+            Tuple of (LLMResponse, SchemaValidationResult)
+
+        Raises:
+            LLMError: If all retries fail
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Initialize schema validator
+        validator = JSONSchemaValidator()
+
+        # Build system prompt with JSON formatting instruction
+        json_instruction = (
+            "\n\nIMPORTANT: Your response MUST be valid JSON that matches the expected schema. "
+            "Do not include any text before or after the JSON object. "
+            "Use double quotes for strings. Use null instead of None."
+        )
+
+        effective_system_prompt = (system_prompt or "") + json_instruction
+
+        # Add example to prompt if available
+        example = validator._get_example_output(output_type)
+        if example:
+            prompt_with_example = (
+                f"{prompt}\n\n"
+                f"Expected JSON format:\n{example}\n\n"
+                "Return ONLY the JSON object, no additional text."
+            )
+        else:
+            prompt_with_example = prompt
+
+        last_error = None
+        last_response = None
+        last_validation = None
+
+        for attempt in range(max_retries):
+            try:
+                # Call LLM
+                response = await self.complete(
+                    prompt=prompt_with_example if attempt == 0 else self._build_retry_prompt(
+                        prompt_with_example, last_validation
+                    ),
+                    model=model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system_prompt=effective_system_prompt,
+                    auto_continue=False,  # Structured output should be complete
+                    **kwargs,
+                )
+                last_response = response
+
+                # Validate response
+                validation = validator.validate(
+                    response.content,
+                    output_type,
+                    auto_repair=auto_repair,
+                )
+                last_validation = validation
+
+                if validation.is_valid:
+                    logger.info(
+                        f"Structured output validation passed on attempt {attempt + 1}"
+                    )
+                    return response, validation
+
+                # Validation failed, log and retry
+                logger.warning(
+                    f"Structured output validation failed on attempt {attempt + 1}: "
+                    f"{validation.error_message}"
+                )
+
+            except Exception as e:
+                last_error = e
+                logger.error(f"LLM call failed on attempt {attempt + 1}: {e}")
+
+        # All retries exhausted
+        if last_response and last_validation:
+            logger.error(
+                f"Structured output validation failed after {max_retries} attempts. "
+                f"Last error: {last_validation.error_message}"
+            )
+            return last_response, last_validation
+
+        # No successful response at all
+        raise LLMError(
+            f"Failed to get valid structured output after {max_retries} attempts. "
+            f"Last error: {last_error}"
+        )
+
+    def _build_retry_prompt(
+        self,
+        original_prompt: str,
+        last_validation: Optional[SchemaValidationResult],
+    ) -> str:
+        """Build retry prompt with validation feedback.
+
+        Args:
+            original_prompt: Original prompt
+            last_validation: Last validation result
+
+        Returns:
+            Retry prompt with feedback
+        """
+        if not last_validation:
+            return original_prompt
+
+        error_feedback = (
+            f"Your previous response was invalid JSON.\n"
+            f"Error: {last_validation.error_message}\n"
+        )
+
+        if last_validation.repair_hint:
+            error_feedback += f"Fix hint: {last_validation.repair_hint}\n"
+
+        return f"{error_feedback}\n{original_prompt}"
 
     async def close(self) -> None:
         """Close the HTTP client."""

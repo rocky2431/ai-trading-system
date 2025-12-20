@@ -114,6 +114,20 @@ from iqfmp.evaluation.hyperopt_optimizer import (
     SearchSpace,
     TrialResult,
 )
+# Phase 4: Quality Gate (D1/D2/D6/B9)
+from iqfmp.evaluation.quality_gate import (
+    AntiPHackingConfig,
+    AntiPHackingGate,
+    BacktestCostConfig,
+    CryptoRegime,
+    CryptoRegimeDetector,
+    DeflatedSharpeCalculator,
+    DSRResult,
+    FactorQualityGate,
+    RealisticBacktestEngine,
+    RegimeConfig,
+    TrialBudget,
+)
 
 __all__ = [
     # CV Splitter
@@ -213,4 +227,16 @@ __all__ = [
     "RandomSearchOptimizer",
     "SearchSpace",
     "TrialResult",
+    # Phase 4: Quality Gate (D1/D2/D6/B9)
+    "AntiPHackingConfig",
+    "AntiPHackingGate",
+    "BacktestCostConfig",
+    "CryptoRegime",
+    "CryptoRegimeDetector",
+    "DeflatedSharpeCalculator",
+    "DSRResult",
+    "FactorQualityGate",
+    "RealisticBacktestEngine",
+    "RegimeConfig",
+    "TrialBudget",
 ]

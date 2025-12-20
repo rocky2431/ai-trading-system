@@ -927,7 +927,13 @@ def _execute_factor_generation(
     """执行因子生成的内部实现 - 调用真实 LLM
 
     使用 FactorGenerationAgent 通过 OpenRouter API 生成真实的因子代码。
-    包含 AST 安全检查和字段约束验证。
+    包含 AST 安全检查、字段约束验证和**错误反馈循环**。
+
+    错误反馈循环机制：
+    1. 初次生成因子
+    2. 如果生成或计算失败，将错误信息反馈给 LLM
+    3. LLM 根据错误信息生成改进版本
+    4. 最多重试 max_retries 次
     """
     import asyncio
     import uuid
@@ -937,6 +943,7 @@ def _execute_factor_generation(
         FactorGenerationAgent,
         FactorGenerationConfig,
         FactorGenerationError,
+        InvalidFactorError,
     )
     from iqfmp.llm.provider import LLMConfig, LLMProvider
 
@@ -944,6 +951,35 @@ def _execute_factor_generation(
         state="PROGRESS",
         meta={"current": 10, "total": 100, "status": "Initializing LLM provider..."},
     )
+
+    # 优先从 ConfigService 配置文件读取配置（用户在前端配置的）
+    # Celery worker 是独立进程，无法继承 FastAPI 进程的环境变量
+    # 因此需要直接从配置文件 ~/.iqfmp/config.json 读取
+    # 注意：每次任务执行都重新读取，确保前端修改能及时生效
+    import json
+    from pathlib import Path
+
+    config_file = Path.home() / ".iqfmp" / "config.json"
+    api_key_from_config = None
+    if config_file.exists():
+        try:
+            with open(config_file) as f:
+                saved_config = json.load(f)
+                api_key_from_config = saved_config.get("api_key")
+        except Exception as e:
+            logger.warning(f"Failed to read config file: {e}")
+
+    # 如果从配置文件获取到 API key，设置到环境变量供 LLMConfig.from_env() 使用
+    if api_key_from_config:
+        import os
+        os.environ["OPENROUTER_API_KEY"] = api_key_from_config
+        logger.info("Loaded API key from config file ~/.iqfmp/config.json")
+
+    # 强制重新加载 AgentModelRegistry，确保获取前端最新的模型配置
+    # 这样用户在前端切换模型后，下次任务会使用新模型
+    from iqfmp.agents.model_config import reload_model_registry
+    reload_model_registry()
+    logger.info("Reloaded agent model registry from config file")
 
     # 尝试从环境变量加载 LLM 配置
     try:
@@ -956,7 +992,7 @@ def _execute_factor_generation(
             "hypothesis": hypothesis,
             "family": factor_family,
             "code": f"# LLM not configured - placeholder factor\n# Hypothesis: {hypothesis}\ndef calculate(data):\n    return data['close'].pct_change()",
-            "warning": "LLM not configured. Set OPENROUTER_API_KEY environment variable.",
+            "warning": "LLM not configured. Please configure OpenRouter API key in Settings page.",
         }
 
     task.update_state(
@@ -969,56 +1005,222 @@ def _execute_factor_generation(
     factor_family_enum = family_map.get(factor_family.lower(), FactorFamily.MOMENTUM)
 
     # 创建 agent 配置
+    max_retries = config.get("max_retries", 5)
     agent_config = FactorGenerationConfig(
         name="celery_factor_generator",
         security_check_enabled=True,
         field_constraint_enabled=True,
-        max_retries=config.get("max_retries", 3),
+        max_retries=max_retries,
         include_examples=True,
     )
 
-    async def _generate_async() -> dict[str, Any]:
-        """异步生成因子"""
+    async def _generate_with_feedback_loop() -> dict[str, Any]:
+        """异步生成因子，包含智能指标反馈循环
+
+        Intelligent Feedback Loop:
+        1. Parse user hypothesis to extract requested indicators
+        2. Generate factor expression
+        3. Check if all indicators are implemented
+        4. If missing, provide specific feedback and retry
+        5. Continue until complete or max retries reached
+        """
+        # Import indicator intelligence module
+        from iqfmp.agents.indicator_intelligence import (
+            check_factor_completeness,
+            get_indicator_summary,
+            analyze_indicator_coverage,
+        )
+
         async with LLMProvider(llm_config) as llm:
             agent = FactorGenerationAgent(config=agent_config, llm_provider=llm)
 
-            task.update_state(
-                state="PROGRESS",
-                meta={"current": 40, "total": 100, "status": "Calling LLM for factor generation..."},
-            )
+            last_code = None
+            last_error = None
 
-            generated = await agent.generate(
-                user_request=hypothesis,
-                factor_family=factor_family_enum,
-            )
+            # Log detected indicators from hypothesis
+            indicator_summary = get_indicator_summary(hypothesis)
+            logger.info(f"Factor generation - {indicator_summary}")
 
-            task.update_state(
-                state="PROGRESS",
-                meta={"current": 80, "total": 100, "status": "Security checks passed, saving..."},
-            )
+            for attempt in range(max_retries):
+                try:
+                    task.update_state(
+                        state="PROGRESS",
+                        meta={
+                            "current": 30 + attempt * 15,
+                            "total": 100,
+                            "status": f"Generating factor (attempt {attempt + 1}/{max_retries})...",
+                            "attempt": attempt + 1,
+                            "indicator_summary": indicator_summary,
+                        },
+                    )
 
-            return {
-                "factor_id": str(uuid.uuid4()),
-                "hypothesis": hypothesis,
-                "family": generated.family.value,
-                "name": generated.name,
-                "description": generated.description,
-                "code": generated.code,
-                "metadata": generated.metadata,
-            }
+                    if attempt == 0:
+                        # 首次尝试：正常生成
+                        generated = await agent.generate(
+                            user_request=hypothesis,
+                            factor_family=factor_family_enum,
+                        )
+                    else:
+                        # 后续尝试：使用错误反馈进行改进
+                        logger.info(f"Refining factor (attempt {attempt + 1}): {last_error[:200] if last_error else 'No error'}...")
+                        task.update_state(
+                            state="PROGRESS",
+                            meta={
+                                "current": 30 + attempt * 15,
+                                "total": 100,
+                                "status": f"Refining factor based on feedback (attempt {attempt + 1}/{max_retries})...",
+                                "attempt": attempt + 1,
+                                "is_refining": True,
+                            },
+                        )
+                        generated = await agent.refine(
+                            original_code=last_code,
+                            error_message=last_error,
+                            user_request=hypothesis,
+                            factor_family=factor_family_enum,
+                        )
+
+                    # 验证生成的因子可以计算（快速检查）
+                    try:
+                        _validate_factor_computes(generated.code)
+                    except Exception as compute_error:
+                        # 因子生成成功但计算失败，保存错误信息用于下次改进
+                        last_code = generated.code
+                        last_error = f"Factor computation failed: {str(compute_error)}"
+                        logger.warning(f"Factor computation validation failed: {compute_error}")
+                        if attempt < max_retries - 1:
+                            continue
+                        raise
+
+                    # ===== 智能指标完整性检查 =====
+                    # Check if all requested indicators are implemented
+                    is_complete, missing_feedback = check_factor_completeness(
+                        hypothesis=hypothesis,
+                        expression=generated.code,
+                    )
+
+                    if not is_complete and attempt < max_retries - 1:
+                        # 指标不完整，提供具体反馈让LLM改进
+                        analysis = analyze_indicator_coverage(hypothesis, generated.code)
+                        logger.warning(
+                            f"Indicator coverage incomplete: "
+                            f"requested={analysis.requested}, "
+                            f"found={analysis.found}, "
+                            f"missing={analysis.missing}"
+                        )
+                        task.update_state(
+                            state="PROGRESS",
+                            meta={
+                                "current": 30 + attempt * 15,
+                                "total": 100,
+                                "status": f"Missing indicators: {', '.join(analysis.missing)}. Refining...",
+                                "attempt": attempt + 1,
+                                "missing_indicators": list(analysis.missing),
+                            },
+                        )
+                        last_code = generated.code
+                        last_error = missing_feedback
+                        continue  # Retry with specific feedback
+
+                    # Log indicator analysis for successful generation
+                    analysis = analyze_indicator_coverage(hypothesis, generated.code)
+                    logger.info(
+                        f"Factor generated with indicators: {analysis.found}, "
+                        f"completion rate: {analysis.completion_rate:.0%}"
+                    )
+
+                    task.update_state(
+                        state="PROGRESS",
+                        meta={
+                            "current": 85,
+                            "total": 100,
+                            "status": "Factor validated successfully, saving...",
+                        },
+                    )
+
+                    return {
+                        "factor_id": str(uuid.uuid4()),
+                        "hypothesis": hypothesis,
+                        "family": generated.family.value,
+                        "name": generated.name,
+                        "description": generated.description,
+                        "code": generated.code,
+                        "metadata": {
+                            **generated.metadata,
+                            "attempts": attempt + 1,
+                            "refined": attempt > 0,
+                            "indicators_requested": list(analysis.requested),
+                            "indicators_found": list(analysis.found),
+                            "indicator_completion_rate": analysis.completion_rate,
+                        },
+                    }
+
+                except (FactorGenerationError, InvalidFactorError) as e:
+                    # 生成过程中的错误，保存用于下次改进
+                    last_error = str(e)
+                    last_code = getattr(e, 'code', last_code) or "# Previous code unavailable"
+                    logger.warning(f"Factor generation attempt {attempt + 1} failed: {e}")
+                    if attempt >= max_retries - 1:
+                        raise
+
+            # 不应该到达这里，但作为安全保障
+            raise FactorGenerationError(f"Max retries ({max_retries}) exceeded. Last error: {last_error}")
 
     try:
         # 在 Celery 同步任务中运行异步代码
-        result = asyncio.run(_generate_async())
-        logger.info(f"Factor generated successfully: {result.get('name')}")
+        result = asyncio.run(_generate_with_feedback_loop())
+        logger.info(f"Factor generated successfully: {result.get('name')} (attempts: {result.get('metadata', {}).get('attempts', 1)})")
         return result
 
     except FactorGenerationError as e:
-        logger.error(f"Factor generation failed: {e}")
+        logger.error(f"Factor generation failed after all retries: {e}")
         raise TaskError(f"Factor generation failed: {e}")
     except Exception as e:
         logger.error(f"Unexpected error in factor generation: {e}")
         raise TaskError(f"Factor generation error: {e}")
+
+
+def _validate_factor_computes(code: str) -> bool:
+    """Quick validation that factor expression can be computed.
+
+    Args:
+        code: Qlib expression or Python code
+
+    Returns:
+        True if valid
+
+    Raises:
+        Exception if validation fails
+    """
+    # For Qlib expressions, do a quick syntax check
+    if "$" in code or any(op in code for op in ["Mean(", "Std(", "Ref(", "RSI(", "MACD("]):
+        # Check for invalid fields
+        invalid_fields = ["$returns", "$quote_volume", "$funding_rate", "$open_interest"]
+        for invalid in invalid_fields:
+            if invalid in code:
+                raise ValueError(f"Invalid field used: {invalid}. Only $open, $high, $low, $close, $volume are allowed.")
+
+        # Check for balanced parentheses
+        paren_count = 0
+        for char in code:
+            if char == "(":
+                paren_count += 1
+            elif char == ")":
+                paren_count -= 1
+            if paren_count < 0:
+                raise ValueError("Unbalanced parentheses: extra ')'")
+        if paren_count != 0:
+            raise ValueError("Unbalanced parentheses: missing ')'")
+
+        return True
+
+    # For Python code, try to parse it
+    import ast
+    try:
+        ast.parse(code)
+        return True
+    except SyntaxError as e:
+        raise ValueError(f"Python syntax error: {e}")
 
 
 # ==================== Mining Task (C2 Fix: Persistent) ====================
@@ -1087,12 +1289,18 @@ def mining_task(
         families = task_config.get("factor_families") or ["momentum", "volatility"]
         auto_evaluate = task_config.get("auto_evaluate", True)
         task_name = task_config.get("name", "Mining Task")
+        # Use description as the primary hypothesis for factor generation
+        # If no description, fall back to task_name
+        task_description = task_config.get("description") or task_name
+
+        logger.info(f"Mining task config: name='{task_name}', description='{task_description}'")
 
         # Run mining loop
         result = _execute_mining_task(
             celery_task=self,
             task_id=task_id,
             task_name=task_name,
+            task_description=task_description,  # Pass description for factor generation
             target_count=target_count,
             families=families,
             auto_evaluate=auto_evaluate,
@@ -1124,6 +1332,7 @@ def _execute_mining_task(
     celery_task,
     task_id: str,
     task_name: str,
+    task_description: str,
     target_count: int,
     families: list[str],
     auto_evaluate: bool,
@@ -1132,6 +1341,9 @@ def _execute_mining_task(
 
     此函数在 Celery Worker 中同步执行。
     使用数据库连接进行因子生成和评估。
+
+    Args:
+        task_description: 用户输入的因子描述，用作 LLM 的主要指令
     """
     import asyncio
     import time
@@ -1173,7 +1385,25 @@ def _execute_mining_task(
 
         # Select family for this iteration
         family = families[i % len(families)]
-        description = f"Auto-generated {family} factor #{i+1} for {task_name}"
+
+        # Use task_description as the primary factor generation instruction
+        # If description contains specific indicators, use it directly
+        indicator_keywords = ["macd", "rsi", "ema", "sma", "wr", "ssl", "zigzag", "ziggy",
+                              "bollinger", "atr", "adx", "cci", "momentum", "结合", "combine",
+                              "策略", "指标", "williams", "stochastic", "ichimoku", "趋势",
+                              "均线", "突破", "反转", "超买", "超卖"]
+        is_specific_request = any(keyword in task_description.lower() for keyword in indicator_keywords)
+
+        logger.info(f"DEBUG task_description='{task_description}', is_specific={is_specific_request}")
+
+        if is_specific_request:
+            # User provided specific indicator description - use it directly as LLM instruction
+            description = f"{task_description} (variant #{i+1}, family: {family})"
+        else:
+            # Generic description - use auto-generated prompt
+            description = f"Auto-generated {family} factor #{i+1}: {task_description}"
+
+        logger.info(f"DEBUG hypothesis='{description}'")
 
         try:
             # Generate factor using sync implementation
@@ -1194,12 +1424,19 @@ def _execute_mining_task(
                         factor_code=factor_result.get("code", ""),
                         config={"n_trials": generated_count},
                     )
-                    if eval_result.get("passed_threshold", False):
+                    sharpe = eval_result.get("sharpe", 0.0)
+                    threshold = eval_result.get("threshold_used", 0.0)
+                    passed = eval_result.get("passed_threshold", False)
+                    logger.info(f"Factor evaluation: sharpe={sharpe:.4f}, threshold={threshold:.4f}, passed={passed}")
+
+                    if passed:
                         passed_count += 1
                     else:
                         failed_count += 1
                 except Exception as e:
-                    logger.warning(f"Factor evaluation failed: {e}")
+                    logger.warning(f"Factor evaluation failed with exception: {e}")
+                    import traceback
+                    logger.warning(f"Traceback: {traceback.format_exc()}")
                     failed_count += 1
 
         except Exception as e:

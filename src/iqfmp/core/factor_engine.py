@@ -58,6 +58,22 @@ from iqfmp.core.qlib_crypto import QlibExpressionEngine, QlibUnavailableError
 # Import data provider for DB integration
 from iqfmp.core.data_provider import load_ohlcv_sync, DataProvider
 
+# C4: Import UnifiedMarketDataProvider for derivative fields
+try:
+    from iqfmp.data.provider import (
+        UnifiedMarketDataProvider,
+        DataLoadConfig,
+        DataLoadResult,
+        DerivativeType,
+    )
+    UNIFIED_PROVIDER_AVAILABLE = True
+except ImportError:
+    UNIFIED_PROVIDER_AVAILABLE = False
+    UnifiedMarketDataProvider = None
+    DataLoadConfig = None
+    DataLoadResult = None
+    DerivativeType = None
+
 # Import Alpha158/360 factor libraries
 try:
     from iqfmp.evaluation.alpha158 import ALPHA158_FACTORS
@@ -248,7 +264,10 @@ class QlibFactorEngine:
             raise
 
     def _prepare_data(self) -> None:
-        """Prepare data for Qlib factor computation."""
+        """Prepare data for Qlib factor computation.
+
+        Handles both OHLCV fields and derivative fields (C4).
+        """
         if self._df is None:
             return
 
@@ -259,12 +278,29 @@ class QlibFactorEngine:
             self._df.set_index("timestamp", inplace=True)
 
         # Standardize column names to Qlib format
+        # C4: Extended mapping for OHLCV + derivative fields
         column_mapping = {
+            # Standard OHLCV
             "open": "$open",
             "high": "$high",
             "low": "$low",
             "close": "$close",
             "volume": "$volume",
+            # C4: Derivative fields
+            "funding_rate": "$funding_rate",
+            "open_interest": "$open_interest",
+            "open_interest_change": "$open_interest_change",
+            "long_short_ratio": "$long_short_ratio",
+            "liquidation_long": "$liquidation_long",
+            "liquidation_short": "$liquidation_short",
+            "liquidation_total": "$liquidation_total",
+            # C5: Derived features
+            "funding_ma_8h": "$funding_ma_8h",
+            "funding_ma_24h": "$funding_ma_24h",
+            "funding_momentum": "$funding_momentum",
+            "funding_zscore": "$funding_zscore",
+            "funding_extreme": "$funding_extreme",
+            "funding_annualized": "$funding_annualized",
         }
 
         # Create Qlib-compatible DataFrame
@@ -279,6 +315,14 @@ class QlibFactorEngine:
         self._df["fwd_returns_5d"] = self._df["close"].pct_change(5).shift(-5)
         self._df["fwd_returns_10d"] = self._df["close"].pct_change(10).shift(-10)
 
+        # Log available derivative fields for debugging
+        derivative_fields = [
+            col for col in self._qlib_data.columns
+            if col.startswith("$") and col not in ["$open", "$high", "$low", "$close", "$volume"]
+        ]
+        if derivative_fields:
+            logger.info(f"Derivative fields available: {derivative_fields}")
+
     @property
     def data(self) -> Optional[pd.DataFrame]:
         """Get loaded data."""
@@ -290,6 +334,14 @@ class QlibFactorEngine:
         Returns:
             Dictionary with Qlib integration information
         """
+        # C4: Include derivative field status
+        derivative_fields = []
+        if self._qlib_data is not None:
+            derivative_fields = [
+                col for col in self._qlib_data.columns
+                if col.startswith("$") and col not in ["$open", "$high", "$low", "$close", "$volume"]
+            ]
+
         return {
             "qlib_available": QLIB_AVAILABLE,
             "qlib_ops_available": QLIB_OPS_AVAILABLE,
@@ -300,7 +352,113 @@ class QlibFactorEngine:
             "data_rows": len(self._df) if self._df is not None else 0,
             "qlib_data_prepared": self._qlib_data is not None,
             "available_indicators": list(self._get_crypto_precomputed_fields()) if CRYPTO_AVAILABLE else [],
+            # C4: Derivative fields status
+            "unified_provider_available": UNIFIED_PROVIDER_AVAILABLE,
+            "derivative_fields": derivative_fields,
+            "derivative_fields_count": len(derivative_fields),
         }
+
+    async def load_unified_data_async(
+        self,
+        session,  # AsyncSession from SQLAlchemy
+        symbol: str = "BTC/USDT:USDT",
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        timeframe: str = "1h",
+        exchange: str = "binance",
+        include_derivatives: bool = True,
+    ) -> "DataLoadResult":
+        """Load unified market data with derivatives asynchronously.
+
+        C4: New method for loading OHLCV + derivative data via UnifiedMarketDataProvider.
+
+        Args:
+            session: SQLAlchemy AsyncSession
+            symbol: Trading pair (e.g., "BTC/USDT:USDT")
+            start_date: Start datetime (default: 180 days ago)
+            end_date: End datetime (default: now)
+            timeframe: OHLCV timeframe
+            exchange: Exchange identifier
+            include_derivatives: Whether to include derivative data
+
+        Returns:
+            DataLoadResult with merged DataFrame and metadata
+
+        Raises:
+            ImportError: If UnifiedMarketDataProvider not available
+        """
+        if not UNIFIED_PROVIDER_AVAILABLE:
+            raise ImportError(
+                "UnifiedMarketDataProvider not available. "
+                "Install iqfmp.data.provider module."
+            )
+
+        from datetime import timedelta
+
+        # Default dates
+        if end_date is None:
+            end_date = datetime.now()
+        if start_date is None:
+            start_date = end_date - timedelta(days=180)
+
+        # Create provider and load data
+        provider = UnifiedMarketDataProvider(session, exchange=exchange)
+        config = DataLoadConfig(
+            include_derivatives=include_derivatives,
+            calculate_features=True,
+        )
+
+        result = await provider.load_market_data(
+            symbol=symbol,
+            start_date=start_date,
+            end_date=end_date,
+            timeframe=timeframe,
+            config=config,
+        )
+
+        # Update internal state with loaded data
+        if not result.df.empty:
+            self._df = result.df.copy()
+            self._prepare_data()
+            if self._use_crypto:
+                self._init_crypto_handler()
+
+            logger.info(
+                f"Loaded unified data: {len(result.df)} rows, "
+                f"derivatives: {result.derivative_columns}, "
+                f"derived: {result.derived_columns}"
+            )
+
+        return result
+
+    def get_available_derivative_fields(self) -> list[str]:
+        """Get list of available derivative fields in current data.
+
+        C4: Helper method to check which derivative fields are loaded.
+
+        Returns:
+            List of available derivative field names (with $ prefix)
+        """
+        if self._qlib_data is None:
+            return []
+
+        all_derivative_fields = [
+            "$funding_rate",
+            "$open_interest",
+            "$open_interest_change",
+            "$long_short_ratio",
+            "$liquidation_long",
+            "$liquidation_short",
+            "$liquidation_total",
+            "$funding_ma_8h",
+            "$funding_ma_24h",
+            "$funding_momentum",
+            "$funding_zscore",
+            "$funding_extreme",
+            "$funding_annualized",
+        ]
+
+        return [f for f in all_derivative_fields if f in self._qlib_data.columns]
 
     def compute_factor(
         self,
@@ -379,7 +537,7 @@ class QlibFactorEngine:
             return self._expression_engine.compute_expression(
                 expression=expression,
                 df=df,
-                result_name=factor_name,
+                result_name="factor",  # Use default name since _compute_qlib_expression doesn't have factor_name param
             )
         except QlibUnavailableError:
             raise

@@ -580,15 +580,31 @@ class QlibExpressionEngine:
             return pd.Series(np.nan, index=df.index, name=result_name)
 
     def _prepare_data_for_qlib(self, df: pd.DataFrame) -> dict[str, pd.Series]:
-        """Prepare DataFrame columns for Qlib ops."""
+        """Prepare DataFrame columns for Qlib ops.
+
+        P0 Fix: Now maps ALL numeric columns to Qlib-style fields, not just OHLCV.
+        This enables derivative fields (funding_rate, open_interest, etc.) to be
+        used in Qlib expressions.
+        """
         data = {}
         for col in df.columns:
             if col.startswith("$"):
                 # Already Qlib-style field
                 data[col] = df[col]
             elif col in ["open", "high", "low", "close", "volume"]:
-                # Map standard OHLCV to Qlib fields
+                # Map standard OHLCV to Qlib fields (with $ prefix)
                 data[f"${col}"] = df[col]
+            else:
+                # P0 Fix: Map ALL other numeric columns with $ prefix
+                # This enables derivative fields like funding_rate, open_interest, etc.
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    # Add $ prefix if not already present
+                    qlib_col = f"${col}" if not col.startswith("$") else col
+                    data[qlib_col] = df[col]
+                    # Also keep original name for backward compatibility
+                    # (allows expressions to use both $funding_rate and funding_rate)
+                    if not col.startswith("$"):
+                        data[col] = df[col]
         return data
 
     def _evaluate_expression(

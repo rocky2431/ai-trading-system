@@ -33,6 +33,18 @@ try:
 except ImportError:
     SIGNAL_CONVERTER_AVAILABLE = False
 
+# P1 Fix: Import RealisticBacktestEngine for crypto-specific costs
+try:
+    from iqfmp.evaluation.quality_gate import (
+        RealisticBacktestEngine,
+        BacktestCostConfig,
+    )
+    REALISTIC_BACKTEST_AVAILABLE = True
+except ImportError:
+    REALISTIC_BACKTEST_AVAILABLE = False
+    RealisticBacktestEngine = None
+    BacktestCostConfig = None
+
 logger = logging.getLogger(__name__)
 
 # Qlib Backtest Integration - Full Import
@@ -147,7 +159,11 @@ class ParameterSpace:
 
 @dataclass
 class BacktestConfig:
-    """Configuration for backtesting."""
+    """Configuration for backtesting.
+
+    P1 Fix: Added use_realistic_costs option to integrate RealisticBacktestEngine
+    with funding rate costs and dynamic slippage.
+    """
 
     # Optimization settings
     optimization_method: OptimizationMethod = OptimizationMethod.RANDOM_SEARCH
@@ -169,6 +185,14 @@ class BacktestConfig:
     commission_rate: float = 0.001  # 10 bps
     slippage_rate: float = 0.0005  # 5 bps
 
+    # P1 Fix: Realistic cost model for crypto perpetual futures
+    use_realistic_costs: bool = True  # Enable funding/slippage costs
+    funding_settlement_hours: int = 8  # Funding settlement interval
+    maker_fee: float = 0.0002  # 2 bps maker fee
+    taker_fee: float = 0.0005  # 5 bps taker fee
+    slippage_base: float = 0.0001  # Base slippage (1 bp)
+    slippage_vol_multiplier: float = 0.5  # Volatility impact on slippage
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -184,6 +208,13 @@ class BacktestConfig:
             "max_drawdown": self.max_drawdown,
             "commission_rate": self.commission_rate,
             "slippage_rate": self.slippage_rate,
+            # P1: Realistic cost parameters
+            "use_realistic_costs": self.use_realistic_costs,
+            "funding_settlement_hours": self.funding_settlement_hours,
+            "maker_fee": self.maker_fee,
+            "taker_fee": self.taker_fee,
+            "slippage_base": self.slippage_base,
+            "slippage_vol_multiplier": self.slippage_vol_multiplier,
         }
 
 
@@ -743,6 +774,28 @@ class BacktestOptimizationAgent:
             f"(Qlib initialized: {QLIB_INITIALIZED})"
         )
 
+        # P1 Fix: Initialize RealisticBacktestEngine for crypto-specific costs
+        self.realistic_engine: Optional[RealisticBacktestEngine] = None
+        if self.config.use_realistic_costs and REALISTIC_BACKTEST_AVAILABLE:
+            cost_config = BacktestCostConfig(
+                funding_settlement_hours=self.config.funding_settlement_hours,
+                maker_fee=self.config.maker_fee,
+                taker_fee=self.config.taker_fee,
+                slippage_base=self.config.slippage_base,
+                slippage_vol_multiplier=self.config.slippage_vol_multiplier,
+            )
+            self.realistic_engine = RealisticBacktestEngine(cost_config)
+            logger.info(
+                f"BacktestOptimizationAgent: RealisticBacktestEngine enabled "
+                f"(funding={self.config.funding_settlement_hours}h, "
+                f"maker={self.config.maker_fee:.4f}, taker={self.config.taker_fee:.4f})"
+            )
+        elif self.config.use_realistic_costs:
+            logger.warning(
+                "use_realistic_costs=True but RealisticBacktestEngine not available. "
+                "Install iqfmp.evaluation.quality_gate module."
+            )
+
     async def optimize(self, state: AgentState) -> AgentState:
         """Run backtest optimization on strategy.
 
@@ -1084,19 +1137,73 @@ class BacktestOptimizationAgent:
         self,
         signals: pd.Series,
         returns: pd.Series,
+        price_data: Optional[pd.DataFrame] = None,
     ) -> BacktestMetrics:
         """Run a single backtest.
 
         Convenience method for backtesting outside StateGraph context.
 
+        P1 Fix: Now uses RealisticBacktestEngine for funding/slippage costs
+        when use_realistic_costs=True and price_data is provided.
+
         Args:
             signals: Position signals
             returns: Asset returns
+            price_data: Optional DataFrame with funding_rate, close, etc.
+                       Required for realistic cost calculation.
 
         Returns:
             BacktestMetrics with results
         """
-        return self.engine.run(signals, returns)
+        # Get base metrics from QlibBacktestEngine
+        base_metrics = self.engine.run(signals, returns)
+
+        # P1 Fix: Apply realistic costs if enabled and data available
+        if self.realistic_engine is not None and price_data is not None:
+            try:
+                # Calculate realistic costs
+                realistic_result = self.realistic_engine.calculate_net_returns(
+                    data=price_data,
+                    signals=signals,
+                    price_column="close" if "close" in price_data.columns else price_data.columns[0],
+                    funding_column="funding_rate" if "funding_rate" in price_data.columns else None,
+                )
+
+                # Adjust metrics with realistic costs
+                if "net_returns" in realistic_result.columns:
+                    net_returns = realistic_result["net_returns"]
+                    total_costs = realistic_result.get("total_costs", pd.Series(0, index=net_returns.index))
+
+                    # Recalculate key metrics with realistic costs
+                    realistic_total_return = (1 + net_returns).prod() - 1
+                    cost_impact = total_costs.sum()
+
+                    # Apply cost adjustment to base metrics
+                    adjusted_return = base_metrics.total_return - cost_impact
+                    cost_ratio = adjusted_return / base_metrics.total_return if base_metrics.total_return != 0 else 1.0
+
+                    logger.info(
+                        f"Realistic costs applied: base_return={base_metrics.total_return:.4f}, "
+                        f"cost_impact={cost_impact:.4f}, adjusted_return={adjusted_return:.4f}"
+                    )
+
+                    # Create adjusted metrics
+                    return BacktestMetrics(
+                        total_return=float(adjusted_return),
+                        annualized_return=float(base_metrics.annualized_return * cost_ratio),
+                        sharpe_ratio=float(base_metrics.sharpe_ratio * cost_ratio),
+                        sortino_ratio=float(base_metrics.sortino_ratio * cost_ratio),
+                        max_drawdown=base_metrics.max_drawdown,  # Drawdown may increase slightly
+                        win_rate=base_metrics.win_rate,
+                        profit_factor=float(base_metrics.profit_factor * cost_ratio) if base_metrics.profit_factor > 0 else 0,
+                        n_trades=base_metrics.n_trades,
+                        avg_trade_return=float(base_metrics.avg_trade_return - cost_impact / max(base_metrics.n_trades, 1)),
+                        avg_holding_period=base_metrics.avg_holding_period,
+                    )
+            except Exception as e:
+                logger.warning(f"Realistic cost calculation failed: {e}. Using base metrics.")
+
+        return base_metrics
 
     def walk_forward_validation(
         self,

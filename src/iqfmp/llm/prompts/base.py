@@ -192,7 +192,14 @@ class CryptoMarketContext:
 
 
 class BasePromptTemplate(ABC):
-    """Abstract base class for prompt templates."""
+    """Abstract base class for prompt templates.
+
+    P2 Fix: Added version tracking for prompt templates.
+    """
+
+    # Class-level version tracking (override in subclasses)
+    VERSION: str = "1.0.0"
+    PROMPT_ID: str = "base_template"
 
     def __init__(
         self,
@@ -209,6 +216,28 @@ class BasePromptTemplate(ABC):
         self.market_type = market_type
         self.data_fields = CryptoDataFields()
         self.market_context = CryptoMarketContext()
+
+    @property
+    def version(self) -> str:
+        """Get prompt template version."""
+        return self.VERSION
+
+    @property
+    def prompt_id(self) -> str:
+        """Get unique prompt template identifier."""
+        return self.PROMPT_ID
+
+    def get_version_info(self) -> dict[str, str]:
+        """Get version information for tracking.
+
+        P2 Fix: Returns version info for logging and tracking.
+        """
+        return {
+            "prompt_id": self.prompt_id,
+            "version": self.version,
+            "agent_type": self.agent_type.value,
+            "market_type": self.market_type.value,
+        }
 
     @abstractmethod
     def get_system_prompt(self) -> str:

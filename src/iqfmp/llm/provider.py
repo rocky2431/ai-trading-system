@@ -83,6 +83,7 @@ class LLMResponse:
     """Response from LLM API call.
 
     Extended with metadata for auto-continue and debugging support.
+    P2 Fix: Added prompt_id and prompt_version for tracking.
     """
     content: str
     model: str
@@ -95,6 +96,9 @@ class LLMResponse:
     model_id: Optional[str] = None  # Actual OpenRouter model ID used
     cost_estimate: Optional[float] = None  # Estimated cost in USD
     request_id: Optional[str] = None  # Request tracking ID
+    # P2 Fix: Prompt version tracking
+    prompt_id: Optional[str] = None  # Prompt template identifier
+    prompt_version: Optional[str] = None  # Prompt template version
 
     @property
     def is_truncated(self) -> bool:
@@ -301,9 +305,13 @@ class LLMProvider:
         system_prompt: Optional[str] = None,
         auto_continue: bool = True,
         max_continue_rounds: int = 5,
+        n_candidates: int = 1,
+        seed: Optional[int] = None,
         **kwargs: Any,
     ) -> LLMResponse:
         """Generate a completion for the given prompt.
+
+        P2 Fix: Added n_candidates and seed for multi-candidate generation.
 
         Args:
             prompt: The input prompt.
@@ -314,9 +322,12 @@ class LLMProvider:
             system_prompt: Optional system prompt to guide the model.
             auto_continue: If True, automatically continue truncated responses (default True).
             max_continue_rounds: Maximum continuation rounds for auto_continue (default 5).
+            n_candidates: Number of candidates to generate (default 1, max 10).
+            seed: Random seed for reproducibility (optional).
 
         Returns:
-            LLMResponse with generated content.
+            LLMResponse with generated content (first candidate if n_candidates > 1).
+            Use generate_candidates() for accessing all candidates.
 
         Raises:
             ValueError: If prompt is empty.
@@ -329,6 +340,12 @@ class LLMProvider:
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
+
+        # P2 Fix: Add n_candidates and seed to kwargs
+        if n_candidates > 1:
+            kwargs["n"] = min(n_candidates, 10)  # Cap at 10
+        if seed is not None:
+            kwargs["seed"] = seed
 
         if auto_continue:
             return await self._execute_with_auto_continue(
@@ -347,6 +364,171 @@ class LLMProvider:
                 temperature=temperature,
                 **kwargs,
             )
+
+    async def generate_candidates(
+        self,
+        prompt: str,
+        n_candidates: int = 3,
+        model: Optional[ModelType | str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: float = 0.7,
+        system_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
+        deduplicate: bool = True,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Generate multiple candidate responses for the same prompt.
+
+        P2 Fix: New method for multi-candidate generation with deduplication.
+
+        Args:
+            prompt: The input prompt.
+            n_candidates: Number of candidates to generate (default 3, max 10).
+            model: Optional model to use.
+            max_tokens: Maximum tokens per response.
+            temperature: Sampling temperature (higher = more diverse).
+            system_prompt: Optional system prompt.
+            seed: Random seed for reproducibility.
+            deduplicate: If True, remove duplicate responses (default True).
+
+        Returns:
+            List of generated response strings.
+        """
+        if n_candidates < 1:
+            raise ValueError("n_candidates must be at least 1")
+
+        n_candidates = min(n_candidates, 10)  # Cap at 10
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        # Build kwargs with n and seed
+        api_kwargs = {**kwargs, "n": n_candidates}
+        if seed is not None:
+            api_kwargs["seed"] = seed
+
+        # Call API with n_candidates
+        try:
+            response = await self._call_api_multi(
+                messages=messages,
+                model=model or self._config.default_model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **api_kwargs,
+            )
+
+            candidates = response if isinstance(response, list) else [response.content]
+
+            # Deduplicate if requested
+            if deduplicate:
+                seen = set()
+                unique_candidates = []
+                for c in candidates:
+                    # Normalize for comparison
+                    normalized = c.strip().lower()
+                    if normalized not in seen:
+                        seen.add(normalized)
+                        unique_candidates.append(c)
+                candidates = unique_candidates
+
+            return candidates
+
+        except Exception as e:
+            # Fallback: generate sequentially
+            logger.warning(f"Multi-candidate API failed: {e}. Falling back to sequential generation.")
+            candidates = []
+            for i in range(n_candidates):
+                try:
+                    current_seed = seed + i if seed is not None else None
+                    if current_seed is not None:
+                        api_kwargs["seed"] = current_seed
+
+                    resp = await self._execute_with_fallback(
+                        messages=messages,
+                        model=model,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        **{k: v for k, v in api_kwargs.items() if k != "n"},
+                    )
+                    candidates.append(resp.content)
+                except Exception:
+                    pass
+
+            if deduplicate:
+                seen = set()
+                unique_candidates = []
+                for c in candidates:
+                    normalized = c.strip().lower()
+                    if normalized not in seen:
+                        seen.add(normalized)
+                        unique_candidates.append(c)
+                candidates = unique_candidates
+
+            return candidates
+
+    async def _call_api_multi(
+        self,
+        messages: list[dict[str, str]],
+        model: ModelType | str,
+        max_tokens: Optional[int] = None,
+        temperature: float = 0.7,
+        **kwargs: Any,
+    ) -> list[str]:
+        """Make API call with n > 1 to get multiple candidates.
+
+        P2 Fix: Internal method for multi-candidate API calls.
+        """
+        await self._rate_limiter.acquire()
+
+        model_id = self.get_model_id(model)
+        n = kwargs.pop("n", 1)
+        seed = kwargs.pop("seed", None)
+
+        payload: dict[str, Any] = {
+            "model": model_id,
+            "messages": messages,
+            "temperature": temperature,
+            "n": n,
+        }
+
+        if max_tokens:
+            payload["max_tokens"] = max_tokens
+        if seed is not None:
+            payload["seed"] = seed
+
+        start_time = time.time()
+
+        try:
+            response = await self._client.post(
+                "/chat/completions",
+                json=payload,
+            )
+
+            if response.status_code != 200:
+                raise LLMError(f"API Error: {response.status_code} - {response.text}")
+
+            data = response.json()
+            choices = data.get("choices", [])
+
+            # Extract all candidate responses
+            candidates = [choice["message"]["content"] for choice in choices]
+
+            # Track usage
+            usage = data.get("usage", {})
+            self.record_usage(
+                prompt_tokens=usage.get("prompt_tokens", 0),
+                completion_tokens=usage.get("completion_tokens", 0),
+            )
+
+            latency_ms = (time.time() - start_time) * 1000
+            logger.info(f"Multi-candidate API call: n={n}, got {len(candidates)} candidates in {latency_ms:.0f}ms")
+
+            return candidates
+
+        except Exception as e:
+            raise LLMError(f"Multi-candidate API call failed: {e}")
 
     async def chat(
         self,

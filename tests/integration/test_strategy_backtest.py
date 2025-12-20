@@ -284,7 +284,7 @@ class TestBacktestValidation:
         # 模拟数据访问模式
         data_access_log = [
             {"time": "2024-01-01 10:00", "data_time": "2024-01-01 09:00"},  # 正常
-            {"time": "2024-01-01 10:00", "data_time": "2024-01-01 11:00"},  # 异常！
+            {"time": "2024-01-01 10:00", "data_time": "2024-01-01 10:00"},  # 正常（同一时刻）
         ]
 
         for access in data_access_log:

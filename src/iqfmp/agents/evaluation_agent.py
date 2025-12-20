@@ -116,6 +116,9 @@ class EvaluationAgentConfig:
     generate_reports: bool = True
     include_recommendations: bool = True
 
+    # Security / execution mode
+    allow_python_factors: bool = False  # Default: Qlib expression-only
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -128,6 +131,7 @@ class EvaluationAgentConfig:
             "timeout_per_factor": self.timeout_per_factor,
             "generate_reports": self.generate_reports,
             "include_recommendations": self.include_recommendations,
+            "allow_python_factors": self.allow_python_factors,
         }
 
 
@@ -199,6 +203,9 @@ class FactorEvaluationAgent:
         self.config = config or EvaluationAgentConfig()
         self.ledger = ledger or ResearchLedger(storage=MemoryStorage())
         self.llm_provider = llm_provider
+        # Qlib expression engine for factor_value computation (expression-only by default).
+        from iqfmp.core.qlib_crypto import QlibExpressionEngine
+        self._expression_engine = QlibExpressionEngine(require_qlib=False)
 
         # Create evaluator with config
         eval_config = EvaluationConfig(
@@ -271,6 +278,22 @@ Format as JSON:
         try:
             system_prompt = custom_system_prompt or EVALUATION_SYSTEM_PROMPT
 
+            # Prefer schema-validated structured output when using the native LLMProvider.
+            from iqfmp.llm.provider import LLMProvider
+            from iqfmp.llm.validation.json_schema import OutputType
+
+            if isinstance(self.llm_provider, LLMProvider):
+                _resp, validation = await self.llm_provider.complete_structured(
+                    prompt=prompt,
+                    output_type=OutputType.EVALUATION_INSIGHTS,
+                    model=model_id,
+                    temperature=temperature,
+                    max_tokens=1024,
+                    system_prompt=system_prompt,
+                )
+                if validation.is_valid and isinstance(validation.data, dict):
+                    return validation.data
+
             response = await self.llm_provider.complete(
                 prompt=prompt,
                 system_prompt=system_prompt,
@@ -279,7 +302,7 @@ Format as JSON:
                 max_tokens=1024,
             )
 
-            # Parse LLM response
+            # Parse LLM response (legacy fallback)
             return self._parse_llm_insights(response.content)
 
         except Exception as e:
@@ -502,23 +525,98 @@ Format as JSON:
         if "factor_value" in df.columns:
             return df
 
-        # Try to calculate factor if code is provided
-        if factor_code:
+        if not factor_code:
+            raise DataValidationError(f"No factor code provided for {factor_name}")
+
+        # Determine if this looks like Python code (legacy) or Qlib expression (preferred).
+        is_python_code = (
+            factor_code.strip().startswith("def ")
+            or factor_code.strip().startswith("import ")
+            or factor_code.strip().startswith("from ")
+            or "\ndef " in factor_code
+        )
+
+        if is_python_code:
+            if not self.config.allow_python_factors:
+                raise DataValidationError(
+                    f"Python factor code is not allowed by default (factor={factor_name}). "
+                    "Provide a Qlib expression or set allow_python_factors=True explicitly."
+                )
+
+            # Best-effort sandboxed evaluation: no imports, no builtins beyond a small whitelist.
+            local_vars: dict[str, Any] = {"df": df, "pd": pd}
+            safe_builtins: dict[str, Any] = {
+                "len": len,
+                "range": range,
+                "min": min,
+                "max": max,
+                "sum": sum,
+                "abs": abs,
+            }
+
             try:
-                # Simple sandbox execution for factor calculation
-                local_vars = {"df": df, "pd": pd}
-                exec(factor_code, {"__builtins__": {}}, local_vars)
-                if "factor_value" in local_vars:
-                    df["factor_value"] = local_vars["factor_value"]
-                elif "result" in local_vars:
-                    df["factor_value"] = local_vars["result"]
+                exec(factor_code, {"__builtins__": safe_builtins}, local_vars)
             except Exception as e:
-                logger.warning(f"Failed to calculate factor {factor_name}: {e}")
-                # Use close price as fallback
-                if "close" in df.columns:
-                    df["factor_value"] = df["close"].pct_change()
+                raise DataValidationError(
+                    f"Python factor execution failed in sandbox (factor={factor_name}): {e}"
+                ) from e
+
+            series_obj = local_vars.get("factor_value")
+            if series_obj is None:
+                series_obj = local_vars.get("result")
+
+            if series_obj is None:
+                # Try to call a function (prefer matching name; otherwise first callable).
+                candidate = local_vars.get(factor_name)
+                if callable(candidate):
+                    series_obj = candidate(df)
                 else:
-                    df["factor_value"] = 0.0
+                    callables = [
+                        v
+                        for k, v in local_vars.items()
+                        if callable(v) and k not in {"pd", "df"}
+                    ]
+                    if callables:
+                        series_obj = callables[0](df)
+
+            if series_obj is None:
+                raise DataValidationError(
+                    f"Python factor code did not produce 'factor_value'/'result' or a callable function (factor={factor_name})"
+                )
+
+            if isinstance(series_obj, pd.Series):
+                series = series_obj
+            else:
+                series = pd.Series(series_obj, index=df.index)
+
+            if len(series) != len(df):
+                raise DataValidationError(
+                    f"Python factor output length mismatch (factor={factor_name}): "
+                    f"{len(series)} != {len(df)}"
+                )
+
+            if series.isna().all():
+                raise DataValidationError(
+                    f"Computed factor_value is all-NaN (factor={factor_name})"
+                )
+
+            df["factor_value"] = series
+            return df
+
+        # Qlib expression path
+        series = self._expression_engine.compute_expression(
+            expression=factor_code,
+            df=df,
+            result_name=factor_name,
+        )
+
+        if series.isna().all():
+            raise DataValidationError(
+                f"Computed factor_value is all-NaN (factor={factor_name}). "
+                "Likely missing required fields for the expression."
+            )
+
+        df["factor_value"] = series
 
         return df
 

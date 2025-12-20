@@ -153,7 +153,7 @@ def init_qlib_for_crypto(
 
     return init_qlib(
         provider_uri=uri,
-        region="cn",  # Use cn region for now (no specific crypto region)
+        region="crypto",
     )
 
 

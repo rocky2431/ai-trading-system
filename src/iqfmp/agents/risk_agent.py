@@ -913,6 +913,22 @@ Please provide your analysis in the following JSON format:
             # Use custom system prompt if configured, otherwise use default
             system_prompt = custom_system_prompt or RISK_SYSTEM_PROMPT
 
+            # Prefer schema-validated structured output when using the native LLMProvider.
+            from iqfmp.llm.provider import LLMProvider
+            from iqfmp.llm.validation.json_schema import OutputType
+
+            if isinstance(self.llm_provider, LLMProvider):
+                _resp, validation = await self.llm_provider.complete_structured(
+                    prompt=prompt,
+                    output_type=OutputType.RISK_ANALYSIS,
+                    model=model_id,
+                    temperature=temperature,
+                    max_tokens=2048,
+                    system_prompt=system_prompt,
+                )
+                if validation.is_valid and isinstance(validation.data, dict):
+                    return validation.data
+
             response = await self.llm_provider.complete(
                 prompt=prompt,
                 system_prompt=system_prompt,
@@ -921,7 +937,7 @@ Please provide your analysis in the following JSON format:
                 max_tokens=2048,
             )
 
-            # Parse LLM response
+            # Parse LLM response (legacy fallback)
             return self._parse_llm_risk_response(response)
 
         except Exception as e:

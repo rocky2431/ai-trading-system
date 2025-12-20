@@ -101,7 +101,7 @@ class FactorEvaluationError(Exception):
     pass
 
 
-class FactorService:
+class AsyncFactorService:
     """Service for factor management with database persistence."""
 
     def __init__(
@@ -705,6 +705,7 @@ class FactorService:
                 cost_metrics = self._estimate_transaction_costs(
                     factor_values=eval_df["factor_value"],
                     volume=df["volume"],
+                    funding_rate=df["funding_rate"] if "funding_rate" in df.columns else None,
                 )
                 metrics_dict.update(cost_metrics)
 
@@ -1110,6 +1111,8 @@ class FactorService:
         self,
         factor_values: pd.Series,
         volume: pd.Series,
+        funding_rate: Optional[pd.Series] = None,
+        periods_per_year: float = 252.0,
         taker_fee: float = 0.0004,  # 0.04% taker fee
         slippage_bps: float = 2.0,  # 2 basis points
     ) -> dict:
@@ -1118,6 +1121,8 @@ class FactorService:
         Args:
             factor_values: Factor values series
             volume: Trading volume series
+            funding_rate: Optional funding rate series (crypto perp)
+            periods_per_year: Annualization factor for cost
             taker_fee: Taker fee rate (default 0.04%)
             slippage_bps: Slippage in basis points
 
@@ -1130,9 +1135,21 @@ class FactorService:
         position_changes = position.diff().abs()
         turnover = float(position_changes.mean())
 
-        # Estimate annual cost
+        # Estimate annual trading cost (fee + slippage)
         slippage_rate = slippage_bps / 10000
-        annual_cost = turnover * (taker_fee + slippage_rate) * 252
+        annual_trading_cost = turnover * (taker_fee + slippage_rate) * periods_per_year
+
+        # Estimate annual funding impact (net + abs)
+        annual_funding_cost = 0.0
+        annual_funding_cost_abs = 0.0
+        if funding_rate is not None:
+            aligned_funding = funding_rate.reindex(position.index).fillna(0)
+            funding_cost_series = (-position.shift(1).fillna(0) * aligned_funding).fillna(0)
+            annual_funding_cost = float(funding_cost_series.mean() * periods_per_year)
+            annual_funding_cost_abs = float(funding_cost_series.abs().mean() * periods_per_year)
+
+        annual_total_cost = annual_trading_cost + annual_funding_cost
+        annual_total_cost_abs = annual_trading_cost + annual_funding_cost_abs
 
         # Capacity estimation (1% of avg volume)
         avg_volume = float(volume.mean())
@@ -1140,17 +1157,21 @@ class FactorService:
         capacity_annual = capacity_daily * 252
 
         # Implementability score
-        if annual_cost < 0.005:  # < 0.5% annual cost
+        if annual_total_cost_abs < 0.005:  # < 0.5% annual cost
             implementability = 1.0
-        elif annual_cost < 0.02:  # < 2%
+        elif annual_total_cost_abs < 0.02:  # < 2%
             implementability = 0.7
-        elif annual_cost < 0.05:  # < 5%
+        elif annual_total_cost_abs < 0.05:  # < 5%
             implementability = 0.4
         else:
             implementability = 0.1
 
         return {
-            "estimated_annual_cost_bps": round(annual_cost * 10000, 2),
+            "estimated_annual_cost_bps": round(annual_trading_cost * 10000, 2),
+            "estimated_annual_funding_bps": round(annual_funding_cost * 10000, 2),
+            "estimated_annual_funding_bps_abs": round(annual_funding_cost_abs * 10000, 2),
+            "estimated_annual_total_cost_bps": round(annual_total_cost * 10000, 2),
+            "estimated_annual_total_cost_bps_abs": round(annual_total_cost_abs * 10000, 2),
             "capacity_daily_usd": round(capacity_daily, 0),
             "capacity_annual_usd": round(capacity_annual, 0),
             "implementability_score": round(implementability, 2),
@@ -1647,7 +1668,7 @@ class SyncFactorService:
 
     def __init__(self) -> None:
         """Initialize sync factor service."""
-        self._async_service: Optional[FactorService] = None
+        self._async_service: Optional["AsyncFactorService"] = None
         # Fallback to in-memory storage if DB not available
         self._factors: dict[str, Factor] = {}
         self._llm_provider: Optional[LLMProvider] = None
@@ -1745,7 +1766,12 @@ class SyncFactorService:
         if family:
             factors = [f for f in factors if family in f.family]
         if status:
-            factors = [f for f in factors if f.status.value == status]
+            factors = [
+                f
+                for f in factors
+                if (f.status.value if hasattr(f.status, "value") else str(f.status))
+                == status
+            ]
         total = len(factors)
         start = (page - 1) * page_size
         end = start + page_size
@@ -1796,7 +1822,14 @@ class SyncFactorService:
 # Singleton for legacy support
 _sync_factor_service = SyncFactorService()
 
+FactorService = SyncFactorService
+
+
+def get_sync_factor_service() -> SyncFactorService:
+    """Get in-memory sync factor service instance."""
+    return _sync_factor_service
+
 
 def get_factor_service() -> SyncFactorService:
-    """Get sync factor service instance (legacy)."""
-    return _sync_factor_service
+    """Backwards-compatible alias for get_sync_factor_service()."""
+    return get_sync_factor_service()

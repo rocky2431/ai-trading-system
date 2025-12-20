@@ -1,6 +1,11 @@
-"""Factor API router with async database support."""
+"""Factor API router with DB + in-memory fallback.
 
-from typing import Optional
+Unit tests and local dev may run without TimescaleDB/Redis. In that case, the
+router falls back to an in-memory FactorService implementation so endpoints
+remain usable and tests do not require network access.
+"""
+
+from typing import Optional, TypeAlias
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,11 +30,19 @@ from iqfmp.api.factors.schemas import (
     MiningTaskStatus,
     StabilityResponse,
 )
-from iqfmp.api.factors.service import FactorNotFoundError, FactorEvaluationError, FactorService
-from iqfmp.db.database import get_db, get_redis
+from iqfmp.api.factors.service import (
+    AsyncFactorService,
+    FactorEvaluationError,
+    FactorNotFoundError,
+    FactorService,
+    get_sync_factor_service,
+)
+from iqfmp.db.database import get_optional_db, get_optional_redis
 from iqfmp.models.factor import Factor
 
 router = APIRouter(tags=["factors"])
+
+FactorServiceDep: TypeAlias = AsyncFactorService | FactorService
 
 
 def _factor_to_response(factor: Factor) -> FactorResponse:
@@ -72,17 +85,19 @@ def _factor_to_response(factor: Factor) -> FactorResponse:
 
 
 async def get_factor_service(
-    session: AsyncSession = Depends(get_db),
-    redis_client=Depends(get_redis),
-) -> FactorService:
+    session: AsyncSession | None = Depends(get_optional_db),
+    redis_client=Depends(get_optional_redis),
+) -> FactorServiceDep:
     """Dependency injection for FactorService."""
-    return FactorService(session, redis_client)
+    if session is None:
+        return get_sync_factor_service()
+    return AsyncFactorService(session, redis_client)
 
 
 @router.post("/generate", response_model=FactorResponse, status_code=status.HTTP_201_CREATED)
 async def generate_factor(
     request: FactorGenerateRequest,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorResponse:
     """Generate a new factor from description using LLM.
 
@@ -94,11 +109,18 @@ async def generate_factor(
         Generated factor
     """
     try:
-        factor = await factor_service.generate_factor(
-            description=request.description,
-            family=request.family,
-            target_task=request.target_task,
-        )
+        if isinstance(factor_service, AsyncFactorService):
+            factor = await factor_service.generate_factor(
+                description=request.description,
+                family=request.family,
+                target_task=request.target_task,
+            )
+        else:
+            factor = factor_service.generate_factor(
+                description=request.description,
+                family=request.family,
+                target_task=request.target_task,
+            )
         return _factor_to_response(factor)
     except ValueError as e:
         raise HTTPException(
@@ -110,7 +132,7 @@ async def generate_factor(
 @router.post("", response_model=FactorResponse, status_code=status.HTTP_201_CREATED)
 async def create_factor(
     request: FactorCreateRequest,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorResponse:
     """Create a new factor with provided code.
 
@@ -122,12 +144,20 @@ async def create_factor(
         Created factor
     """
     try:
-        factor = await factor_service.create_factor(
-            name=request.name,
-            family=request.family,
-            code=request.code,
-            target_task=request.target_task,
-        )
+        if isinstance(factor_service, AsyncFactorService):
+            factor = await factor_service.create_factor(
+                name=request.name,
+                family=request.family,
+                code=request.code,
+                target_task=request.target_task,
+            )
+        else:
+            factor = factor_service.create_factor(
+                name=request.name,
+                family=request.family,
+                code=request.code,
+                target_task=request.target_task,
+            )
         return _factor_to_response(factor)
     except ValueError as e:
         raise HTTPException(
@@ -142,7 +172,7 @@ async def list_factors(
     page_size: int = Query(10, ge=1, le=100),
     family: Optional[str] = Query(None),
     status_filter: Optional[str] = Query(None, alias="status"),
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorListResponse:
     """List factors with pagination and filtering.
 
@@ -156,12 +186,20 @@ async def list_factors(
     Returns:
         List of factors with pagination info
     """
-    factors, total = await factor_service.list_factors(
-        page=page,
-        page_size=page_size,
-        family=family,
-        status=status_filter,
-    )
+    if isinstance(factor_service, AsyncFactorService):
+        factors, total = await factor_service.list_factors(
+            page=page,
+            page_size=page_size,
+            family=family,
+            status=status_filter,
+        )
+    else:
+        factors, total = factor_service.list_factors(
+            page=page,
+            page_size=page_size,
+            family=family,
+            status=status_filter,
+        )
     return FactorListResponse(
         factors=[_factor_to_response(f) for f in factors],
         total=total,
@@ -172,7 +210,7 @@ async def list_factors(
 
 @router.get("/stats", response_model=FactorStatsResponse)
 async def get_factor_stats(
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorStatsResponse:
     """Get comprehensive factor statistics for monitoring dashboard.
 
@@ -182,6 +220,12 @@ async def get_factor_stats(
     Returns:
         Factor statistics including totals, status counts, thresholds, and metrics
     """
+    if not isinstance(factor_service, AsyncFactorService):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Stats require database-backed service (configure TimescaleDB).",
+        )
+
     stats = await factor_service.get_stats()
     return FactorStatsResponse(
         # Basic fields
@@ -205,7 +249,7 @@ async def get_factor_stats(
 @router.post("/mining", response_model=MiningTaskCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_mining_task(
     request: MiningTaskCreateRequest,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> MiningTaskCreateResponse:
     """Create and start a factor mining task.
 
@@ -217,6 +261,11 @@ async def create_mining_task(
         Mining task creation response with task ID
     """
     try:
+        if not isinstance(factor_service, AsyncFactorService):
+            raise RuntimeError(
+                "Mining tasks require database-backed service (configure TimescaleDB)."
+            )
+
         task_id = await factor_service.create_mining_task(
             name=request.name,
             description=request.description,
@@ -246,7 +295,7 @@ async def create_mining_task(
 async def list_mining_tasks(
     status_filter: Optional[str] = Query(None, alias="status"),
     limit: int = Query(20, ge=1, le=100),
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> MiningTaskListResponse:
     """List mining tasks with optional status filter.
 
@@ -258,6 +307,12 @@ async def list_mining_tasks(
     Returns:
         List of mining tasks
     """
+    if not isinstance(factor_service, AsyncFactorService):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Mining tasks require database-backed service (configure TimescaleDB).",
+        )
+
     tasks = await factor_service.list_mining_tasks(status=status_filter, limit=limit)
     return MiningTaskListResponse(tasks=tasks, total=len(tasks))
 
@@ -265,7 +320,7 @@ async def list_mining_tasks(
 @router.get("/mining/{task_id}", response_model=MiningTaskStatus)
 async def get_mining_task(
     task_id: str,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> MiningTaskStatus:
     """Get mining task status by ID.
 
@@ -279,6 +334,12 @@ async def get_mining_task(
     Raises:
         HTTPException: If task not found
     """
+    if not isinstance(factor_service, AsyncFactorService):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Mining tasks require database-backed service (configure TimescaleDB).",
+        )
+
     task = await factor_service.get_mining_task(task_id)
     if not task:
         raise HTTPException(
@@ -291,7 +352,7 @@ async def get_mining_task(
 @router.delete("/mining/{task_id}", response_model=MiningTaskCancelResponse)
 async def cancel_mining_task(
     task_id: str,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> MiningTaskCancelResponse:
     """Cancel a running mining task.
 
@@ -302,6 +363,12 @@ async def cancel_mining_task(
     Returns:
         Cancel response
     """
+    if not isinstance(factor_service, AsyncFactorService):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Mining tasks require database-backed service (configure TimescaleDB).",
+        )
+
     success = await factor_service.cancel_mining_task(task_id)
     if success:
         return MiningTaskCancelResponse(
@@ -319,7 +386,7 @@ async def cancel_mining_task(
 
 @router.get("/library/stats", response_model=FactorLibraryStats)
 async def get_library_stats(
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorLibraryStats:
     """Get factor library statistics.
 
@@ -329,13 +396,18 @@ async def get_library_stats(
     Returns:
         Comprehensive library statistics
     """
+    if not isinstance(factor_service, AsyncFactorService):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Library stats require database-backed service (configure TimescaleDB).",
+        )
     return await factor_service.get_library_stats()
 
 
 @router.post("/compare", response_model=FactorCompareResponse)
 async def compare_factors(
     request: FactorCompareRequest,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorCompareResponse:
     """Compare multiple factors.
 
@@ -350,6 +422,11 @@ async def compare_factors(
         HTTPException: If any factor not found
     """
     try:
+        if not isinstance(factor_service, AsyncFactorService):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Factor comparison requires database-backed service (configure TimescaleDB).",
+            )
         factors, correlation_matrix, ranking = await factor_service.compare_factors(
             factor_ids=request.factor_ids
         )
@@ -372,7 +449,7 @@ async def compare_factors(
 @router.get("/{factor_id}", response_model=FactorResponse)
 async def get_factor(
     factor_id: str,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorResponse:
     """Get factor by ID.
 
@@ -386,7 +463,10 @@ async def get_factor(
     Raises:
         HTTPException: If factor not found
     """
-    factor = await factor_service.get_factor(factor_id)
+    if isinstance(factor_service, AsyncFactorService):
+        factor = await factor_service.get_factor(factor_id)
+    else:
+        factor = factor_service.get_factor(factor_id)
     if not factor:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -399,7 +479,7 @@ async def get_factor(
 async def evaluate_factor(
     factor_id: str,
     request: FactorEvaluateRequest,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorEvaluateResponse:
     """Evaluate a factor and record in research ledger.
 
@@ -415,13 +495,20 @@ async def evaluate_factor(
         HTTPException: If factor not found
     """
     try:
-        metrics, stability, passed, exp_num = await factor_service.evaluate_factor(
-            factor_id=factor_id,
-            splits=request.splits,
-            market_splits=request.market_splits,
-            symbol=request.symbol,
-            timeframe=request.timeframe,
-        )
+        if isinstance(factor_service, AsyncFactorService):
+            metrics, stability, passed, exp_num = await factor_service.evaluate_factor(
+                factor_id=factor_id,
+                splits=request.splits,
+                market_splits=request.market_splits,
+                symbol=request.symbol,
+                timeframe=request.timeframe,
+            )
+        else:
+            metrics, stability, passed, exp_num = factor_service.evaluate_factor(
+                factor_id=factor_id,
+                splits=request.splits,
+                market_splits=request.market_splits,
+            )
 
         return FactorEvaluateResponse(
             factor_id=factor_id,
@@ -460,7 +547,7 @@ async def evaluate_factor(
 async def update_factor_status(
     factor_id: str,
     request: FactorStatusUpdateRequest,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> FactorResponse:
     """Update factor status.
 
@@ -476,7 +563,10 @@ async def update_factor_status(
         HTTPException: If factor not found
     """
     try:
-        factor = await factor_service.update_status(factor_id, request.status)
+        if isinstance(factor_service, AsyncFactorService):
+            factor = await factor_service.update_status(factor_id, request.status)
+        else:
+            factor = factor_service.update_status(factor_id, request.status)
         return _factor_to_response(factor)
     except FactorNotFoundError:
         raise HTTPException(
@@ -488,7 +578,7 @@ async def update_factor_status(
 @router.delete("/{factor_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_factor(
     factor_id: str,
-    factor_service: FactorService = Depends(get_factor_service),
+    factor_service: FactorServiceDep = Depends(get_factor_service),
 ) -> None:
     """Delete a factor.
 
@@ -499,7 +589,10 @@ async def delete_factor(
     Raises:
         HTTPException: If factor not found
     """
-    deleted = await factor_service.delete_factor(factor_id)
+    if isinstance(factor_service, AsyncFactorService):
+        deleted = await factor_service.delete_factor(factor_id)
+    else:
+        deleted = factor_service.delete_factor(factor_id)
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

@@ -22,7 +22,7 @@ from iqfmp.evaluation.research_ledger import (
 class ResearchService:
     """Service for research ledger management with PostgreSQL persistence."""
 
-    def __init__(self, use_postgres: bool = True) -> None:
+    def __init__(self, use_postgres: bool = False) -> None:
         """Initialize research service.
 
         Args:
@@ -244,7 +244,10 @@ class ResearchService:
 
 
 # Singleton instance
-_research_service = ResearchService()
+_research_service = ResearchService(
+    use_postgres=os.environ.get("IQFMP_RESEARCH_USE_POSTGRES", "").lower()
+    in {"1", "true", "yes"}
+)
 
 
 def get_research_service() -> ResearchService:

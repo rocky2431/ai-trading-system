@@ -336,6 +336,13 @@ class LLMProvider:
         if not prompt or not prompt.strip():
             raise ValueError("Prompt cannot be empty")
 
+        # Optional tracing / metadata (best-effort)
+        execution_id = kwargs.pop("execution_id", None)
+        conversation_id = kwargs.pop("conversation_id", None)
+        agent = kwargs.pop("agent", None)
+        prompt_id = kwargs.pop("prompt_id", None)
+        prompt_version = kwargs.pop("prompt_version", None)
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
@@ -348,7 +355,7 @@ class LLMProvider:
             kwargs["seed"] = seed
 
         if auto_continue:
-            return await self._execute_with_auto_continue(
+            response = await self._execute_with_auto_continue(
                 messages=messages,
                 model=model,
                 max_continue_rounds=max_continue_rounds,
@@ -357,13 +364,44 @@ class LLMProvider:
                 **kwargs,
             )
         else:
-            return await self._execute_with_fallback(
+            response = await self._execute_with_fallback(
                 messages=messages,
                 model=model,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 **kwargs,
             )
+
+        # Attach prompt version info for replay/debugging.
+        response.prompt_id = str(prompt_id) if prompt_id is not None else None
+        response.prompt_version = str(prompt_version) if prompt_version is not None else None
+
+        # Best-effort trace persistence (execution_id is the primary key).
+        if execution_id is not None:
+            try:
+                from iqfmp.llm.trace import get_llm_trace_store, LLMTraceRecord
+
+                exec_id = str(execution_id)
+                conv_id = str(conversation_id) if conversation_id is not None else exec_id
+                record = LLMTraceRecord.now(
+                    execution_id=exec_id,
+                    conversation_id=conv_id,
+                    agent=str(agent) if agent is not None else None,
+                    model=response.model,
+                    prompt_id=response.prompt_id,
+                    prompt_version=response.prompt_version,
+                    messages=[{"role": str(m.get("role", "")), "content": str(m.get("content", ""))} for m in messages],
+                    response=response.content,
+                    usage={k: int(v) for k, v in (response.usage or {}).items()},
+                    cached=bool(response.cached),
+                    cost_estimate=response.cost_estimate,
+                    request_id=response.request_id,
+                )
+                await get_llm_trace_store().record(record)
+            except Exception:
+                pass
+
+        return response
 
     async def generate_candidates(
         self,
@@ -583,9 +621,9 @@ class LLMProvider:
             messages: Chat messages.
             model: Model to use - can be ModelType enum or OpenRouter model ID string.
         """
-        # Determine target model (string ID or ModelType)
+        # Determine target model (direct OpenRouter model ID string OR ModelType enum)
         target_model: ModelType | str = model or self._config.default_model
-        model_str = target_model.value if isinstance(target_model, ModelType) else target_model
+        model_str = self.get_model_id(target_model)
         temperature = kwargs.get("temperature", 0.7)
 
         # Check in-memory cache first
@@ -621,10 +659,10 @@ class LLMProvider:
                     self._save_to_cache(cache_key, cached_response)
                 return cached_response
 
-        # Build fallback chain - only for ModelType models
-        # String model IDs (from frontend config) don't use fallback
-        if isinstance(target_model, str):
-            # Direct OpenRouter model ID - no fallback chain
+        # Build fallback chain:
+        # - ModelType enums: use fallback_chain if configured
+        # - direct OpenRouter model ID strings: no fallback chain
+        if isinstance(target_model, str) and not isinstance(target_model, ModelType):
             models_to_try: list[ModelType | str] = [target_model]
         elif self._config.fallback_chain:
             models_to_try = list(self._config.fallback_chain.get_models())
@@ -634,6 +672,7 @@ class LLMProvider:
             models_to_try = [target_model]
 
         last_error: Optional[Exception] = None
+        last_category: Optional[ErrorCategory] = None
 
         for attempt_model in models_to_try:
             # Use retry handler for intelligent retry with backoff
@@ -672,6 +711,7 @@ class LLMProvider:
 
             # Retry failed - check if we should try next model in fallback chain
             last_error = retry_result.error
+            last_category = retry_result.error_category
             error_category = retry_result.error_category
 
             # Log failure details
@@ -684,20 +724,37 @@ class LLMProvider:
             # Track failed requests
             self._usage_stats["failed_requests"] += 1
 
-            # For non-retryable errors (auth, invalid request), don't try next model
-            if error_category and error_category not in {
-                ErrorCategory.RATE_LIMIT,
-                ErrorCategory.SERVER_ERROR,
-                ErrorCategory.TIMEOUT,
-                ErrorCategory.NETWORK,
-                ErrorCategory.TRANSIENT,
+            # For prompt- or credential-related failures, switching models won't help.
+            # For model-unavailable and other errors, try the next model in the fallback chain.
+            if error_category in {
+                ErrorCategory.AUTH,
+                ErrorCategory.INVALID_REQUEST,
+                ErrorCategory.QUOTA_EXCEEDED,
             }:
                 break
 
         # All models failed
         if self._config.fallback_chain and isinstance(target_model, ModelType):
             raise LLMError(f"All fallback models failed: {last_error}")
-        raise last_error or LLMError("Unknown error")
+
+        if last_error is None:
+            raise LLMError("Unknown error")
+
+        # Preserve typed LLM errors (e.g., RateLimitError, ModelNotAvailableError)
+        if isinstance(last_error, LLMError):
+            raise last_error
+
+        # Wrap retryable infrastructure errors into LLMError for a stable public API.
+        if last_category == ErrorCategory.TIMEOUT or isinstance(last_error, asyncio.TimeoutError):
+            raise LLMError("Timeout") from last_error
+        if last_category == ErrorCategory.NETWORK:
+            raise LLMError(f"Network error: {last_error}") from last_error
+        if last_category == ErrorCategory.SERVER_ERROR:
+            raise LLMError(f"Server error: {last_error}") from last_error
+        if last_category == ErrorCategory.TRANSIENT:
+            raise LLMError(f"Transient error: {last_error}") from last_error
+
+        raise LLMError(str(last_error) or "Unknown error") from last_error
 
     async def _execute_with_auto_continue(
         self,
@@ -892,11 +949,10 @@ class LLMProvider:
         Returns:
             OpenRouter model ID string.
         """
-        # If string, return as-is (direct OpenRouter model ID from frontend config)
-        if isinstance(model, str):
-            return model
-        # If ModelType enum, look up in mapping
-        return MODEL_ID_MAP.get(model, MODEL_ID_MAP[ModelType.DEEPSEEK_V3])
+        # IMPORTANT: ModelType is a `str` subclass; check it first.
+        if isinstance(model, ModelType):
+            return MODEL_ID_MAP.get(model, MODEL_ID_MAP[ModelType.DEEPSEEK_V3])
+        return model
 
     def supported_models(self) -> list[ModelType]:
         """Get list of supported models."""

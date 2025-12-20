@@ -562,6 +562,12 @@ class FactorGenerationConfig:
         name: Agent name for logging
         model: LLM model to use (defaults from AgentModelRegistry)
         temperature: Sampling temperature (lower = more deterministic)
+        n_candidates: Number of candidates to generate and rerank
+        candidate_seed: Optional seed for candidate generation
+        rerank_by_indicator_coverage: Prefer candidates that satisfy requested indicators
+        max_refine_rounds: Optional indicator-driven refinement rounds
+        tool_context_enabled: Enable safe read-only tool context injection
+        tool_similar_factors_limit: Max similar factors to include
         security_check_enabled: Enable AST security checking
         field_constraint_enabled: Enable field constraint validation
         max_retries: Maximum LLM call retries
@@ -572,6 +578,12 @@ class FactorGenerationConfig:
     name: str
     model: Optional[str] = None  # ModelType.value, None = use registry default
     temperature: Optional[float] = None  # None = use registry default
+    n_candidates: int = 3
+    candidate_seed: Optional[int] = None
+    rerank_by_indicator_coverage: bool = True
+    max_refine_rounds: int = 1
+    tool_context_enabled: bool = False
+    tool_similar_factors_limit: int = 5
     security_check_enabled: bool = True
     field_constraint_enabled: bool = True
     max_retries: int = 3
@@ -822,97 +834,243 @@ class FactorGenerationAgent:
             include_examples=self.config.include_examples,
             include_field_constraints=self.config.field_constraint_enabled,
         )
+
+        # Optional safe tool context (read-only): fields + similar factors
+        if self.config.tool_context_enabled:
+            try:
+                from iqfmp.llm.tools.read_only import list_available_fields, search_similar_factors
+
+                fields = list_available_fields(field_set=FieldSet.CRYPTO, include_prefix=True)
+                similar = search_similar_factors(
+                    hypothesis=user_request,
+                    limit=max(0, self.config.tool_similar_factors_limit),
+                )
+
+                tool_context = [
+                    "## Read-only Tool Context",
+                    "",
+                    f"- Available fields ({len(fields)}): {', '.join(fields[:60])}"
+                    + (" ..." if len(fields) > 60 else ""),
+                ]
+                if similar:
+                    tool_context.append("- Similar existing factors (avoid duplicates):")
+                    for item in similar:
+                        tool_context.append(
+                            f"  - {item.get('name','')} (score={item.get('score',0):.3f}, family={item.get('family','')})"
+                        )
+                prompt = f"{prompt}\n\n" + "\n".join(tool_context)
+            except Exception:
+                # Tool context is best-effort; never break generation.
+                pass
         default_system_prompt = self.template.get_system_prompt()
 
-        # Call LLM with agent-specific model configuration
+        # Resolve agent-specific model configuration
+        from iqfmp.agents.model_config import get_agent_full_config
+
+        model_id, config_temperature, custom_system_prompt = get_agent_full_config(
+            "factor_generation"
+        )
+
+        model = self.config.model or model_id
+        temperature = self.config.temperature or config_temperature
+        system_prompt = (
+            custom_system_prompt if custom_system_prompt else default_system_prompt
+        )
+
+        n_candidates = max(1, self.config.n_candidates)
+
+        # Generate candidates (prefer provider-native multi-candidate API when available)
+        raw_candidates: list[str] = []
         try:
-            # Use configured model or fall back to registry defaults
-            # model_config now loads from ConfigService (frontend-configured OpenRouter models)
-            from iqfmp.agents.model_config import get_agent_full_config
+            provider_any: Any = self.llm_provider
+            generate_candidates = getattr(provider_any, "generate_candidates", None)
+            if n_candidates > 1 and callable(generate_candidates):
+                import inspect
 
-            # Get model_id, temperature, and custom system_prompt from ConfigService
-            # This returns OpenRouter model ID string (e.g., "deepseek/deepseek-coder-v3")
-            model_id, config_temperature, custom_system_prompt = get_agent_full_config(
-                "factor_generation"
-            )
+                if not inspect.iscoroutinefunction(generate_candidates):
+                    generate_candidates = None
 
-            # Override with explicit config if provided
-            model = self.config.model or model_id
-            temperature = self.config.temperature or config_temperature
-
-            # Use custom system_prompt from frontend if configured, otherwise use default
-            system_prompt = custom_system_prompt if custom_system_prompt else default_system_prompt
-
-            response = await self.llm_provider.complete(
-                prompt=prompt,
-                system_prompt=system_prompt,
-                model=model,  # Can be string (OpenRouter ID) or ModelType enum
-                temperature=temperature,
-            )
-            raw_content = response.content if hasattr(response, "content") else str(response)
-            # Debug: Log the actual LLM response
-            print(f"DEBUG LLM Response (first 500 chars): {raw_content[:500] if raw_content else 'EMPTY'}")
+            if n_candidates > 1 and generate_candidates is not None:
+                raw_candidates = await generate_candidates(
+                    prompt=prompt,
+                    n_candidates=n_candidates,
+                    model=model,
+                    temperature=temperature,
+                    system_prompt=system_prompt,
+                    seed=self.config.candidate_seed,
+                )
+            else:
+                for _ in range(n_candidates):
+                    response = await self.llm_provider.complete(
+                        prompt=prompt,
+                        system_prompt=system_prompt,
+                        model=model,
+                        temperature=temperature,
+                    )
+                    raw_content = (
+                        response.content if hasattr(response, "content") else str(response)
+                    )
+                    raw_candidates.append(raw_content)
         except Exception as e:
             raise FactorGenerationError(f"LLM call failed: {e}") from e
 
-        # Extract code from response
-        code = self._extract_code(raw_content)
-        if not code:
-            print(f"DEBUG: Failed to extract code. Full response:\n{raw_content[:1000] if raw_content else 'EMPTY'}")
-            raise InvalidFactorError("No code found in LLM response")
+        if not raw_candidates:
+            raise InvalidFactorError("No candidates returned by LLM provider")
 
-        # Determine if this is a Qlib expression or Python code
-        is_python_code = (
-            code.strip().startswith("def ")
-            or code.strip().startswith("import ")
-            or code.strip().startswith("from ")
-            or "\ndef " in code
-        )
+        # Score & select best candidate
+        from iqfmp.agents.indicator_intelligence import analyze_indicator_coverage, generate_missing_indicator_feedback
 
-        # Security check - only for Python code (Qlib expressions are safe by design)
-        if self.config.security_check_enabled and is_python_code:
-            is_safe, violations = self.security_checker.check(code)
-            if not is_safe:
-                raise SecurityViolationError(
-                    f"Security violations: {', '.join(violations)}"
-                )
+        best_code: Optional[str] = None
+        best_is_python = False
+        best_score = float("-inf")
+        best_analysis = None
+        security_violations: list[str] = []
+        field_constraint_violations: list[str] = []
 
-        # Validate Qlib expression syntax using ExpressionGate
-        if not is_python_code:
-            expr_result = self._validate_qlib_expression(code)
-            if not expr_result.is_valid:
-                raise InvalidFactorError(
-                    f"Invalid Qlib expression: {expr_result.error_message}. "
-                    f"Expression: {code[:100]}..."
-                )
+        for raw_content in raw_candidates:
+            code = self._extract_code(raw_content)
+            if not code:
+                continue
 
-        # Field constraint validation (skip for Qlib expressions - they use $ prefix)
-        if self.config.field_constraint_enabled and factor_family and is_python_code:
-            validation_result = self.field_validator.validate(code, factor_family)
-            if not validation_result.is_valid:
+            is_python_code = (
+                code.strip().startswith("def ")
+                or code.strip().startswith("import ")
+                or code.strip().startswith("from ")
+                or "\ndef " in code
+            )
+
+            # Security check - only for Python code (Qlib expressions are safe by design)
+            if self.config.security_check_enabled and is_python_code:
+                is_safe, violations = self.security_checker.check(code)
+                if not is_safe:
+                    security_violations.extend(violations)
+                    continue
+
+            # Validate Qlib expression syntax using ExpressionGate
+            if not is_python_code:
+                expr_result = self._validate_qlib_expression(code)
+                if not expr_result.is_valid:
+                    continue
+
+            # Field constraint validation (skip for Qlib expressions - they use $ prefix)
+            if self.config.field_constraint_enabled and factor_family and is_python_code:
+                validation_result = self.field_validator.validate(code, factor_family)
+                if not validation_result.is_valid:
+                    field_constraint_violations.extend(validation_result.violations)
+                    continue
+
+            analysis = analyze_indicator_coverage(user_request, code)
+            score = 0.0
+            if self.config.rerank_by_indicator_coverage:
+                score += analysis.completion_rate
+            # Prefer Qlib expressions in this repo's evaluation pipeline
+            if not is_python_code:
+                score += 0.05
+
+            if score > best_score:
+                best_score = score
+                best_code = code
+                best_is_python = is_python_code
+                best_analysis = analysis
+
+        if not best_code:
+            if field_constraint_violations and factor_family is not None:
                 raise FieldConstraintViolationError(
                     f"Field constraint violations for {factor_family.value} family: "
-                    f"{', '.join(validation_result.violations)}. "
-                    f"Allowed fields: {', '.join(sorted(validation_result.allowed_fields))}",
-                    violations=validation_result.violations,
+                    f"{', '.join(sorted(set(field_constraint_violations)))}. "
+                    f"Allowed fields: {', '.join(sorted(factor_family.get_allowed_fields()))}",
+                    violations=sorted(set(field_constraint_violations)),
                 )
+            if security_violations:
+                unique = ", ".join(sorted(set(security_violations)))
+                raise SecurityViolationError(f"Security violations: {unique}")
+            raise InvalidFactorError("No code found in LLM response")
+
+        # Optional: indicator-driven refinement loop
+        refined_code = best_code
+        refined_is_python = best_is_python
+        refined_analysis = best_analysis
+
+        for _ in range(max(0, self.config.max_refine_rounds)):
+            if refined_analysis is None or refined_analysis.is_complete:
+                break
+
+            feedback = generate_missing_indicator_feedback(refined_analysis)
+            if not feedback:
+                break
+
+            refine_prompt = (
+                f"{prompt}\n\n"
+                f"## Previous Expression\n{refined_code}\n\n"
+                f"{feedback}\n\n"
+                "Return ONLY the improved Qlib expression (no explanation)."
+            )
+
+            try:
+                response = await self.llm_provider.complete(
+                    prompt=refine_prompt,
+                    system_prompt=system_prompt,
+                    model=model,
+                    temperature=temperature,
+                )
+            except Exception:
+                break
+
+            raw_content = response.content if hasattr(response, "content") else str(response)
+            candidate_code = self._extract_code(raw_content)
+            if not candidate_code:
+                continue
+
+            candidate_is_python = (
+                candidate_code.strip().startswith("def ")
+                or candidate_code.strip().startswith("import ")
+                or candidate_code.strip().startswith("from ")
+                or "\ndef " in candidate_code
+            )
+            if candidate_is_python:
+                # We only refine Qlib expressions to match expression-only pipeline.
+                continue
+
+            expr_result = self._validate_qlib_expression(candidate_code)
+            if not expr_result.is_valid:
+                continue
+
+            candidate_analysis = analyze_indicator_coverage(user_request, candidate_code)
+            if candidate_analysis.completion_rate >= refined_analysis.completion_rate:
+                refined_code = candidate_code
+                refined_is_python = candidate_is_python
+                refined_analysis = candidate_analysis
 
         # Extract factor name and description
-        name = self._extract_factor_name(code)
-        description = self._extract_description(code, user_request)
+        name = self._extract_factor_name(refined_code)
+        description = self._extract_description(refined_code, user_request)
 
         # Determine family
         family = factor_family or self._infer_family(user_request)
 
+        metadata: dict[str, Any] = {
+            "user_request": user_request,
+            "security_checked": self.config.security_check_enabled,
+            "is_python_code": refined_is_python,
+            "n_candidates": n_candidates,
+            "rerank_by_indicator_coverage": self.config.rerank_by_indicator_coverage,
+        }
+        if refined_analysis is not None:
+            metadata.update(
+                {
+                    "requested_indicators": sorted(refined_analysis.requested),
+                    "detected_indicators": sorted(refined_analysis.found),
+                    "missing_indicators": sorted(refined_analysis.missing),
+                    "indicator_completion_rate": refined_analysis.completion_rate,
+                }
+            )
+
         return GeneratedFactor(
             name=name,
             description=description,
-            code=code,
+            code=refined_code,
             family=family,
-            metadata={
-                "user_request": user_request,
-                "security_checked": self.config.security_check_enabled,
-            },
+            metadata=metadata,
         )
 
     def _extract_code(self, content: str) -> str:
@@ -970,6 +1128,12 @@ class FactorGenerationAgent:
             expression = " ".join(expression_lines)
             # Clean up any extra whitespace
             expression = re.sub(r'\s+', ' ', expression).strip()
+            # Heuristic: if it doesn't look like a Qlib expression at all, treat as "no code".
+            # This avoids accepting plain natural-language refusals as expressions.
+            has_operator = re.search(r"[A-Z][a-zA-Z_]*\s*\(", expression) is not None
+            has_number = re.search(r"\d", expression) is not None
+            if "$" not in expression and not has_operator and not has_number:
+                return ""
             return expression
 
         # Fallback: return the entire content if it looks like a Qlib expression

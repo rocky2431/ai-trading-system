@@ -285,6 +285,10 @@ class BacktestConfig:
     slippage: float = 0.0005
     position_size: float = 0.1  # 10% of capital per trade
     min_data_points: int = 5
+    # Crypto perp funding (optional)
+    include_funding: bool = True
+    funding_settlement_hours: list[int] = field(default_factory=lambda: [0, 8, 16])
+    funding_rate_column: str = "funding_rate"
 
     def __post_init__(self) -> None:
         """Validate configuration."""
@@ -294,6 +298,9 @@ class BacktestConfig:
             raise BacktestError("Commission cannot be negative")
         if self.slippage < 0:
             raise BacktestError("Slippage cannot be negative")
+        invalid_hours = [h for h in self.funding_settlement_hours if h < 0 or h > 23]
+        if invalid_hours:
+            raise BacktestError(f"Invalid funding settlement hours: {invalid_hours}")
 
 
 @dataclass
@@ -385,13 +392,35 @@ class BacktestEngine:
         position_type: Optional[TradeType] = None
         entry_price = 0.0
         entry_time: Optional[datetime] = None
+        total_funding_pnl = 0.0
 
         trades: list[Trade] = []
         equity_values: list[float] = []
 
+        funding_enabled = (
+            self.config.include_funding
+            and self.config.funding_rate_column in data.columns
+            and len(self.config.funding_settlement_hours) > 0
+        )
+
         for i, (timestamp, row) in enumerate(data.iterrows()):
             signal = signals.iloc[i]
             price = row["close"]
+
+            # Apply funding at settlement timestamps (crypto perp)
+            if funding_enabled and position != 0 and position_type is not None:
+                if (
+                    timestamp.hour in self.config.funding_settlement_hours
+                    and timestamp.minute == 0
+                    and timestamp.second == 0
+                ):
+                    funding_rate = row[self.config.funding_rate_column]
+                    if pd.notna(funding_rate):
+                        notional = abs(position) * price
+                        direction = 1.0 if position_type == TradeType.LONG else -1.0
+                        funding_pnl = -direction * notional * float(funding_rate)
+                        capital += funding_pnl
+                        total_funding_pnl += funding_pnl
 
             # Calculate current equity
             if position != 0 and position_type is not None:
@@ -522,6 +551,7 @@ class BacktestEngine:
             trades=trades,
             initial_capital=self.config.initial_capital,
             config=self.config,
+            metadata={"total_funding_pnl": total_funding_pnl} if funding_enabled else {},
         )
 
     def _apply_slippage(

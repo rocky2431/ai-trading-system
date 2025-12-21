@@ -113,10 +113,7 @@ addopts = [
     "-v",
     "--tb=short",
     "--strict-markers",
-    "--cov=src/iqfmp/api",
-    "--cov=src/iqfmp/models",
-    "--cov=src/iqfmp/agents",
-    "--cov=src/iqfmp/evaluation",
+    "--cov=src/iqfmp",
     "--cov-report=term-missing",
     "--cov-report=html:coverage_html",
     "--cov-fail-under=80",
@@ -134,14 +131,24 @@ source = [
     "src/iqfmp/models",
     "src/iqfmp/agents",
     "src/iqfmp/evaluation",
-    "src/iqfmp/core",      # P0-3: Add core module for coverage
-    "src/iqfmp/exchange",  # P0-3: Add exchange module for coverage
-    "src/iqfmp/strategy",  # P0-3: Add strategy module for coverage
+    "src/iqfmp/core",
+    "src/iqfmp/exchange",
+    "src/iqfmp/strategy",
+    "src/iqfmp/data",       # P0-3: Add data module for coverage
+    "src/iqfmp/db",         # P0-3: Add db module for coverage
+    "src/iqfmp/llm",        # P0-3: Add llm module for coverage
 ]
 branch = true
 omit = [
     "*/tests/*",
     "*/__init__.py",
+    # Exclude non-core modules from coverage requirements
+    "*/src/iqfmp/celery_app/*",   # Celery tasks (async worker)
+    "*/src/iqfmp/monitoring/*",   # Monitoring infrastructure
+    "*/src/iqfmp/rl/*",           # RL module (experimental)
+    "*/src/iqfmp/ml/*",           # ML optimizer (experimental)
+    "*/src/iqfmp/vector/*",       # Vector store (optional)
+    # Exclude API infrastructure (tested via integration)
     "*/src/iqfmp/api/**/router.py",
     "*/src/iqfmp/api/**/service.py",
     "*/src/iqfmp/api/auth/dependencies.py",

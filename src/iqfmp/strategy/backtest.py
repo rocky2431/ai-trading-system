@@ -386,6 +386,21 @@ class BacktestEngine:
         if not data.index.equals(signals.index):
             raise BacktestError("Data and signals must have matching index")
 
+        if not isinstance(data.index, pd.DatetimeIndex):
+            raise BacktestError("Data must have a DatetimeIndex")
+
+        if "close" not in data.columns:
+            raise BacktestError("Data must contain 'close' column")
+
+        close_values = pd.to_numeric(data["close"], errors="coerce")
+        if close_values.isna().any():
+            raise BacktestError("Data contains NaN/non-numeric values in 'close'")
+
+        signals_numeric = pd.to_numeric(signals, errors="coerce")
+        if signals_numeric.isna().any():
+            raise BacktestError("Signals contain NaN/non-numeric values")
+        signals = signals_numeric
+
         # Initialize state
         capital = self.config.initial_capital
         position = 0.0  # Current position size

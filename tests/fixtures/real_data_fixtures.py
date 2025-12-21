@@ -164,15 +164,12 @@ def real_backtest_engine(real_ohlcv_with_funding: pd.DataFrame):
 
     config = BacktestConfig(
         initial_capital=100000.0,
-        commission_rate=0.001,
-        slippage_rate=0.0005,
+        commission=0.001,
+        slippage=0.0005,
         include_funding=True,
     )
 
-    engine = BacktestEngine(config=config)
-    engine.load_data(real_ohlcv_with_funding)
-
-    return engine
+    return BacktestEngine(config=config)
 
 
 @pytest.fixture

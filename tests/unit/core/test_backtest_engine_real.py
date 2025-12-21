@@ -1,12 +1,8 @@
-"""Real tests for BacktestEngine - using real data, no mocks.
-
-All tests use actual market data and real Qlib backend for backtesting.
-"""
+"""Real tests for BacktestEngine - using real data, no mocks."""
 
 import numpy as np
 import pandas as pd
 import pytest
-from decimal import Decimal
 
 # Import fixtures
 import sys
@@ -19,6 +15,38 @@ from fixtures.real_data_fixtures import (
 )
 
 
+def _prepare_backtest_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize OHLCV input to BacktestEngine expectations.
+
+    BacktestEngine requires a DatetimeIndex and a numeric 'close' column.
+    """
+    normalized = df.copy()
+
+    if not isinstance(normalized.index, pd.DatetimeIndex):
+        for candidate in ("datetime", "timestamp", "date"):
+            if candidate in normalized.columns:
+                normalized[candidate] = pd.to_datetime(
+                    normalized[candidate], errors="coerce"
+                )
+                normalized = normalized.set_index(candidate)
+                break
+        else:
+            normalized.index = pd.date_range(
+                start="2024-01-01", periods=len(normalized), freq="D"
+            )
+
+    normalized = normalized.sort_index()
+
+    if "close" not in normalized.columns:
+        raise ValueError("Required column 'close' not found in input data")
+
+    normalized["close"] = pd.to_numeric(normalized["close"], errors="coerce")
+    normalized = normalized.dropna(subset=["close"])
+    if len(normalized) < 5:
+        pytest.skip("Not enough clean OHLCV data for backtest")
+    return normalized
+
+
 class TestBacktestEngineReal:
     """Tests for BacktestEngine using real market data."""
 
@@ -28,45 +56,48 @@ class TestBacktestEngineReal:
 
         config = BacktestConfig(
             initial_capital=100000.0,
-            commission_rate=0.001,
-            slippage_rate=0.0005,
+            commission=0.001,
+            slippage=0.0005,
         )
 
         engine = BacktestEngine(config=config)
-        engine.load_data(real_ohlcv_with_funding)
 
         assert engine is not None
-        assert engine._data is not None or hasattr(engine, "data")
+        assert engine.config is config
 
     def test_no_mock_objects(self, real_backtest_engine):
         """Verify no mock objects are used in backtest engine."""
-        if real_backtest_engine is None:
-            pytest.skip("Backtest engine not available")
         assert_no_mocks_used(real_backtest_engine)
 
     def test_run_simple_backtest(self, real_ohlcv_with_funding):
         """Test running a simple backtest with real data."""
-        from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine
+        from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine, BacktestResult
 
         config = BacktestConfig(
             initial_capital=100000.0,
-            commission_rate=0.001,
-            slippage_rate=0.0005,
+            commission=0.001,
+            slippage=0.0005,
             include_funding=False,
         )
 
         engine = BacktestEngine(config=config)
-        engine.load_data(real_ohlcv_with_funding)
+        data = _prepare_backtest_data(real_ohlcv_with_funding)
 
         # Run a simple momentum strategy
-        result = engine.run_backtest(
-            signal_func=lambda row: 1 if row.get("close", 0) > row.get("open", 0) else -1
+        open_prices = (
+            pd.to_numeric(data["open"], errors="coerce") if "open" in data.columns else data["close"]
         )
+        signals = pd.Series(
+            np.where(data["close"] > open_prices, 1.0, -1.0),
+            index=data.index,
+        )
+        result = engine.run(data, signals)
 
         # Verify result structure
-        assert result is not None
-        assert hasattr(result, "total_return") or "total_return" in result
-        assert hasattr(result, "sharpe_ratio") or "sharpe_ratio" in result
+        assert isinstance(result, BacktestResult)
+        assert np.isfinite(result.total_return)
+        metrics = result.get_metrics()
+        assert metrics.trade_count == result.trade_count
 
     def test_funding_rate_settlement(self, real_ohlcv_with_funding):
         """Test funding rate settlement with real data."""
@@ -74,32 +105,40 @@ class TestBacktestEngineReal:
 
         config = BacktestConfig(
             initial_capital=100000.0,
-            commission_rate=0.001,
-            slippage_rate=0.0005,
+            commission=0.001,
+            slippage=0.0005,
             include_funding=True,
             funding_settlement_hours=[0, 8, 16],
         )
 
         engine = BacktestEngine(config=config)
-        engine.load_data(real_ohlcv_with_funding)
+        data = _prepare_backtest_data(real_ohlcv_with_funding)
 
-        # Verify funding rate column exists
-        assert "funding_rate" in engine._data.columns or "funding_rate" in real_ohlcv_with_funding.columns
+        # Make funding deterministic and non-zero
+        data["funding_rate"] = 0.0001
+        signals = pd.Series(1.0, index=data.index)  # Always long to accrue funding
+        result = engine.run(data, signals)
+
+        assert "total_funding_pnl" in result.metadata
+        assert np.isfinite(result.metadata["total_funding_pnl"])
+        assert result.metadata["total_funding_pnl"] < 0  # positive funding => longs pay
 
     def test_position_sizing(self, real_ohlcv_with_funding):
         """Test position sizing with real data."""
         from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine
 
-        config = BacktestConfig(
-            initial_capital=100000.0,
-            position_size=0.1,  # 10% of capital
-        )
+        data = _prepare_backtest_data(real_ohlcv_with_funding).iloc[:20]
+        signals = pd.Series(1.0, index=data.index)  # Always long
 
-        engine = BacktestEngine(config=config)
-        engine.load_data(real_ohlcv_with_funding)
+        config_small = BacktestConfig(initial_capital=100000.0, position_size=0.05)
+        config_large = BacktestConfig(initial_capital=100000.0, position_size=0.2)
 
-        # Position size should be respected
-        assert config.position_size == 0.1
+        result_small = BacktestEngine(config=config_small).run(data, signals)
+        result_large = BacktestEngine(config=config_large).run(data, signals)
+
+        assert result_small.trade_count == 1
+        assert result_large.trade_count == 1
+        assert result_large.trades[0].quantity > result_small.trades[0].quantity
 
     def test_commission_and_slippage(self, real_ohlcv_with_funding):
         """Test commission and slippage are applied."""
@@ -108,24 +147,24 @@ class TestBacktestEngineReal:
         # Higher costs should result in lower returns
         config_low_cost = BacktestConfig(
             initial_capital=100000.0,
-            commission_rate=0.0001,
-            slippage_rate=0.0001,
+            commission=0.0001,
+            slippage=0.0001,
         )
 
         config_high_cost = BacktestConfig(
             initial_capital=100000.0,
-            commission_rate=0.01,
-            slippage_rate=0.01,
+            commission=0.01,
+            slippage=0.01,
         )
 
-        engine_low = BacktestEngine(config=config_low_cost)
-        engine_low.load_data(real_ohlcv_with_funding)
+        data = _prepare_backtest_data(real_ohlcv_with_funding).iloc[:50]
+        signals = pd.Series(1.0, index=data.index)  # Always long
 
-        engine_high = BacktestEngine(config=config_high_cost)
-        engine_high.load_data(real_ohlcv_with_funding)
+        result_low = BacktestEngine(config=config_low_cost).run(data, signals)
+        result_high = BacktestEngine(config=config_high_cost).run(data, signals)
 
-        # Verify both engines have different cost settings
-        assert config_low_cost.commission_rate < config_high_cost.commission_rate
+        # Higher costs should reduce final equity deterministically
+        assert result_high.final_equity < result_low.final_equity
 
 
 class TestBacktestMetrics:
@@ -137,15 +176,14 @@ class TestBacktestMetrics:
 
         config = BacktestConfig(initial_capital=100000.0)
         engine = BacktestEngine(config=config)
-        engine.load_data(real_ohlcv_with_funding)
+        data = _prepare_backtest_data(real_ohlcv_with_funding)
 
-        result = engine.run_backtest(
-            signal_func=lambda row: 1 if row.get("close", 0) > row.get("open", 0) else -1
-        )
+        signals = pd.Series(1.0, index=data.index)  # Always long
+        result = engine.run(data, signals)
 
         # Sharpe ratio should be a finite number
-        if hasattr(result, "sharpe_ratio"):
-            assert result.sharpe_ratio is None or np.isfinite(result.sharpe_ratio)
+        sharpe = result.get_metrics().sharpe_ratio
+        assert sharpe is None or np.isfinite(sharpe)
 
     def test_max_drawdown_calculation(self, real_ohlcv_with_funding):
         """Test maximum drawdown is calculated correctly."""
@@ -153,15 +191,14 @@ class TestBacktestMetrics:
 
         config = BacktestConfig(initial_capital=100000.0)
         engine = BacktestEngine(config=config)
-        engine.load_data(real_ohlcv_with_funding)
+        data = _prepare_backtest_data(real_ohlcv_with_funding)
 
-        result = engine.run_backtest(
-            signal_func=lambda row: 1 if row.get("close", 0) > row.get("open", 0) else -1
-        )
+        signals = pd.Series(1.0, index=data.index)
+        result = engine.run(data, signals)
 
         # Max drawdown should be non-negative
-        if hasattr(result, "max_drawdown"):
-            assert result.max_drawdown is None or result.max_drawdown >= 0
+        max_dd = result.get_metrics().max_drawdown
+        assert max_dd is None or max_dd >= 0
 
     def test_trade_count(self, real_ohlcv_with_funding):
         """Test trade count is tracked correctly."""
@@ -169,15 +206,13 @@ class TestBacktestMetrics:
 
         config = BacktestConfig(initial_capital=100000.0)
         engine = BacktestEngine(config=config)
-        engine.load_data(real_ohlcv_with_funding)
+        data = _prepare_backtest_data(real_ohlcv_with_funding)
 
-        result = engine.run_backtest(
-            signal_func=lambda row: 1 if row.get("close", 0) > row.get("open", 0) else -1
-        )
+        signals = pd.Series(1.0, index=data.index)
+        result = engine.run(data, signals)
 
         # Trade count should be non-negative
-        if hasattr(result, "trade_count"):
-            assert result.trade_count >= 0
+        assert result.trade_count >= 0
 
 
 class TestBacktestDataValidation:
@@ -185,32 +220,31 @@ class TestBacktestDataValidation:
 
     def test_requires_ohlcv_columns(self):
         """Test that engine requires OHLCV columns."""
-        from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine
+        from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine, BacktestError
 
         config = BacktestConfig(initial_capital=100000.0)
         engine = BacktestEngine(config=config)
 
-        # Invalid data without required columns should fail
-        invalid_df = pd.DataFrame({"foo": [1, 2, 3], "bar": [4, 5, 6]})
+        invalid_df = pd.DataFrame(
+            {"foo": [1, 2, 3, 4, 5], "bar": [4, 5, 6, 7, 8]},
+            index=pd.date_range(start="2024-01-01", periods=5, freq="D"),
+        )
+        signals = pd.Series(0.0, index=invalid_df.index)
 
-        with pytest.raises((ValueError, KeyError)):
-            engine.load_data(invalid_df)
+        with pytest.raises((BacktestError, KeyError, ValueError)):
+            engine.run(invalid_df, signals)
 
     def test_handles_missing_data(self, real_ohlcv_with_funding):
         """Test engine handles missing data gracefully."""
-        from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine
+        from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine, BacktestError
 
         config = BacktestConfig(initial_capital=100000.0)
         engine = BacktestEngine(config=config)
 
         # Add some NaN values
-        df_with_nan = real_ohlcv_with_funding.copy()
+        df_with_nan = _prepare_backtest_data(real_ohlcv_with_funding)
         df_with_nan.loc[df_with_nan.index[:5], "close"] = np.nan
+        signals = pd.Series(1.0, index=df_with_nan.index)
 
-        # Engine should handle NaN values
-        try:
-            engine.load_data(df_with_nan)
-            # Either loads successfully or raises appropriate error
-        except (ValueError, RuntimeError) as e:
-            # Expected behavior - engine should complain about NaN
-            assert "nan" in str(e).lower() or "missing" in str(e).lower()
+        with pytest.raises((BacktestError, ValueError)):
+            engine.run(df_with_nan, signals)

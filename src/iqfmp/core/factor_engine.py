@@ -114,6 +114,7 @@ class QlibFactorEngine:
         timeframe: str = "1d",
         require_qlib: bool = True,
         allow_python_factors: bool = False,
+        use_d_features: bool = False,
     ):
         """Initialize Qlib factor engine.
 
@@ -127,6 +128,8 @@ class QlibFactorEngine:
             timeframe: Default timeframe to load when df is not provided
             require_qlib: Require Qlib backend; raise if unavailable
             allow_python_factors: Allow custom Python factor functions (non-Qlib)
+            use_d_features: Use D.features() API instead of local DataFrame computation.
+                            Requires Qlib binary data to be available.
         """
         self._qlib_initialized = False
         self._provider_uri = provider_uri
@@ -141,6 +144,8 @@ class QlibFactorEngine:
         self._require_qlib = require_qlib
         self._allow_python_factors = allow_python_factors
         self._expression_engine: Optional[QlibExpressionEngine] = None
+        self._use_d_features = use_d_features
+        self._d_features_available = False
 
         # Try to initialize Qlib globally
         if QLIB_AVAILABLE and not is_qlib_initialized():
@@ -160,6 +165,14 @@ class QlibFactorEngine:
 
         # Expression engine (strictly Qlib-backed)
         self._expression_engine = QlibExpressionEngine(require_qlib=self._require_qlib)
+
+        # Check D.features() availability if requested
+        if self._use_d_features and self._qlib_initialized:
+            self._d_features_available = self._check_d_features_available()
+            if self._d_features_available:
+                logger.info("D.features() path enabled - using Qlib binary storage")
+            else:
+                logger.warning("D.features() requested but binary data not available")
 
         # Initialize with DataFrame if provided
         if df is not None:
@@ -206,6 +219,58 @@ class QlibFactorEngine:
         except Exception as e:
             logger.warning(f"Qlib initialization failed: {e}")
             return False
+
+    def _check_d_features_available(self) -> bool:
+        """Check if D.features() API is available with valid data.
+
+        Returns:
+            True if D.features() can be used
+        """
+        if not self._qlib_initialized:
+            return False
+
+        try:
+            from qlib.data import D
+
+            # Check if instruments are available
+            instruments = D.instruments(market="all")
+            if not instruments:
+                return False
+
+            # Try a simple query to verify data access
+            test_features = D.features(
+                instruments=instruments,
+                fields=["$close"],
+                start_time="2020-01-01",
+                end_time="2099-12-31",
+            )
+            return len(test_features) > 0
+
+        except Exception as e:
+            logger.debug(f"D.features() check failed: {e}")
+            return False
+
+    def enable_d_features(self, enable: bool = True) -> bool:
+        """Enable or disable D.features() path.
+
+        Args:
+            enable: Whether to enable D.features() path
+
+        Returns:
+            True if D.features() was successfully enabled
+        """
+        self._use_d_features = enable
+        if enable:
+            self._d_features_available = self._check_d_features_available()
+            if not self._d_features_available:
+                logger.warning("D.features() path not available - falling back to local computation")
+            return self._d_features_available
+        return True
+
+    @property
+    def d_features_enabled(self) -> bool:
+        """Check if D.features() path is enabled and available."""
+        return self._use_d_features and self._d_features_available
 
     def _init_crypto_handler(self) -> None:
         """Initialize CryptoDataHandler with current data."""
@@ -463,6 +528,8 @@ class QlibFactorEngine:
         self,
         expression: str,
         factor_name: str = "factor",
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
     ) -> pd.Series:
         """Compute factor using Qlib expression.
 
@@ -480,6 +547,8 @@ class QlibFactorEngine:
         Args:
             expression: Qlib expression string
             factor_name: Name for the computed factor
+            start_time: Start time for D.features() path (optional)
+            end_time: End time for D.features() path (optional)
 
         Returns:
             Series of factor values
@@ -487,6 +556,13 @@ class QlibFactorEngine:
         Raises:
             ValueError: If data not loaded or computation fails
         """
+        # Use D.features() path if enabled and available
+        if self.d_features_enabled:
+            return self._compute_factor_via_d_features(
+                expression, factor_name, start_time, end_time
+            )
+
+        # Fall back to local DataFrame computation
         if self._df is None or self._qlib_data is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
@@ -499,6 +575,52 @@ class QlibFactorEngine:
         except Exception as e:
             logger.error(f"Factor computation failed: {e}")
             raise ValueError(f"Factor computation failed: {e}")
+
+    def _compute_factor_via_d_features(
+        self,
+        expression: str,
+        factor_name: str,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+    ) -> pd.Series:
+        """Compute factor using D.features() API.
+
+        Args:
+            expression: Qlib expression string
+            factor_name: Name for the computed factor
+            start_time: Start time for query
+            end_time: End time for query
+
+        Returns:
+            Series of factor values
+        """
+        from qlib.data import D
+
+        # Get instruments from Qlib
+        instruments = D.instruments(market="all")
+
+        # Default time range if not specified
+        if start_time is None:
+            start_time = "2000-01-01"
+        if end_time is None:
+            end_time = "2099-12-31"
+
+        # Compute via D.features()
+        features_df = D.features(
+            instruments=instruments,
+            fields=[expression],
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        if features_df.empty:
+            raise ValueError(f"D.features() returned empty result for: {expression}")
+
+        # Extract the series and rename
+        result = features_df.iloc[:, 0]
+        result.name = factor_name
+
+        return result
 
     def _compute_qlib_expression(self, expression: str) -> pd.Series:
         """Compute Qlib expression on local data.

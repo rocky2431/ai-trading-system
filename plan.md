@@ -780,7 +780,16 @@
   ---
   5️⃣ 成功标准与KPI
 
- 
+  本仓库当前缺少“可复现的、可对标 RD-Agent 的 KPI 定义”（仅有标题，无内容）。
+
+  ✅ 已补齐最小 KPI（MVP）定义：`docs/kpi.md`
+
+  其中关键约束：
+  - Baseline Pinning：三份基线必须可复现（commit/tag/submodule/vendor VERSION）
+  - 可复现性：`pytest -q` 一键全绿 + 覆盖率达标（由 `pyproject.toml` 约束）
+  - 合约真实性：按 6 项子能力打分（trade/mark/index、资金费率、保证金&爆仓、费用&滑点、撮合、风控）
+
+  
 
   ---
  

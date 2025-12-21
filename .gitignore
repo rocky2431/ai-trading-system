@@ -113,3 +113,4 @@ temp/
 .backend.pid
 .celery.pid
 .frontend.pid
+.serena/

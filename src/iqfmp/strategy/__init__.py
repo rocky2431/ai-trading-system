@@ -5,23 +5,28 @@ Provides tools for strategy generation and management:
 - Strategy validation
 - Weighting schemes
 - Position management
-- Backtesting
+
+IMPORTANT: Backtesting has been moved to iqfmp.core.crypto_backtest
+==================================================================
+The old BacktestEngine has been removed. Use the new unified engine:
+
+    from iqfmp.core.crypto_backtest import (
+        CryptoQlibBacktest,
+        CryptoBacktestConfig,
+        CryptoBacktestResult,
+    )
+
+    config = CryptoBacktestConfig(initial_capital=100000, leverage=10)
+    engine = CryptoQlibBacktest(config)
+    result = engine.run(data, signals, "ETHUSDT")
+
+The new engine provides:
+- Qlib C++ expression engine for factor computation
+- Funding Rate settlement (8h cycles)
+- MarginCalculator for liquidation detection
+- Multi-asset portfolio support
 """
 
-from iqfmp.strategy.backtest import (
-    BacktestConfig,
-    BacktestEngine,
-    BacktestError,
-    BacktestReport,
-    BacktestResult,
-    InsufficientDataError,
-    PerformanceCalculator,
-    PerformanceMetrics,
-    ReportConfig,
-    Trade,
-    TradeStatus,
-    TradeType,
-)
 from iqfmp.strategy.generator import (
     GeneratedStrategy,
     InvalidStrategyError,
@@ -56,19 +61,6 @@ from iqfmp.strategy.position import (
 )
 
 __all__ = [
-    # Backtest
-    "BacktestConfig",
-    "BacktestEngine",
-    "BacktestError",
-    "BacktestReport",
-    "BacktestResult",
-    "InsufficientDataError",
-    "PerformanceCalculator",
-    "PerformanceMetrics",
-    "ReportConfig",
-    "Trade",
-    "TradeStatus",
-    "TradeType",
     # Generator
     "GeneratedStrategy",
     "InvalidStrategyError",

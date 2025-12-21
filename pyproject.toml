@@ -134,6 +134,9 @@ source = [
     "src/iqfmp/models",
     "src/iqfmp/agents",
     "src/iqfmp/evaluation",
+    "src/iqfmp/core",      # P0-3: Add core module for coverage
+    "src/iqfmp/exchange",  # P0-3: Add exchange module for coverage
+    "src/iqfmp/strategy",  # P0-3: Add strategy module for coverage
 ]
 branch = true
 omit = [

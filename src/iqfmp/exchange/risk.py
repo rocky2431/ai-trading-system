@@ -13,6 +13,15 @@ from decimal import Decimal
 from enum import Enum, auto
 from typing import Any, Optional
 
+from iqfmp.exchange.margin import (
+    MarginCalculator,
+    MarginConfig,
+    MarginPosition,
+    MarginResult,
+    MarginStatus,
+    PositionSide,
+)
+
 
 # ==================== Enums ====================
 
@@ -578,6 +587,8 @@ class RiskController:
     - MAX_POSITION_RATIO: 30% single position concentration limit
     - MAX_LEVERAGE: 3x maximum leverage
     - EMERGENCY_LOSS_THRESHOLD: 5% single-day loss triggers emergency close
+
+    Now includes MarginCalculator integration (P1-2 fix) for proper margin management.
     """
 
     # ==================== HARD THRESHOLDS (不可调整) ====================
@@ -586,20 +597,28 @@ class RiskController:
     MAX_LEVERAGE: Decimal = Decimal("3.0")  # 最大杠杆 3x
     EMERGENCY_LOSS_THRESHOLD: Decimal = Decimal("0.05")  # 5% 单日亏损触发紧急平仓
 
+    # ==================== MARGIN THRESHOLDS ====================
+    MARGIN_WARNING_RATIO: Decimal = Decimal("0.50")  # 50% margin ratio warning
+    MARGIN_DANGER_RATIO: Decimal = Decimal("0.70")   # 70% margin ratio danger
+    MARGIN_CRITICAL_RATIO: Decimal = Decimal("0.90") # 90% margin ratio critical
+
     def __init__(
         self,
         config: RiskConfig,
         initial_equity: Decimal,
+        default_leverage: int = 10,
     ) -> None:
         """Initialize risk controller.
 
         Args:
             config: Risk configuration
             initial_equity: Initial account equity
+            default_leverage: Default leverage for margin calculations
         """
         self._config = config
         self._initial_equity = initial_equity
         self._current_equity = initial_equity
+        self._default_leverage = default_leverage
 
         # Initialize sub-monitors
         self._drawdown_monitor = DrawdownMonitor(
@@ -615,8 +634,13 @@ class RiskController:
             max_single_concentration=config.max_position_concentration,
         )
 
+        # Initialize margin calculator (P1-2)
+        margin_config = MarginConfig.from_leverage(default_leverage)
+        self._margin_calculator = MarginCalculator(margin_config)
+
         # Position tracking
         self._positions: dict[str, Decimal] = {}
+        self._margin_positions: dict[str, MarginPosition] = {}
 
         # Rule states
         self._rule_states: dict[RiskRuleType, bool] = {
@@ -1056,7 +1080,228 @@ class RiskController:
             "max_position_ratio": cls.MAX_POSITION_RATIO,
             "max_leverage": cls.MAX_LEVERAGE,
             "emergency_loss": cls.EMERGENCY_LOSS_THRESHOLD,
+            "margin_warning": cls.MARGIN_WARNING_RATIO,
+            "margin_danger": cls.MARGIN_DANGER_RATIO,
+            "margin_critical": cls.MARGIN_CRITICAL_RATIO,
         }
+
+    # ==================== MARGIN METHODS (P1-2) ====================
+
+    def add_margin_position(
+        self,
+        symbol: str,
+        side: PositionSide,
+        quantity: Decimal,
+        entry_price: Decimal,
+        mark_price: Decimal,
+        leverage: int = 10,
+    ) -> None:
+        """Add a margin position for tracking.
+
+        Args:
+            symbol: Trading symbol
+            side: Position side (LONG/SHORT)
+            quantity: Position quantity
+            entry_price: Entry price
+            mark_price: Current mark price
+            leverage: Position leverage
+        """
+        self._margin_positions[symbol] = MarginPosition(
+            symbol=symbol,
+            side=side,
+            quantity=quantity,
+            entry_price=entry_price,
+            mark_price=mark_price,
+            leverage=leverage,
+        )
+        # Also update legacy position tracking
+        self._positions[symbol] = quantity * mark_price
+
+    def update_margin_position(
+        self,
+        symbol: str,
+        mark_price: Decimal,
+        quantity: Optional[Decimal] = None,
+    ) -> None:
+        """Update margin position with new mark price.
+
+        Args:
+            symbol: Trading symbol
+            mark_price: New mark price
+            quantity: New quantity (optional)
+        """
+        if symbol in self._margin_positions:
+            pos = self._margin_positions[symbol]
+            # Create updated position
+            self._margin_positions[symbol] = MarginPosition(
+                symbol=pos.symbol,
+                side=pos.side,
+                quantity=quantity if quantity is not None else pos.quantity,
+                entry_price=pos.entry_price,
+                mark_price=mark_price,
+                leverage=pos.leverage,
+                mode=pos.mode,
+            )
+            # Update legacy tracking
+            new_qty = quantity if quantity is not None else pos.quantity
+            self._positions[symbol] = new_qty * mark_price
+
+    def remove_margin_position(self, symbol: str) -> None:
+        """Remove a margin position.
+
+        Args:
+            symbol: Trading symbol
+        """
+        self._margin_positions.pop(symbol, None)
+        self._positions.pop(symbol, None)
+
+    def check_margin_status(
+        self,
+        symbol: str,
+        margin_balance: Decimal,
+    ) -> Optional[MarginResult]:
+        """Check margin status for a position.
+
+        Args:
+            symbol: Trading symbol
+            margin_balance: Current margin balance for this position
+
+        Returns:
+            MarginResult if position exists, None otherwise
+        """
+        if symbol not in self._margin_positions:
+            return None
+
+        position = self._margin_positions[symbol]
+        return self._margin_calculator.calculate_margin(position, margin_balance)
+
+    def check_margin_call(
+        self,
+        symbol: str,
+        margin_balance: Decimal,
+    ) -> tuple[bool, str]:
+        """Check if position is subject to margin call.
+
+        Args:
+            symbol: Trading symbol
+            margin_balance: Current margin balance
+
+        Returns:
+            (is_margin_call, message)
+        """
+        if symbol not in self._margin_positions:
+            return False, f"Position {symbol} not found"
+
+        position = self._margin_positions[symbol]
+        return self._margin_calculator.check_margin_call(position, margin_balance)
+
+    def get_all_margin_statuses(
+        self,
+        margin_balances: dict[str, Decimal],
+    ) -> dict[str, MarginResult]:
+        """Get margin status for all positions.
+
+        Args:
+            margin_balances: Margin balance by symbol
+
+        Returns:
+            MarginResult by symbol
+        """
+        results = {}
+        for symbol, position in self._margin_positions.items():
+            if symbol in margin_balances:
+                results[symbol] = self._margin_calculator.calculate_margin(
+                    position, margin_balances[symbol]
+                )
+        return results
+
+    def calculate_liquidation_price(
+        self,
+        symbol: str,
+    ) -> Optional[Decimal]:
+        """Calculate liquidation price for a position.
+
+        Args:
+            symbol: Trading symbol
+
+        Returns:
+            Liquidation price if position exists, None otherwise
+        """
+        if symbol not in self._margin_positions:
+            return None
+
+        position = self._margin_positions[symbol]
+
+        if position.side == PositionSide.LONG:
+            return self._margin_calculator.calculate_liquidation_price_long(
+                position.entry_price,
+                position.leverage,
+            )
+        else:
+            return self._margin_calculator.calculate_liquidation_price_short(
+                position.entry_price,
+                position.leverage,
+            )
+
+    def calculate_required_margin(
+        self,
+        position_size: Decimal,
+        entry_price: Decimal,
+        leverage: Optional[int] = None,
+    ) -> Decimal:
+        """Calculate required initial margin for a new position.
+
+        Args:
+            position_size: Position size in contracts
+            entry_price: Entry price
+            leverage: Leverage (uses default if not specified)
+
+        Returns:
+            Required initial margin
+        """
+        lev = leverage or self._default_leverage
+        return self._margin_calculator.calculate_initial_margin(
+            position_size, entry_price, lev
+        )
+
+    def calculate_max_position_size(
+        self,
+        available_margin: Decimal,
+        entry_price: Decimal,
+        leverage: Optional[int] = None,
+    ) -> Decimal:
+        """Calculate maximum position size given available margin.
+
+        Args:
+            available_margin: Available margin for new position
+            entry_price: Entry price
+            leverage: Leverage (uses default if not specified)
+
+        Returns:
+            Maximum position size
+        """
+        lev = leverage or self._default_leverage
+        return self._margin_calculator.calculate_max_position_size(
+            available_margin, entry_price, lev
+        )
+
+    def get_margin_positions(self) -> dict[str, MarginPosition]:
+        """Get all margin positions.
+
+        Returns:
+            MarginPosition by symbol
+        """
+        return self._margin_positions.copy()
+
+    def get_total_margin_exposure(self) -> Decimal:
+        """Get total margin exposure across all positions.
+
+        Returns:
+            Total position value at mark price
+        """
+        return sum(
+            pos.position_value for pos in self._margin_positions.values()
+        )
 
 
 # ==================== Module Exports ====================
@@ -1087,4 +1332,11 @@ __all__ = [
     "DrawdownMonitor",
     "LossLimiter",
     "RiskController",
+    # Margin (P1-2) - Re-exported from margin module
+    "MarginCalculator",
+    "MarginConfig",
+    "MarginPosition",
+    "MarginResult",
+    "MarginStatus",
+    "PositionSide",
 ]

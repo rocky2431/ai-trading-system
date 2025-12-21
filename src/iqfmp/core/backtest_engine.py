@@ -159,6 +159,9 @@ class BacktestEngine:
     def load_data(self) -> pd.DataFrame:
         """Load market data from DB (primary) or CSV (fallback)."""
         if self._df is not None:
+            # Ensure dataframe is prepared (returns column etc.)
+            if "returns" not in self._df.columns:
+                self._prepare_dataframe()
             return self._df
 
         # Try loading from DB first

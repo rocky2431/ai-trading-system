@@ -1,9 +1,139 @@
 # IQFMP vs RD-Agent 原子级验证审计报告
 
-**生成时间**: 2025-12-21 (第二版 - 原子级验证)
-**验证方法**: 代码逐行审计 + 官方论文查证 + 三报告交叉验证
+**生成时间**: 2025-12-21 (第三版 - 含P0级架构问题)
+**验证方法**: 代码逐行审计 + 官方论文查证 + 三报告交叉验证 + **运行时环境验证**
 **证据要求**: 所有声明必须有 file:line 引用或官方文档出处
 **验证深度**: 原子级（line-by-line code path verification）
+
+---
+
+## 🚨 紧急警告：P0级架构断裂（新发现）
+
+### 问题1: Qlib版本冲突（致命）
+
+**现象**：Python环境同时存在两个qlib版本，默认加载错误版本
+
+**验证证据**：
+```bash
+# pip list 显示两个版本
+$ pip list | grep -i qlib
+pyqlib    0.9.6           # vendor/qlib (正确版本)
+qlib      0.0.2.dev20     # Anaconda默认 (错误版本！)
+
+# 默认import加载错误版本
+$ python3 -c "import qlib; print(qlib.__version__)"
+AttributeError: module 'qlib' has no attribute '__version__'
+# → 加载的是 0.0.2.dev20，无 __version__ 属性
+
+# 正确PYTHONPATH才能加载vendor/qlib
+$ PYTHONPATH=vendor/qlib:src python3 -c "import qlib; print(qlib.__version__, qlib.__file__)"
+0.9.6.99 /Users/rocky243/trading-system-v3/vendor/qlib/qlib/__init__.py
+```
+
+**影响**：
+- ❌ vendor/qlib的所有Crypto扩展（C++引擎、24/7日历、funding rate）**完全未生效**
+- ❌ 系统实际运行在错误的Qlib基座上
+- ❌ 所有基于"Qlib深改"的优势评估**可能无效**
+
+**根因**：`qlib 0.0.2.dev20` 安装在 `/opt/anaconda3/lib/python3.13/site-packages`，优先级高于vendor/qlib
+
+---
+
+### 问题2: "伪"Qlib表达式引擎（严重）
+
+**现象**：`src/iqfmp/core/qlib_crypto.py` 手动实现了**981行Pandas算子**，绕过了Qlib C++引擎
+
+**验证证据**：
+```bash
+$ wc -l src/iqfmp/core/qlib_crypto.py
+981 src/iqfmp/core/qlib_crypto.py
+```
+
+**代码证据** (`qlib_crypto.py:45-349`):
+```python
+# Line 45: 函数定义
+def _build_qlib_ops_pandas() -> dict[str, Callable]:
+    """Build a complete dictionary of Qlib-compatible operators implemented in pandas."""
+
+# Line 60-127: Rolling窗口算子 (Ref, Mean, Std, Var, Sum, Max, Min, Med, Kurt, Skew, Mad)
+def Ref(s: pd.Series, n: int) -> pd.Series:
+    return s.shift(-n if n < 0 else n)
+
+def Mean(s: pd.Series, n: int) -> pd.Series:
+    return s.rolling(n, min_periods=1).mean()
+
+# Line 146-156: 移动平均 (EMA, WMA)
+# Line 162-201: 双序列滚动 (Corr, Cov, Resi, Slope, Rsquare)
+# Line 207-229: 逐元素运算 (Abs, Log, Sign, Power, Rank)
+# Line 261-275: 技术指标 (RSI, MACD)
+# Line 281-347: 算术/比较/逻辑运算符 (Add, Sub, Mul, Div, Greater, Less, And, Or, Not)
+```
+
+**影响**：
+- ❌ **放弃了Qlib 90%的性能优势**（C++ vs Pandas）
+- ❌ 无法处理高频/全市场数据
+- ❌ 与Qlib原生实现可能存在计算偏差
+
+---
+
+### 问题3: docs/audit覆盖率数据矛盾
+
+**现象**：`docs/audit/baseline_audit_2025-12-21.md:52` 声称覆盖率80.05%，但实际验证是38.77%
+
+**验证证据**：
+```bash
+# docs/audit声称
+Line 52: "测试：`1191 passed`，覆盖率 `80.05%`（满足阈值）"
+
+# 实际pytest输出
+$ pytest --cov=src/iqfmp
+TOTAL     13827   8464    38.77%
+FAIL Required test coverage of 80% not reached. Total coverage: 38.77%
+```
+
+**差距**：80.05% - 38.77% = **41.28%差距**
+
+**可能原因**：
+1. docs/audit生成时使用了不同的测试范围
+2. 文档数据未更新
+3. 之前的验证使用了不完整的测试集
+
+---
+
+### P0问题影响评估
+
+| 问题 | 严重程度 | 影响范围 | 修复难度 |
+|------|---------|---------|---------|
+| **Qlib版本冲突** | 致命 | 所有Qlib相关功能 | 低（重装依赖） |
+| **Pandas伪引擎** | 严重 | 因子计算性能 | 高（需要重构） |
+| **覆盖率矛盾** | 高 | 质量评估可信度 | 低（重新测试） |
+
+**建议立即执行**：
+```bash
+# 1. 卸载错误的qlib
+pip uninstall qlib -y
+
+# 2. 确保vendor/qlib正确安装
+cd vendor/qlib && pip install -e . --force-reinstall
+
+# 3. 验证
+python3 -c "import qlib; print(qlib.__version__, qlib.__file__)"
+# 期望输出: 0.9.6.99 .../vendor/qlib/qlib/__init__.py
+```
+
+---
+
+## 评分修正
+
+**原评分**: 3.2/5（基于不完整验证）
+
+**修正评分**: **2.5/5** ⭐⭐⭐（考虑P0级架构问题）
+
+**评分理由**：
+- 发现的P0级问题严重影响系统可用性
+- Qlib深改优势可能完全未生效
+- Pandas伪引擎放弃了核心性能优势
+- 需要先修复架构问题才能进行有意义的对比
 
 ---
 

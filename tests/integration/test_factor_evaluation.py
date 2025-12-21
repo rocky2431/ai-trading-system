@@ -4,7 +4,7 @@
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -132,7 +132,7 @@ class TestResearchLedger:
         trial = {
             "id": "trial_001",
             "factor_id": "momentum_20d",
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "metrics": {
                 "ic": 0.05,
                 "ir": 0.45,

@@ -57,7 +57,7 @@ def sample_factor_returns() -> pd.DataFrame:
 def sample_ic_series() -> pd.Series:
     """Create sample IC series."""
     np.random.seed(42)
-    dates = pd.date_range("2022-01-01", periods=12, freq="M")
+    dates = pd.date_range("2022-01-01", periods=12, freq="ME")
     ic_values = np.random.uniform(0.02, 0.08, size=12)
     return pd.Series(ic_values, index=dates, name="IC")
 
@@ -126,7 +126,7 @@ class TestTimeStabilityAnalyzer:
     ) -> None:
         """Test IC decay trend detection."""
         # Create decaying IC series
-        dates = pd.date_range("2022-01-01", periods=12, freq="M")
+        dates = pd.date_range("2022-01-01", periods=12, freq="ME")
         ic_values = [0.10, 0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.01, 0.00, -0.01]
         ic_series = pd.Series(ic_values, index=dates)
 
@@ -400,7 +400,7 @@ class TestStabilityBoundary:
         self, time_analyzer: TimeStabilityAnalyzer
     ) -> None:
         """Test with extreme IC values."""
-        dates = pd.date_range("2022-01-01", periods=12, freq="M")
+        dates = pd.date_range("2022-01-01", periods=12, freq="ME")
         ic_values = [1.0, -1.0, 0.5, -0.5, 0.0, 0.99, -0.99, 0.1, -0.1, 0.0, 0.0, 0.0]
         ic_series = pd.Series(ic_values, index=dates)
 

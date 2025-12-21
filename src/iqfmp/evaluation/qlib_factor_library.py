@@ -52,6 +52,10 @@ QLIB_AVAILABLE = False
 _qlib_initialized = False
 
 
+class QlibUnavailableError(RuntimeError):
+    """Raised when Qlib backend is required but unavailable."""
+
+
 def _ensure_qlib_initialized() -> bool:
     """Ensure Qlib is properly initialized."""
     global QLIB_AVAILABLE, _qlib_initialized
@@ -311,8 +315,9 @@ class QlibFactorLibrary:
             Series of computed values
         """
         if not self._qlib_available:
-            logger.warning("Qlib not available, using fallback")
-            return self._fallback_compute(expression, data, result_name)
+            raise QlibUnavailableError(
+                "Qlib backend unavailable - Qlib-only mode enforced."
+            )
 
         try:
             # Prepare data for Qlib
@@ -324,7 +329,7 @@ class QlibFactorLibrary:
 
         except Exception as e:
             logger.error(f"Qlib computation failed: {e}")
-            return self._fallback_compute(expression, data, result_name)
+            raise
 
     def compute_batch(
         self,
@@ -344,6 +349,8 @@ class QlibFactorLibrary:
         for name in factor_names:
             try:
                 results[name] = self.compute(name, data)
+            except QlibUnavailableError:
+                raise
             except Exception as e:
                 logger.warning(f"Failed to compute {name}: {e}")
                 results[name] = pd.Series(np.nan, index=data.index)
@@ -358,6 +365,10 @@ class QlibFactorLibrary:
                 data[col] = df[col]
             elif col in ["open", "high", "low", "close", "volume"]:
                 data[f"${col}"] = df[col]
+            elif pd.api.types.is_numeric_dtype(df[col]):
+                qlib_col = f"${col}"
+                data[qlib_col] = df[col]
+                data[col] = df[col]
 
         # Add computed fields if not present
         if "$vwap" not in data and all(f"${c}" in data for c in ["high", "low", "close"]):
@@ -379,96 +390,16 @@ class QlibFactorLibrary:
             return data[expr]
 
         # Build context with Qlib ops and data
-        context = {**self._ops_cache, **data, "np": np, "pd": pd}
+        context = {**self._ops_cache, **data}
 
         try:
             result = eval(expr, {"__builtins__": {}}, context)
             if hasattr(result, "load"):
                 return result.load()
             return result
-        except Exception:
-            return self._fallback_evaluate(expr, data)
-
-    def _fallback_evaluate(
-        self,
-        expr: str,
-        data: dict[str, pd.Series],
-    ) -> pd.Series:
-        """Fallback evaluation using Qlib-compatible pandas."""
-        # Replace field references
-        for field, series in data.items():
-            expr = expr.replace(field, f"data['{field}']")
-
-        # Qlib-compatible function implementations
-        def Ref(s: pd.Series, n: int) -> pd.Series:
-            return s.shift(n)
-
-        def Mean(s: pd.Series, n: int) -> pd.Series:
-            return s.rolling(n).mean()
-
-        def Std(s: pd.Series, n: int) -> pd.Series:
-            return s.rolling(n).std()
-
-        def EMA(s: pd.Series, n: int) -> pd.Series:
-            return s.ewm(span=n, adjust=False).mean()
-
-        def Max(*args):
-            if len(args) == 2 and isinstance(args[1], int):
-                return args[0].rolling(args[1]).max()
-            return pd.concat([a for a in args if isinstance(a, pd.Series)], axis=1).max(axis=1)
-
-        def Min(*args):
-            if len(args) == 2 and isinstance(args[1], int):
-                return args[0].rolling(args[1]).min()
-            return pd.concat([a for a in args if isinstance(a, pd.Series)], axis=1).min(axis=1)
-
-        def Abs(s: pd.Series) -> pd.Series:
-            return s.abs()
-
-        def If(cond, t, f):
-            return pd.Series(np.where(cond, t, f))
-
-        def Sum(s: pd.Series, n: int) -> pd.Series:
-            return s.rolling(n).sum()
-
-        def Corr(x: pd.Series, y: pd.Series, n: int) -> pd.Series:
-            return x.rolling(n).corr(y)
-
-        def Rank(s: pd.Series) -> pd.Series:
-            return s.rank(pct=True)
-
-        def Delta(s: pd.Series, n: int) -> pd.Series:
-            return s.diff(n)
-
-        def Log(s: pd.Series) -> pd.Series:
-            return np.log(s)
-
-        local_ctx = {
-            "data": data,
-            "Ref": Ref, "Mean": Mean, "Std": Std, "EMA": EMA,
-            "Max": Max, "Min": Min, "Abs": Abs, "If": If,
-            "Sum": Sum, "Corr": Corr, "Rank": Rank,
-            "Delta": Delta, "Log": Log,
-            "np": np, "pd": pd,
-        }
-
-        try:
-            return eval(expr, {"__builtins__": {}}, local_ctx)
         except Exception as e:
-            logger.error(f"Fallback evaluation failed: {e}")
-            template = next(iter(data.values()))
-            return pd.Series(np.nan, index=template.index)
-
-    def _fallback_compute(
-        self,
-        expression: str,
-        data: pd.DataFrame,
-        result_name: str,
-    ) -> pd.Series:
-        """Complete fallback computation path."""
-        qlib_data = self._prepare_data(data)
-        result = self._fallback_evaluate(expression, qlib_data)
-        return pd.Series(result, index=data.index, name=result_name)
+            logger.error(f"Qlib expression evaluation failed: {e}")
+            raise
 
 
 # =============================================================================

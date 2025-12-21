@@ -834,7 +834,9 @@ def _execute_factor_evaluation(
     config: dict[str, Any],
 ) -> dict[str, Any]:
     """执行因子评估的内部实现 - 使用真实因子引擎"""
+    from datetime import datetime as _dt
     from iqfmp.core.factor_engine import FactorEngine, FactorEvaluator, create_engine_with_sample_data
+    from iqfmp.core.data_provider import load_ohlcv_sync
     from iqfmp.evaluation.research_ledger import DynamicThreshold, ThresholdConfig
 
     # 阶段1: 加载数据
@@ -844,8 +846,70 @@ def _execute_factor_evaluation(
     )
 
     try:
-        # 创建引擎并加载样本数据
-        engine = create_engine_with_sample_data()
+        # 创建引擎并加载真实数据（优先 data_config）
+        data_cfg = config.get("data_config") or {}
+        symbol = (data_cfg.get("symbols") or ["ETHUSDT"])[0]
+        timeframe = (data_cfg.get("timeframes") or ["1d"])[0]
+        start_date = data_cfg.get("start_date")
+        end_date = data_cfg.get("end_date")
+
+        df = None
+        try:
+            df = load_ohlcv_sync(symbol=symbol, timeframe=timeframe, use_db=True)
+            if start_date and end_date:
+                try:
+                    start_dt = _dt.fromisoformat(start_date)
+                    end_dt = _dt.fromisoformat(end_date)
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=None)
+                    if end_dt.tzinfo is None:
+                        end_dt = end_dt.replace(tzinfo=None)
+                    df = df[(df["timestamp"] >= start_dt) & (df["timestamp"] <= end_dt)]
+                except Exception as sub_e:  # noqa: BLE001
+                    logger.warning(f"Date filter failed, using full dataset: {sub_e}")
+
+            # 如果提供时间区间，尝试加载含衍生品的统一数据集
+            if start_date and end_date:
+                try:
+                    import asyncio
+                    from iqfmp.data.provider import UnifiedMarketDataProvider, DataLoadConfig
+                    from iqfmp.db.database import get_async_session
+
+                    start_dt = _dt.fromisoformat(start_date)
+                    end_dt = _dt.fromisoformat(end_date)
+
+                    async def _load_unified():
+                        async with get_async_session() as async_session:
+                            provider = UnifiedMarketDataProvider(
+                                async_session,
+                                exchange=data_cfg.get("exchange", "binance"),
+                            )
+                            result = await provider.load_market_data(
+                                symbol=symbol,
+                                start_date=start_dt,
+                                end_date=end_dt,
+                                timeframe=timeframe,
+                                config=DataLoadConfig(
+                                    include_derivatives=True,
+                                    market_type=data_cfg.get("market_type", "futures"),
+                                ),
+                            )
+                            return result.df
+
+                    unified_df = asyncio.run(_load_unified())
+                    if unified_df is not None and len(unified_df) > 0:
+                        df = unified_df
+                        logger.info("Loaded unified market data with derivatives for evaluation")
+                except Exception as sub_e:  # noqa: BLE001
+                    logger.warning(f"Unified derivative data load failed, fallback to OHLCV only: {sub_e}")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Real data load failed, fallback to sample data: {e}")
+            df = None
+
+        if df is not None and not df.empty:
+            engine = FactorEngine(df=df)
+        else:
+            engine = create_engine_with_sample_data()
 
         # 阶段2: 计算因子值
         task.update_state(
@@ -1304,6 +1368,7 @@ def mining_task(
             target_count=target_count,
             families=families,
             auto_evaluate=auto_evaluate,
+            data_config=task_config.get("data_config"),
         )
 
         logger.info(f"Mining task {task_id} completed: {result}")
@@ -1336,6 +1401,7 @@ def _execute_mining_task(
     target_count: int,
     families: list[str],
     auto_evaluate: bool,
+    data_config: dict | None = None,
 ) -> dict[str, Any]:
     """执行因子挖掘的内部实现.
 
@@ -1352,22 +1418,31 @@ def _execute_mining_task(
     passed_count = 0
     failed_count = 0
 
+    # Cache redis client for cancellation checks (avoid reconnect per-iteration)
+    redis_client = None
+    try:
+        import os
+        import redis
+
+        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+        redis_client = redis.from_url(redis_url)
+    except Exception:
+        redis_client = None
+
     for i in range(target_count):
         # Check for cancellation via Redis
-        try:
-            import redis
-            redis_url = "redis://localhost:6379/0"
-            redis_client = redis.from_url(redis_url)
-            if redis_client.sismember("mining_tasks:cancelled", task_id):
-                logger.info(f"Mining task {task_id} cancelled at iteration {i}")
-                return {
-                    "generated_count": generated_count,
-                    "passed_count": passed_count,
-                    "failed_count": failed_count,
-                    "cancelled": True,
-                }
-        except Exception:
-            pass  # Redis check failed, continue execution
+        if redis_client is not None:
+            try:
+                if redis_client.sismember("mining_tasks:cancelled", task_id):
+                    logger.info(f"Mining task {task_id} cancelled at iteration {i}")
+                    return {
+                        "generated_count": generated_count,
+                        "passed_count": passed_count,
+                        "failed_count": failed_count,
+                        "cancelled": True,
+                    }
+            except Exception:
+                pass  # Redis check failed, continue execution
 
         # Update progress
         progress = ((i + 1) / target_count) * 100
@@ -1422,7 +1497,10 @@ def _execute_mining_task(
                         celery_task,
                         factor_id=factor_result.get("factor_id", "unknown"),
                         factor_code=factor_result.get("code", ""),
-                        config={"n_trials": generated_count},
+                        config={
+                            "n_trials": generated_count,
+                            "data_config": data_config or {},
+                        },
                     )
                     sharpe = eval_result.get("sharpe", 0.0)
                     threshold = eval_result.get("threshold_used", 0.0)

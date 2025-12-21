@@ -9,11 +9,21 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Callable, Any
 
+import httpx
+
 import ccxt.async_support as ccxt
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from iqfmp.db.models import OHLCVDataORM, DataDownloadTaskORM, SymbolInfoORM
+from iqfmp.db.models import (
+    DataDownloadTaskORM,
+    FundingRateORM,
+    LiquidationORM,
+    LongShortRatioORM,
+    OHLCVDataORM,
+    OpenInterestORM,
+    SymbolInfoORM,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +36,7 @@ TIMEFRAME_MAPPING = {
     "1h": "1h",
     "4h": "4h",
     "1d": "1d",
+    "8h": "8h",
 }
 
 # Milliseconds per timeframe
@@ -36,6 +47,7 @@ TIMEFRAME_MS = {
     "1h": 60 * 60 * 1000,
     "4h": 4 * 60 * 60 * 1000,
     "1d": 24 * 60 * 60 * 1000,
+    "8h": 8 * 60 * 60 * 1000,
 }
 
 
@@ -77,6 +89,24 @@ class CCXTDownloader:
                 }
             })
         return self._exchange
+
+    def _normalize_symbol(self, symbol: str) -> str:
+        """Normalize symbol to CCXT format.
+
+        Args:
+            symbol: Trading pair, e.g., BTCUSDT or BTC/USDT
+
+        Returns:
+            CCXT compatible symbol string.
+        """
+        symbol = symbol.upper()
+        if "/" in symbol:
+            return symbol
+        if symbol.endswith("USDT"):
+            return symbol[:-4] + "/USDT"
+        if symbol.endswith("USD"):
+            return symbol[:-3] + "/USD"
+        return symbol
 
     async def close(self):
         """Close exchange connection."""
@@ -237,6 +267,374 @@ class CCXTDownloader:
         logger.info(f"Download complete: {total_rows} rows for {symbol} {timeframe}")
         return total_rows
 
+    async def download_funding_rates(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        session: AsyncSession,
+        progress_callback: Optional[Callable[[float, int], Any]] = None,
+        batch_size: int = 1000,
+    ) -> int:
+        """Download funding rate history and store in database."""
+        exchange = await self._get_exchange()
+        if not hasattr(exchange, "fetchFundingRateHistory"):
+            raise NotImplementedError(f"Exchange {self.exchange_id} does not support funding rate history")
+
+        symbol = self._normalize_symbol(symbol)
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(end_date.timestamp() * 1000)
+        interval_ms = TIMEFRAME_MS.get("8h", 8 * 60 * 60 * 1000)
+
+        total_rows = 0
+        current_ts = start_ts
+
+        while current_ts < end_ts:
+            try:
+                rates = await exchange.fetchFundingRateHistory(
+                    symbol,
+                    since=current_ts,
+                    limit=batch_size,
+                )
+
+                if not rates:
+                    current_ts += interval_ms * batch_size
+                    await asyncio.sleep(self.rate_limit_delay)
+                    continue
+
+                for item in rates:
+                    ts_ms = (
+                        item.get("timestamp")
+                        or item.get("fundingTime")
+                        or (item.get("info", {}).get("fundingTime"))
+                    )
+                    if ts_ms is None:
+                        continue
+                    ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+                    # Skip existing records
+                    exists = await session.execute(
+                        select(FundingRateORM).where(
+                            FundingRateORM.symbol == symbol,
+                            FundingRateORM.exchange == self.exchange_id,
+                            FundingRateORM.timestamp == ts,
+                        )
+                    )
+                    if exists.scalar_one_or_none():
+                        continue
+
+                    funding_rate = (
+                        item.get("fundingRate")
+                        or item.get("info", {}).get("fundingRate")
+                        or item.get("info", {}).get("fr")
+                        or 0.0
+                    )
+
+                    record = FundingRateORM(
+                        symbol=symbol,
+                        exchange=self.exchange_id,
+                        funding_rate=float(funding_rate),
+                        funding_rate_interval=item.get("fundingRateInterval", 8),
+                        mark_price=item.get("markPrice") or item.get("info", {}).get("markPrice"),
+                        index_price=item.get("indexPrice") or item.get("info", {}).get("indexPrice"),
+                        timestamp=ts,
+                    )
+                    session.add(record)
+                    total_rows += 1
+
+                await session.commit()
+
+                if progress_callback and end_ts > start_ts:
+                    progress = min(100.0, (current_ts - start_ts) / (end_ts - start_ts) * 100)
+                    await progress_callback(progress, total_rows)
+
+                last_ts = rates[-1].get("timestamp") or rates[-1].get("fundingTime") or current_ts
+                current_ts = last_ts + interval_ms
+                await asyncio.sleep(self.rate_limit_delay)
+
+            except Exception as e:
+                logger.error(f"Error downloading funding rates: {e}")
+                await asyncio.sleep(1.0)
+                current_ts += interval_ms
+
+        return total_rows
+
+    async def download_open_interest(
+        self,
+        symbol: str,
+        timeframe: str,
+        start_date: datetime,
+        end_date: datetime,
+        session: AsyncSession,
+        progress_callback: Optional[Callable[[float, int], Any]] = None,
+        batch_size: int = 500,
+    ) -> int:
+        """Download open interest history and store in database."""
+        exchange = await self._get_exchange()
+        if not hasattr(exchange, "fetchOpenInterestHistory"):
+            raise NotImplementedError(f"Exchange {self.exchange_id} does not support open interest history")
+
+        symbol = self._normalize_symbol(symbol)
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(end_date.timestamp() * 1000)
+        tf = TIMEFRAME_MAPPING.get(timeframe, timeframe)
+        timeframe_ms = TIMEFRAME_MS.get(timeframe, TIMEFRAME_MS["1h"])
+
+        total_rows = 0
+        current_ts = start_ts
+
+        while current_ts < end_ts:
+            try:
+                history = await exchange.fetchOpenInterestHistory(
+                    symbol=symbol,
+                    timeframe=tf,
+                    since=current_ts,
+                    limit=batch_size,
+                )
+
+                if not history:
+                    current_ts += timeframe_ms * batch_size
+                    await asyncio.sleep(self.rate_limit_delay)
+                    continue
+
+                for item in history:
+                    ts_ms = item.get("timestamp") or item.get("info", {}).get("timestamp")
+                    if ts_ms is None:
+                        continue
+                    ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+                    exists = await session.execute(
+                        select(OpenInterestORM).where(
+                            OpenInterestORM.symbol == symbol,
+                            OpenInterestORM.exchange == self.exchange_id,
+                            OpenInterestORM.timestamp == ts,
+                        )
+                    )
+                    if exists.scalar_one_or_none():
+                        continue
+
+                    oi_value = (
+                        item.get("openInterestAmount")
+                        or item.get("openInterest")
+                        or item.get("baseVolume")
+                        or item.get("info", {}).get("sumOpenInterest")
+                        or 0.0
+                    )
+                    oi_quote = (
+                        item.get("openInterestValue")
+                        or item.get("quoteVolume")
+                        or item.get("info", {}).get("sumOpenInterestValue")
+                    )
+
+                    record = OpenInterestORM(
+                        symbol=symbol,
+                        exchange=self.exchange_id,
+                        open_interest=float(oi_value),
+                        open_interest_value=float(oi_quote) if oi_quote is not None else None,
+                        contract_type=item.get("contract" , "perpetual"),
+                        timestamp=ts,
+                    )
+                    session.add(record)
+                    total_rows += 1
+
+                await session.commit()
+
+                if progress_callback and end_ts > start_ts:
+                    progress = min(100.0, (current_ts - start_ts) / (end_ts - start_ts) * 100)
+                    await progress_callback(progress, total_rows)
+
+                last_ts = history[-1].get("timestamp") or current_ts
+                current_ts = last_ts + timeframe_ms
+                await asyncio.sleep(self.rate_limit_delay)
+
+            except Exception as e:
+                logger.error(f"Error downloading open interest: {e}")
+                await asyncio.sleep(1.0)
+                current_ts += timeframe_ms
+
+        return total_rows
+
+    async def download_long_short_ratio(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        session: AsyncSession,
+        progress_callback: Optional[Callable[[float, int], Any]] = None,
+        ratio_type: str = "global",
+        period: str = "5m",
+        batch_size: int = 500,
+    ) -> int:
+        """Download long/short ratio using exchange HTTP endpoints (Binance futures)."""
+        if self.exchange_id != "binance":
+            raise NotImplementedError("Long/short ratio download currently implemented for Binance futures")
+
+        symbol_param = symbol.replace("/", "")
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(end_date.timestamp() * 1000)
+        timeframe_ms = TIMEFRAME_MS.get(period, TIMEFRAME_MS["5m"])
+        total_rows = 0
+        current_ts = start_ts
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            while current_ts < end_ts:
+                params = {
+                    "symbol": symbol_param,
+                    "period": period,
+                    "limit": batch_size,
+                    "startTime": current_ts,
+                    "endTime": end_ts,
+                }
+                try:
+                    resp = await client.get(
+                        "https://fapi.binance.com/futures/data/globalLongShortAccountRatio",
+                        params=params,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    if not data:
+                        current_ts += timeframe_ms * batch_size
+                        continue
+
+                    for item in data:
+                        ts_ms = item.get("timestamp") or item.get("time")
+                        if ts_ms is None:
+                            continue
+                        ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+                        exists = await session.execute(
+                            select(LongShortRatioORM).where(
+                                LongShortRatioORM.symbol == symbol,
+                                LongShortRatioORM.exchange == self.exchange_id,
+                                LongShortRatioORM.ratio_type == ratio_type,
+                                LongShortRatioORM.timestamp == ts,
+                            )
+                        )
+                        if exists.scalar_one_or_none():
+                            continue
+
+                        long_ratio = float(item.get("longAccount", 0))
+                        short_ratio = float(item.get("shortAccount", 0))
+                        long_short_ratio = float(item.get("longShortRatio", 0))
+
+                        record = LongShortRatioORM(
+                            symbol=symbol,
+                            exchange=self.exchange_id,
+                            ratio_type=ratio_type,
+                            long_ratio=long_ratio,
+                            short_ratio=short_ratio,
+                            long_short_ratio=long_short_ratio,
+                            timestamp=ts,
+                        )
+                        session.add(record)
+                        total_rows += 1
+
+                    await session.commit()
+
+                    if progress_callback and end_ts > start_ts:
+                        progress = min(100.0, (current_ts - start_ts) / (end_ts - start_ts) * 100)
+                        await progress_callback(progress, total_rows)
+
+                    last_ts = data[-1].get("timestamp") or current_ts
+                    current_ts = last_ts + timeframe_ms
+
+                except Exception as e:
+                    logger.error(f"Error downloading long/short ratio: {e}")
+                    current_ts += timeframe_ms
+                    await asyncio.sleep(self.rate_limit_delay)
+
+        return total_rows
+
+    async def download_liquidations(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        session: AsyncSession,
+        progress_callback: Optional[Callable[[float, int], Any]] = None,
+        batch_size: int = 500,
+    ) -> int:
+        """Download liquidation orders (Binance futures) and store aggregated records."""
+        if self.exchange_id != "binance":
+            raise NotImplementedError("Liquidation download currently implemented for Binance futures")
+
+        symbol_param = symbol.replace("/", "")
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(end_date.timestamp() * 1000)
+        total_rows = 0
+        current_ts = start_ts
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            while current_ts < end_ts:
+                params = {
+                    "symbol": symbol_param,
+                    "limit": batch_size,
+                    "startTime": current_ts,
+                    "endTime": end_ts,
+                }
+                try:
+                    resp = await client.get(
+                        "https://fapi.binance.com/futures/data/liquidationOrders",
+                        params=params,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    if not data:
+                        current_ts += TIMEFRAME_MS.get("1h", 60 * 60 * 1000) * batch_size
+                        continue
+
+                    for item in data:
+                        ts_ms = item.get("time")
+                        if ts_ms is None:
+                            continue
+                        ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+                        exists = await session.execute(
+                            select(LiquidationORM).where(
+                                LiquidationORM.symbol == symbol,
+                                LiquidationORM.exchange == self.exchange_id,
+                                LiquidationORM.timestamp == ts,
+                                LiquidationORM.price == float(item.get("price", 0)),
+                            )
+                        )
+                        if exists.scalar_one_or_none():
+                            continue
+
+                        price = float(item.get("avgPrice") or item.get("price") or 0)
+                        qty = float(item.get("executedQty") or item.get("origQty") or 0)
+                        value_usd = price * qty if price and qty else None
+                        side = item.get("side", "").lower() or "unknown"
+
+                        record = LiquidationORM(
+                            symbol=symbol,
+                            exchange=self.exchange_id,
+                            side=side,
+                            quantity=qty,
+                            price=price,
+                            value_usd=value_usd,
+                            timestamp=ts,
+                        )
+                        session.add(record)
+                        total_rows += 1
+
+                    await session.commit()
+
+                    if progress_callback and end_ts > start_ts:
+                        progress = min(100.0, (current_ts - start_ts) / (end_ts - start_ts) * 100)
+                        await progress_callback(progress, total_rows)
+
+                    last_ts = data[-1].get("time") or current_ts
+                    current_ts = last_ts + TIMEFRAME_MS.get("1m", 60 * 1000) * batch_size
+
+                except Exception as e:
+                    logger.error(f"Error downloading liquidations: {e}")
+                    current_ts += TIMEFRAME_MS.get("1m", 60 * 1000) * batch_size
+                    await asyncio.sleep(self.rate_limit_delay)
+
+        return total_rows
+
 
 async def execute_download_task(
     task_id: str,
@@ -273,6 +671,7 @@ async def execute_download_task(
     try:
         # Create downloader with market_type
         market_type = getattr(task, 'market_type', 'spot')
+        data_type = getattr(task, 'data_type', 'ohlcv')
         downloader = CCXTDownloader(exchange_id=task.exchange, market_type=market_type)
 
         # Progress callback
@@ -281,15 +680,51 @@ async def execute_download_task(
             task.rows_downloaded = rows
             await session.commit()
 
-        # Execute download
-        total_rows = await downloader.download_historical(
-            symbol=task.symbol,
-            timeframe=task.timeframe,
-            start_date=task.start_date,
-            end_date=task.end_date,
-            session=session,
-            progress_callback=update_progress,
-        )
+        # Execute download by data type
+        if data_type == "ohlcv":
+            total_rows = await downloader.download_historical(
+                symbol=task.symbol,
+                timeframe=task.timeframe,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        elif data_type == "funding_rate":
+            total_rows = await downloader.download_funding_rates(
+                symbol=task.symbol,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        elif data_type == "open_interest":
+            total_rows = await downloader.download_open_interest(
+                symbol=task.symbol,
+                timeframe=task.timeframe,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        elif data_type == "long_short_ratio":
+            total_rows = await downloader.download_long_short_ratio(
+                symbol=task.symbol,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        elif data_type == "liquidation":
+            total_rows = await downloader.download_liquidations(
+                symbol=task.symbol,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        else:
+            raise ValueError(f"Unsupported data_type: {data_type}")
 
         # Update task completion
         task.status = "completed"
@@ -298,8 +733,9 @@ async def execute_download_task(
         task.completed_at = datetime.now(timezone.utc)
         await session.commit()
 
-        # Update symbol info
-        await _update_symbol_info(session, task.symbol, task.timeframe, task.exchange)
+        # Update symbol info for OHLCV only
+        if data_type == "ohlcv":
+            await _update_symbol_info(session, task.symbol, task.timeframe, task.exchange)
 
         await downloader.close()
 

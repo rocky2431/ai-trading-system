@@ -18,9 +18,6 @@ class WebSocketMessage(BaseModel):
     data: Optional[dict[str, Any]] = None
     timestamp: datetime = datetime.now(timezone.utc)
 
-    class Config:
-        json_encoders = {datetime: lambda v: v.isoformat()}
-
 
 class ConnectionManager:
     """Manages WebSocket connections for real-time updates."""

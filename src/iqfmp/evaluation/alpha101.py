@@ -883,7 +883,7 @@ def alpha077(df: pd.DataFrame) -> pd.Series:
     vwap = (df["close"] * df["volume"]).rolling(10).sum() / df["volume"].rolling(10).sum()
     adv40 = df["volume"].rolling(40).mean()
     p1 = cross_rank(ts_decay_linear((df["high"] + df["low"]) / 2 + df["high"] - vwap - df["high"], 20))
-    p2 = cross_rank(ts_decay_linear(ts_corr(df["high"] + df["low"]) / 2, adv40, 3), 6)
+    p2 = cross_rank(ts_decay_linear(ts_corr((df["high"] + df["low"]) / 2, adv40, 3), 6))
     cond = (p1 < p2)
     result = p1
     result[~cond] = p2[~cond]

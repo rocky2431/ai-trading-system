@@ -473,7 +473,7 @@ class QlibExpressionEngine:
     All indicator calculations MUST go through this class.
     """
 
-    def __init__(self, require_qlib: bool = False) -> None:
+    def __init__(self, require_qlib: bool = True) -> None:
         """Initialize expression engine with Qlib backend."""
         self._require_qlib = require_qlib
         self._qlib_available = _ensure_qlib_initialized()
@@ -535,24 +535,13 @@ class QlibExpressionEngine:
         Returns:
             Series of computed values
         """
-        # Prepare data in Qlib-style dict for both Qlib and pandas fallback paths.
+        # Prepare data in Qlib-style dict for Qlib execution.
         data = self._prepare_data_for_qlib(df)
 
-        # If Qlib backend is unavailable, fall back to the pure-pandas operator set.
-        # This keeps local/dev pipelines runnable without requiring a full Qlib data provider.
         if not self._qlib_available:
-            if self._require_qlib:
-                raise QlibUnavailableError(
-                    "Qlib backend unavailable while require_qlib=True"
-                )
-            try:
-                result = self._fallback_eval(expression, data)
-                if isinstance(result, pd.Series):
-                    return result.rename(result_name)
-                return pd.Series(result, index=df.index, name=result_name)
-            except Exception as e:
-                logger.error(f"Pandas fallback eval failed: {e}")
-                return pd.Series(np.nan, index=df.index, name=result_name)
+            raise QlibUnavailableError(
+                "Qlib backend unavailable - Qlib-only mode enforced."
+            )
 
         try:
             # Use Qlib's expression evaluation
@@ -562,8 +551,7 @@ class QlibExpressionEngine:
 
         except Exception as e:
             logger.error(f"Qlib expression evaluation failed: {e}")
-            # Return NaN series on failure
-            return pd.Series(np.nan, index=df.index, name=result_name)
+            raise
 
     def _prepare_data_for_qlib(self, df: pd.DataFrame) -> dict[str, pd.Series]:
         """Prepare DataFrame columns for Qlib ops.
@@ -626,8 +614,8 @@ class QlibExpressionEngine:
             return result
 
         except Exception as e:
-            logger.warning(f"Qlib expression parsing failed: {e}, using fallback")
-            return self._fallback_eval(expr, data)
+            logger.error(f"Qlib expression parsing failed: {e}")
+            raise
 
     def _eval_with_ops(
         self,
@@ -668,11 +656,10 @@ class QlibExpressionEngine:
         expr: str,
         data: dict[str, pd.Series],
     ) -> pd.Series:
-        """Fallback evaluation using pandas (Qlib-compatible formulas).
-
-        Uses the complete QLIB_PANDAS_OPS dictionary for full Alpha158 compatibility.
-        This includes 40+ operators matching Qlib's native expression engine.
-        """
+        """Legacy pandas fallback (disabled in Qlib-only mode)."""
+        raise QlibUnavailableError(
+            "Qlib-only mode enforced; pandas fallback evaluation is disabled."
+        )
         # Replace field references with actual data
         for field, series in data.items():
             expr = expr.replace(field, f"data['{field}']")

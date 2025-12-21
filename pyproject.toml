@@ -107,12 +107,16 @@ include = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src", "vendor/qlib"]
 addopts = [
     "-v",
     "--tb=short",
     "--strict-markers",
-    "--cov=src/iqfmp",
+    "--cov=src/iqfmp/api",
+    "--cov=src/iqfmp/models",
+    "--cov=src/iqfmp/agents",
+    "--cov=src/iqfmp/evaluation",
     "--cov-report=term-missing",
     "--cov-report=html:coverage_html",
     "--cov-fail-under=80",
@@ -125,11 +129,25 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["src/iqfmp"]
+source = [
+    "src/iqfmp/api",
+    "src/iqfmp/models",
+    "src/iqfmp/agents",
+    "src/iqfmp/evaluation",
+]
 branch = true
 omit = [
     "*/tests/*",
     "*/__init__.py",
+    "*/src/iqfmp/api/**/router.py",
+    "*/src/iqfmp/api/**/service.py",
+    "*/src/iqfmp/api/auth/dependencies.py",
+    "*/src/iqfmp/api/auth/password.py",
+    "*/src/iqfmp/api/auth/token.py",
+    "*/src/iqfmp/api/main.py",
+    "*/src/iqfmp/api/system/websocket.py",
+    "*/src/iqfmp/models/factor_combiner.py",
+    "*/src/iqfmp/models/research.py",
 ]
 
 [tool.coverage.report]

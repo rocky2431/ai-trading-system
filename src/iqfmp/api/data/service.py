@@ -99,7 +99,7 @@ DATA_TYPES = [
         "description": "Perpetual contract funding rate history",
         "requires_futures": True,
         "min_interval": "8h",
-        "supported": False,  # TODO: Implement for futures
+        "supported": True,  # Implemented for futures via CCXT
     },
     {
         "id": "open_interest",
@@ -107,7 +107,7 @@ DATA_TYPES = [
         "description": "Contract open interest quantity",
         "requires_futures": True,
         "min_interval": "5m",
-        "supported": False,  # TODO: Implement for futures
+        "supported": True,  # Implemented for futures via CCXT
     },
     {
         "id": "long_short_ratio",
@@ -115,7 +115,15 @@ DATA_TYPES = [
         "description": "Large/retail trader long/short position ratio",
         "requires_futures": True,
         "min_interval": "5m",
-        "supported": False,  # TODO: Implement for futures
+        "supported": True,  # Implemented for Binance futures HTTP endpoint
+    },
+    {
+        "id": "liquidation",
+        "name": "Liquidation",
+        "description": "Liquidation orders volume",
+        "requires_futures": True,
+        "min_interval": "1m",
+        "supported": True,  # Implemented for Binance futures HTTP endpoint
     },
 ]
 
@@ -404,13 +412,14 @@ class DataService:
         if end_date is None:
             end_date = datetime.now(timezone.utc)
 
-        # Validate timeframe
+        # Validate timeframe (skip for data types that don't require it)
         valid_timeframes = [t["id"] for t in TIMEFRAMES]
-        if timeframe not in valid_timeframes:
-            return StartDownloadResponse(
-                success=False,
-                message=f"Invalid timeframe: {timeframe}. Valid options: {valid_timeframes}",
-            )
+        if data_type not in ["funding_rate", "liquidation", "long_short_ratio"]:
+            if timeframe not in valid_timeframes:
+                return StartDownloadResponse(
+                    success=False,
+                    message=f"Invalid timeframe: {timeframe}. Valid options: {valid_timeframes}",
+                )
 
         # Validate data_type is supported
         supported_data_types = [d["id"] for d in DATA_TYPES if d.get("supported", False)]
@@ -418,6 +427,14 @@ class DataService:
             return StartDownloadResponse(
                 success=False,
                 message=f"Data type '{data_type}' is not yet supported. Supported types: {supported_data_types}",
+            )
+
+        # Futures-only validation
+        futures_only = {d["id"] for d in DATA_TYPES if d.get("requires_futures")}
+        if data_type in futures_only and market_type != "futures":
+            return StartDownloadResponse(
+                success=False,
+                message=f"Data type '{data_type}' requires futures market_type.",
             )
 
         # Create download task

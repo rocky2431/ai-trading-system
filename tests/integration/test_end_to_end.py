@@ -4,7 +4,7 @@
 """
 
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import MagicMock, patch, AsyncMock
 
@@ -41,7 +41,7 @@ class TestEndToEndPipeline:
         assert not is_duplicate
 
         # Step 6: 因子入库
-        factor_id = f"factor_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        factor_id = f"factor_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         assert factor_id is not None
 
     def test_complete_strategy_pipeline(
@@ -73,7 +73,7 @@ class TestEndToEndPipeline:
         assert backtest["performance"]["max_drawdown"] >= -0.2
 
         # Step 6: 策略入库
-        strategy_id = f"strategy_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        strategy_id = f"strategy_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
         assert strategy_id is not None
 
 
@@ -178,7 +178,7 @@ class TestDataFlow:
             "id": factor["factor_id"],
             "name": factor["factor_name"],
             "metrics": factor["metrics"],
-            "stored_at": datetime.utcnow().isoformat(),
+            "stored_at": datetime.now(timezone.utc).isoformat(),
         }
 
         assert factor_record["id"] is not None
@@ -372,7 +372,7 @@ class TestAuditTrail:
         ]
 
         for event in events:
-            event["timestamp"] = datetime.utcnow().isoformat()
+            event["timestamp"] = datetime.now(timezone.utc).isoformat()
             audit_log.append(event)
 
         assert len(audit_log) == 4
@@ -392,7 +392,7 @@ class TestAuditTrail:
         ]
 
         for event in events:
-            event["timestamp"] = datetime.utcnow().isoformat()
+            event["timestamp"] = datetime.now(timezone.utc).isoformat()
             audit_log.append(event)
 
         assert len(audit_log) == 5
@@ -404,7 +404,7 @@ class TestCleanup:
     def test_stale_data_cleanup(self):
         """测试过期数据清理"""
         retention_days = 30
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         data = [
             {"id": "d_001", "created_at": now - timedelta(days=10)},  # 保留

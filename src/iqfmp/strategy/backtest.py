@@ -698,7 +698,7 @@ class BacktestReport:
         Returns:
             Series of monthly returns
         """
-        monthly = self.result.equity_curve.resample("M").last()
+        monthly = self.result.equity_curve.resample("ME").last()
         returns = monthly.pct_change().dropna()
         return returns
 

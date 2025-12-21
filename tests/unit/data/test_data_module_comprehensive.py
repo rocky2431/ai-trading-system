@@ -272,14 +272,13 @@ class TestValidateTimeAlignment:
 
         result = validate_time_alignment(aligned)
 
-        # Result may be a dict with validation info or tuple
-        if isinstance(result, tuple):
-            is_valid, errors = result
-            assert isinstance(is_valid, bool)
-            assert isinstance(errors, list)
-        else:
-            # Returns a dict with validation results
-            assert isinstance(result, dict)
+        # Result is tuple[bool, dict] per function signature
+        assert isinstance(result, tuple)
+        is_valid, details = result
+        assert isinstance(is_valid, bool)
+        assert isinstance(details, dict)
+        # Check expected keys in details
+        assert "expected_rows" in details or "error" in details or "warning" in details
 
 
 # =============================================================================

@@ -10,10 +10,12 @@ Qlib's expression engine. No local pandas/numpy calculations are allowed.
 
 Migration Status:
 =================
-- alpha_benchmark.py: ✅ MIGRATED - Uses ALPHA158_EXPRESSIONS
-- alpha101.py: ⚠️ PENDING - Legacy pandas implementation
-- alpha158.py: ⚠️ PENDING - Legacy pandas implementation
-- alpha360.py: ⚠️ PENDING - Legacy pandas implementation
+- alpha_benchmark.py: ✅ MIGRATED - Uses ALPHA158_EXPRESSIONS (Qlib)
+- alpha101.py: ✅ DELETED - Migrated to ADDITIONAL_EXPRESSIONS
+- alpha158.py: ✅ DELETED - Now uses ALPHA158_EXPRESSIONS from alpha_benchmark
+- alpha360.py: ✅ DELETED - Migrated to ADDITIONAL_EXPRESSIONS
+
+P0-2 Cleanup Complete: ALL factors now use Qlib expression engine.
 
 Usage:
 ======

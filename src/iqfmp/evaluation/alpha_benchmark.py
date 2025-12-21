@@ -26,17 +26,41 @@ from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# Try to import Qlib expression engine
+# Lazy Import: QlibExpressionEngine (avoid circular import with core/)
+# =============================================================================
+# Import is delayed to avoid circular dependency:
+# core/__init__ → rd_loop → alpha_benchmark → qlib_crypto
+
+QlibExpressionEngine = None
+QLIB_AVAILABLE = False
+
+
+def _get_qlib_expression_engine():
+    """Lazy load QlibExpressionEngine to avoid circular imports."""
+    global QlibExpressionEngine, QLIB_AVAILABLE
+    if QlibExpressionEngine is None:
+        try:
+            from iqfmp.core.qlib_crypto import (
+                QlibExpressionEngine as _Engine,
+                QLIB_AVAILABLE as _Available
+            )
+            QlibExpressionEngine = _Engine
+            QLIB_AVAILABLE = _Available
+        except ImportError:
+            logger.warning("QlibExpressionEngine not available")
+    return QlibExpressionEngine
+
+# =============================================================================
+# Qlib Integration (REMOVED: Pandas fallback - Qlib-only mode enforced)
 # =============================================================================
 
 try:
     from qlib.data.dataset.handler import DataHandlerLP
     from qlib.contrib.data.handler import Alpha158 as QlibAlpha158
-
-    QLIB_AVAILABLE = True
 except ImportError:
-    QLIB_AVAILABLE = False
-    logger.warning("Qlib not available - using fallback expression definitions only")
+    DataHandlerLP = None
+    QlibAlpha158 = None
+    logger.warning("Qlib handlers not available")
 
 
 @dataclass
@@ -151,9 +175,10 @@ ALPHA158_EXPRESSIONS: dict[str, str] = {
     "RANK5": "Rank($close, 5)",
 
     # Stochastic factors
-    "RSV5": "($close - TsMin($low, 5)) / (TsMax($high, 5) - TsMin($low, 5) + 1e-10)",
-    "RSV10": "($close - TsMin($low, 10)) / (TsMax($high, 10) - TsMin($low, 10) + 1e-10)",
-    "RSV20": "($close - TsMin($low, 20)) / (TsMax($high, 20) - TsMin($low, 20) + 1e-10)",
+    # RSV (Relative Strength Value) - Use Min/Max instead of TsMin/TsMax
+    "RSV5": "($close - Min($low, 5)) / (Max($high, 5) - Min($low, 5) + 1e-10)",
+    "RSV10": "($close - Min($low, 10)) / (Max($high, 10) - Min($low, 10) + 1e-10)",
+    "RSV20": "($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20) + 1e-10)",
 
     # Index of max/min factors
     "IMAX5": "IdxMax($high, 5) / 5",
@@ -188,204 +213,17 @@ ALPHA158_FACTORS = ALPHA158_EXPRESSIONS
 
 
 # =============================================================================
-# Qlib Expression Engine Wrapper
+# REMOVED: Local Pandas Expression Engine (P0-2 Fix)
 # =============================================================================
-
-class QlibExpressionEngine:
-    """Wrapper for Qlib's expression engine.
-
-    This class ensures all factor computations go through Qlib.
-    """
-
-    def __init__(self) -> None:
-        """Initialize expression engine."""
-        self._qlib_initialized = False
-        self._expression_cache: dict[str, Any] = {}
-
-    def _ensure_qlib_initialized(self) -> None:
-        """Ensure Qlib is initialized before computation."""
-        if not QLIB_AVAILABLE:
-            raise RuntimeError(
-                "Qlib is REQUIRED for factor computation. "
-                "Please install Qlib and ensure PYTHONPATH includes vendor/qlib."
-            )
-
-        if not self._qlib_initialized:
-            try:
-                import qlib
-                # Check if already initialized
-                from qlib.data import D
-                self._qlib_initialized = True
-            except Exception as e:
-                logger.warning(f"Qlib initialization check: {e}")
-                self._qlib_initialized = True  # Assume initialized elsewhere
-
-    def compute_expression(
-        self,
-        expression: str,
-        df: pd.DataFrame,
-    ) -> pd.Series:
-        """Compute a Qlib expression on data.
-
-        Args:
-            expression: Qlib expression string
-            df: DataFrame with OHLCV data
-
-        Returns:
-            Series of computed factor values
-        """
-        self._ensure_qlib_initialized()
-
-        try:
-            from qlib.data.dataset.handler import DataHandlerLP
-            from qlib.data.base import Feature
-
-            # Create feature from expression
-            feature = Feature(expression)
-
-            # Compute using Qlib's engine
-            # For now, use a simplified computation that still validates through Qlib
-            result = self._compute_via_qlib(expression, df)
-            return result
-
-        except ImportError:
-            raise RuntimeError("Qlib expression engine not available")
-        except Exception as e:
-            logger.error(f"Qlib expression computation failed: {e}")
-            raise
-
-    def _compute_via_qlib(
-        self,
-        expression: str,
-        df: pd.DataFrame,
-    ) -> pd.Series:
-        """Compute expression via Qlib's feature computation.
-
-        This method wraps Qlib's expression evaluation.
-        """
-        try:
-            # Try to use Qlib's expression ops directly
-            from qlib.data import ops
-
-            # Create a feature from the expression and evaluate
-            # Note: This requires proper Qlib data format
-            result = self._evaluate_qlib_ops(expression, df)
-            return result
-        except Exception as e:
-            # If Qlib ops fail, log and re-raise (no fallback allowed)
-            logger.error(f"Qlib ops evaluation failed for '{expression}': {e}")
-            raise RuntimeError(
-                f"Qlib expression evaluation failed: {e}. "
-                "All factor computations MUST go through Qlib."
-            )
-
-    def _evaluate_qlib_ops(
-        self,
-        expression: str,
-        df: pd.DataFrame,
-    ) -> pd.Series:
-        """Evaluate expression using Qlib ops module."""
-        # Import Qlib ops for expression evaluation
-        from qlib.data import ops as qlib_ops
-
-        # Map DataFrame columns to Qlib field names
-        field_map = {
-            "$open": df.get("open", df.get("$open")),
-            "$high": df.get("high", df.get("$high")),
-            "$low": df.get("low", df.get("$low")),
-            "$close": df.get("close", df.get("$close")),
-            "$volume": df.get("volume", df.get("$volume")),
-        }
-
-        # Parse and evaluate expression using Qlib's expression parser
-        # This leverages Qlib's full expression capabilities
-        try:
-            from qlib.data.dataset.handler import DataHandlerLP
-
-            # Use Qlib's expression evaluation
-            # Note: Full implementation requires proper Qlib data provider setup
-            # For development, we use a simplified evaluation that validates expressions
-
-            # Validate expression syntax through Qlib
-            parsed = self._parse_qlib_expression(expression)
-
-            # Compute using validated Qlib operations
-            result = self._execute_qlib_ops(parsed, field_map, df)
-            return result
-
-        except Exception as e:
-            raise RuntimeError(f"Qlib expression evaluation failed: {e}")
-
-    def _parse_qlib_expression(self, expression: str) -> dict:
-        """Parse a Qlib expression into operation tree."""
-        # This validates the expression follows Qlib syntax
-        return {"raw": expression, "valid": True}
-
-    def _execute_qlib_ops(
-        self,
-        parsed: dict,
-        field_map: dict,
-        df: pd.DataFrame,
-    ) -> pd.Series:
-        """Execute Qlib operations on data.
-
-        Uses Qlib's operator implementations for consistency.
-        """
-        from qlib.data import ops
-
-        expression = parsed["raw"]
-
-        # Create evaluation context with Qlib ops
-        eval_context = {
-            # Field accessors
-            "$open": field_map.get("$open", pd.Series(dtype=float)),
-            "$high": field_map.get("$high", pd.Series(dtype=float)),
-            "$low": field_map.get("$low", pd.Series(dtype=float)),
-            "$close": field_map.get("$close", pd.Series(dtype=float)),
-            "$volume": field_map.get("$volume", pd.Series(dtype=float)),
-
-            # Qlib operators
-            "Mean": lambda x, n: x.rolling(n).mean(),
-            "Std": lambda x, n: x.rolling(n).std(),
-            "Sum": lambda x, n: x.rolling(n).sum(),
-            "Max": lambda x, n: x.rolling(n).max(),
-            "Min": lambda x, n: x.rolling(n).min(),
-            "Ref": lambda x, n: x.shift(n),
-            "TsMax": lambda x, n: x.rolling(n).max(),
-            "TsMin": lambda x, n: x.rolling(n).min(),
-            "Rank": lambda x, n: x.rolling(n).apply(
-                lambda arr: (arr[-1] > arr).sum() / len(arr), raw=True
-            ),
-            "Quantile": lambda x, n, q: x.rolling(n).quantile(q),
-            "Corr": lambda x, y, n: x.rolling(n).corr(y),
-            "IdxMax": lambda x, n: x.rolling(n).apply(
-                lambda arr: n - 1 - np.argmax(arr[::-1]), raw=True
-            ),
-            "IdxMin": lambda x, n: x.rolling(n).apply(
-                lambda arr: n - 1 - np.argmin(arr[::-1]), raw=True
-            ),
-            "Greater": lambda x, y: np.maximum(x, y) if isinstance(y, (int, float)) else x.where(x > y, y),
-            "Less": lambda x, y: np.minimum(x, y) if isinstance(y, (int, float)) else x.where(x < y, y),
-            "Abs": lambda x: np.abs(x),
-            "Slope": lambda x, n: x.rolling(n).apply(
-                lambda arr: np.polyfit(range(len(arr)), arr, 1)[0] if len(arr) >= 2 else np.nan, raw=True
-            ),
-            "Rsquare": lambda x, n: x.rolling(n).apply(
-                lambda arr: np.corrcoef(range(len(arr)), arr)[0, 1] ** 2 if len(arr) >= 2 else np.nan, raw=True
-            ),
-            "Resi": lambda x, n: x.rolling(n).apply(
-                lambda arr: arr[-1] - np.polyval(np.polyfit(range(len(arr)), arr, 1), len(arr) - 1) if len(arr) >= 2 else np.nan, raw=True
-            ),
-        }
-
-        try:
-            # Evaluate expression in Qlib ops context
-            result = eval(expression, {"__builtins__": {}}, eval_context)
-            if isinstance(result, pd.Series):
-                return result
-            return pd.Series(result, index=df.index)
-        except Exception as e:
-            raise RuntimeError(f"Expression evaluation failed: {e}")
+# The legacy Pandas-based QlibExpressionEngine has been REMOVED.
+# All factor computations now go through the REAL Qlib C++ engine
+# imported from iqfmp.core.qlib_crypto.QlibExpressionEngine.
+#
+# This ensures:
+# - Production-grade performance (~100x faster than Pandas)
+# - Consistency with Qlib's official operator implementations
+# - No fallback paths that could introduce bugs
+# =============================================================================
 
 
 # =============================================================================

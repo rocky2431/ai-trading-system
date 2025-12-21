@@ -73,20 +73,30 @@ except ImportError:
     DataLoadResult = None
     DerivativeType = None
 
-# Import Alpha158/360 factor libraries
-try:
-    from iqfmp.evaluation.alpha158 import ALPHA158_FACTORS
-    ALPHA158_AVAILABLE = True
-except ImportError:
-    ALPHA158_FACTORS = {}
-    ALPHA158_AVAILABLE = False
+# =============================================================================
+# Unified Qlib Factor Library (P0-2 Migration: Pandas → Qlib Expressions)
+# =============================================================================
+# ALL factor computations now go through Qlib expression engine.
+# Legacy Pandas implementations (alpha158.py, alpha360.py) have been REMOVED.
 
 try:
-    from iqfmp.evaluation.alpha360 import ALPHA360_FACTORS
-    ALPHA360_AVAILABLE = True
+    from iqfmp.evaluation.qlib_factor_library import (
+        QLIB_FACTOR_EXPRESSIONS,
+        ALPHA158_EXPRESSIONS,
+        ADDITIONAL_EXPRESSIONS,
+        list_factors,
+        list_factors_by_category,
+    )
+    from iqfmp.core.qlib_crypto import QlibExpressionEngine
+    QLIB_FACTORS_AVAILABLE = True
 except ImportError:
-    ALPHA360_FACTORS = {}
-    ALPHA360_AVAILABLE = False
+    QLIB_FACTOR_EXPRESSIONS = {}
+    ALPHA158_EXPRESSIONS = {}
+    ADDITIONAL_EXPRESSIONS = {}
+    list_factors = lambda: []
+    list_factors_by_category = lambda: {}
+    QlibExpressionEngine = None
+    QLIB_FACTORS_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -1156,14 +1166,16 @@ class FactorEvaluator:
         return 0.0
 
     # =========================================================================
-    # Alpha158/360 Factor Library Integration
+    # Unified Qlib Factor Library (P0-2: Migrated from Pandas to Qlib)
     # =========================================================================
+    # ALL factor computations use Qlib expression engine.
+    # Legacy Pandas implementations (alpha158.py, alpha360.py) REMOVED.
 
-    def get_alpha158_factor(self, factor_name: str) -> pd.Series:
-        """Compute a single Alpha158 factor.
+    def get_qlib_factor(self, factor_name: str) -> pd.Series:
+        """Compute a factor using Qlib expression engine.
 
         Args:
-            factor_name: Name of the Alpha158 factor (e.g., "KMID", "ROC5", "RSI14")
+            factor_name: Name of the factor (e.g., "KMID", "ROC5", "RSI14")
 
         Returns:
             Series of factor values
@@ -1174,56 +1186,75 @@ class FactorEvaluator:
         if self._df is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
-        if not ALPHA158_AVAILABLE:
-            raise ValueError("Alpha158 factors not available. Install dependencies.")
+        if not QLIB_FACTORS_AVAILABLE:
+            raise ValueError("Qlib factor library not available.")
 
-        if factor_name not in ALPHA158_FACTORS:
-            available = ", ".join(sorted(ALPHA158_FACTORS.keys())[:10])
+        if factor_name not in QLIB_FACTOR_EXPRESSIONS:
+            available = ", ".join(sorted(QLIB_FACTOR_EXPRESSIONS.keys())[:10])
             raise ValueError(
                 f"Factor '{factor_name}' not found. Available: {available}... "
-                f"(Total: {len(ALPHA158_FACTORS)} factors)"
+                f"(Total: {len(QLIB_FACTOR_EXPRESSIONS)} factors)"
             )
 
-        factor_func = ALPHA158_FACTORS[factor_name]
-        return factor_func(self._df)
+        # Use Qlib expression engine
+        expression = QLIB_FACTOR_EXPRESSIONS[factor_name]
+        engine = QlibExpressionEngine()
+        return engine.compute_expression(expression, self._df, factor_name)
 
-    def compute_alpha158_factors(
-        self,
-        factor_names: Optional[list[str]] = None,
-        parallel: bool = False,
-    ) -> pd.DataFrame:
-        """Compute multiple Alpha158 factors in batch.
+    def get_alpha158_factor(self, factor_name: str) -> pd.Series:
+        """Compute a single Alpha158 factor (Qlib expression engine).
 
         Args:
-            factor_names: List of factor names, or None for all 158 factors
-            parallel: Use parallel computation (for large datasets)
+            factor_name: Name of the Alpha158 factor (e.g., "KMID", "ROC5")
+
+        Returns:
+            Series of factor values
+        """
+        if factor_name not in ALPHA158_EXPRESSIONS:
+            available = ", ".join(sorted(ALPHA158_EXPRESSIONS.keys())[:10])
+            raise ValueError(
+                f"Alpha158 factor '{factor_name}' not found. Available: {available}..."
+            )
+        return self.get_qlib_factor(factor_name)
+
+    def compute_qlib_factors(
+        self,
+        factor_names: Optional[list[str]] = None,
+        factor_set: str = "all",
+    ) -> pd.DataFrame:
+        """Compute multiple factors using Qlib expression engine.
+
+        Args:
+            factor_names: List of factor names, or None for all factors
+            factor_set: "all", "alpha158", or "additional"
 
         Returns:
             DataFrame with all computed factors
-
-        Raises:
-            ValueError: If data not loaded
         """
         if self._df is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
-        if not ALPHA158_AVAILABLE:
-            raise ValueError("Alpha158 factors not available. Install dependencies.")
+        if not QLIB_FACTORS_AVAILABLE:
+            raise ValueError("Qlib factor library not available.")
 
-        # Use all factors if none specified
-        names = factor_names or list(ALPHA158_FACTORS.keys())
+        # Select factor set
+        if factor_names:
+            expressions = {n: QLIB_FACTOR_EXPRESSIONS[n] for n in factor_names
+                          if n in QLIB_FACTOR_EXPRESSIONS}
+        elif factor_set == "alpha158":
+            expressions = ALPHA158_EXPRESSIONS
+        elif factor_set == "additional":
+            expressions = ADDITIONAL_EXPRESSIONS
+        else:
+            expressions = QLIB_FACTOR_EXPRESSIONS
 
+        engine = QlibExpressionEngine()
         results = {}
         failed = []
 
-        for name in names:
-            if name not in ALPHA158_FACTORS:
-                logger.warning(f"Factor '{name}' not found, skipping")
-                continue
-
+        for name, expr in expressions.items():
             try:
-                factor_func = ALPHA158_FACTORS[name]
-                results[name] = factor_func(self._df)
+                results[name] = engine.compute_expression(expr, self._df, name)
             except Exception as e:
                 logger.warning(f"Failed to compute {name}: {e}")
                 failed.append(name)
@@ -1231,72 +1262,73 @@ class FactorEvaluator:
         if failed:
             logger.warning(f"Failed factors: {', '.join(failed)}")
 
-        logger.info(f"Computed {len(results)}/{len(names)} Alpha158 factors")
+        logger.info(f"Computed {len(results)}/{len(expressions)} Qlib factors")
         return pd.DataFrame(results, index=self._df.index)
 
-    def get_alpha360_factor(self, factor_name: str) -> pd.Series:
-        """Compute a single Alpha360 factor.
+    def compute_alpha158_factors(
+        self,
+        factor_names: Optional[list[str]] = None,
+        parallel: bool = False,
+    ) -> pd.DataFrame:
+        """Compute Alpha158 factors using Qlib expression engine.
 
         Args:
-            factor_name: Name of the Alpha360 factor
+            factor_names: List of factor names, or None for all Alpha158 factors
+            parallel: Ignored (kept for API compatibility)
+
+        Returns:
+            DataFrame with all computed factors
+        """
+        if factor_names:
+            # Filter to only Alpha158 factors
+            names = [n for n in factor_names if n in ALPHA158_EXPRESSIONS]
+        else:
+            names = list(ALPHA158_EXPRESSIONS.keys())
+        return self.compute_qlib_factors(factor_names=names)
+
+    def get_alpha360_factor(self, factor_name: str) -> pd.Series:
+        """Compute a single Alpha360-style factor (Qlib expression engine).
+
+        Args:
+            factor_name: Name of the factor
 
         Returns:
             Series of factor values
         """
-        if self._df is None:
-            raise ValueError("No data loaded. Call load_data() first.")
-
-        if not ALPHA360_AVAILABLE:
-            raise ValueError("Alpha360 factors not available. Install dependencies.")
-
-        if factor_name not in ALPHA360_FACTORS:
-            raise ValueError(f"Factor '{factor_name}' not found in Alpha360")
-
-        factor_func = ALPHA360_FACTORS[factor_name]
-        return factor_func(self._df)
+        return self.get_qlib_factor(factor_name)
 
     def compute_alpha360_factors(
         self,
         factor_names: Optional[list[str]] = None,
     ) -> pd.DataFrame:
-        """Compute multiple Alpha360 factors in batch.
+        """Compute Alpha360-style factors using Qlib expression engine.
 
         Args:
-            factor_names: List of factor names, or None for all factors
+            factor_names: List of factor names, or None for all additional factors
 
         Returns:
             DataFrame with all computed factors
         """
-        if self._df is None:
-            raise ValueError("No data loaded. Call load_data() first.")
-
-        if not ALPHA360_AVAILABLE:
-            raise ValueError("Alpha360 factors not available. Install dependencies.")
-
-        names = factor_names or list(ALPHA360_FACTORS.keys())
-
-        results = {}
-        for name in names:
-            if name in ALPHA360_FACTORS:
-                try:
-                    results[name] = ALPHA360_FACTORS[name](self._df)
-                except Exception as e:
-                    logger.warning(f"Failed to compute {name}: {e}")
-
-        logger.info(f"Computed {len(results)}/{len(names)} Alpha360 factors")
-        return pd.DataFrame(results, index=self._df.index)
+        if factor_names:
+            names = [n for n in factor_names if n in ADDITIONAL_EXPRESSIONS]
+        else:
+            names = list(ADDITIONAL_EXPRESSIONS.keys())
+        return self.compute_qlib_factors(factor_names=names)
 
     def list_alpha_factors(self) -> dict[str, list[str]]:
-        """List all available Alpha factors.
+        """List all available Qlib factors.
 
         Returns:
-            Dictionary with 'alpha158' and 'alpha360' factor lists
+            Dictionary with factor lists by category
         """
         return {
-            "alpha158": sorted(ALPHA158_FACTORS.keys()) if ALPHA158_AVAILABLE else [],
-            "alpha360": sorted(ALPHA360_FACTORS.keys()) if ALPHA360_AVAILABLE else [],
-            "alpha158_count": len(ALPHA158_FACTORS) if ALPHA158_AVAILABLE else 0,
-            "alpha360_count": len(ALPHA360_FACTORS) if ALPHA360_AVAILABLE else 0,
+            "alpha158": sorted(ALPHA158_EXPRESSIONS.keys()) if QLIB_FACTORS_AVAILABLE else [],
+            "additional": sorted(ADDITIONAL_EXPRESSIONS.keys()) if QLIB_FACTORS_AVAILABLE else [],
+            "all": list_factors() if QLIB_FACTORS_AVAILABLE else [],
+            "alpha158_count": len(ALPHA158_EXPRESSIONS) if QLIB_FACTORS_AVAILABLE else 0,
+            "additional_count": len(ADDITIONAL_EXPRESSIONS) if QLIB_FACTORS_AVAILABLE else 0,
+            "total_count": len(QLIB_FACTOR_EXPRESSIONS) if QLIB_FACTORS_AVAILABLE else 0,
+            "by_category": list_factors_by_category() if QLIB_FACTORS_AVAILABLE else {},
         }
 
     def evaluate_alpha158_factors(
@@ -1316,7 +1348,7 @@ class FactorEvaluator:
         if self._df is None:
             raise ValueError("No data loaded. Call load_data() first.")
 
-        # Compute all factors
+        # Compute all factors using Qlib
         factors_df = self.compute_alpha158_factors(factor_names)
 
         results = []

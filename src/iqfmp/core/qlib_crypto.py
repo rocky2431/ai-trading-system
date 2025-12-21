@@ -149,17 +149,48 @@ class QlibExpressionEngine:
         if self._qlib_available:
             try:
                 from qlib.data.ops import (
-                    Ref, Mean, Std, Max, Min, Abs, If,
-                    EMA, Corr, Rank, Sum, Idxmax, Idxmin
+                    # Element-wise operators
+                    Abs, Sign, Log, Mask, Not,
+                    # Pair operators
+                    Power, Add, Sub, Mul, Div,
+                    Greater, Less, Gt, Ge, Lt, Le, Eq, Ne, And, Or,
+                    # Conditional
+                    If,
+                    # Rolling operators (standard)
+                    Ref, Mean, Sum, Std, Var, Skew, Kurt,
+                    Max, Min, IdxMax, IdxMin,
+                    Quantile, Med, Mad, Rank, Count, Delta,
+                    # Rolling operators with C++ extensions (Resi, Slope, Rsquare)
+                    Slope, Rsquare, Resi,
+                    # Moving averages
+                    WMA, EMA,
+                    # Pair rolling
+                    Corr, Cov,
                 )
                 self._ops_cache = {
-                    "Ref": Ref, "Mean": Mean, "Std": Std,
-                    "Max": Max, "Min": Min, "Abs": Abs, "If": If,
-                    "EMA": EMA, "Corr": Corr, "Rank": Rank, "Sum": Sum,
-                    "Idxmax": Idxmax, "Idxmin": Idxmin,
+                    # Element-wise
+                    "Abs": Abs, "Sign": Sign, "Log": Log, "Mask": Mask, "Not": Not,
+                    # Pair operators
+                    "Power": Power, "Add": Add, "Sub": Sub, "Mul": Mul, "Div": Div,
+                    "Greater": Greater, "Less": Less, "Gt": Gt, "Ge": Ge,
+                    "Lt": Lt, "Le": Le, "Eq": Eq, "Ne": Ne, "And": And, "Or": Or,
+                    # Conditional
+                    "If": If,
+                    # Rolling operators (standard)
+                    "Ref": Ref, "Mean": Mean, "Sum": Sum, "Std": Std, "Var": Var,
+                    "Skew": Skew, "Kurt": Kurt, "Max": Max, "Min": Min,
+                    "Idxmax": IdxMax, "Idxmin": IdxMin,
+                    "Quantile": Quantile, "Med": Med, "Mad": Mad,
+                    "Rank": Rank, "Count": Count, "Delta": Delta,
+                    # C++ extension operators (expanding/rolling resi, slope, rsquare)
+                    "Slope": Slope, "Rsquare": Rsquare, "Resi": Resi,
+                    # Moving averages
+                    "WMA": WMA, "EMA": EMA,
+                    # Pair rolling
+                    "Corr": Corr, "Cov": Cov,
                 }
-            except ImportError:
-                logger.warning("Some Qlib ops not available")
+            except ImportError as e:
+                logger.warning(f"Some Qlib ops not available: {e}")
 
     def compute_indicator(
         self,
@@ -284,25 +315,15 @@ class QlibExpressionEngine:
         expr: str,
         features: dict[str, Any],
     ) -> pd.Series:
-        """Evaluate expression using Qlib operators."""
-        # Import Qlib ops
-        from qlib.data import ops
+        """Evaluate expression using Qlib operators.
 
-        # Build evaluation context
-        context = {
-            "Ref": ops.Ref,
-            "Mean": ops.Mean,
-            "Std": ops.Std,
-            "Max": ops.Max,
-            "Min": ops.Min,
-            "Abs": ops.Abs,
-            "EMA": getattr(ops, "EMA", ops.Mean),  # Fallback if EMA not available
-            "If": getattr(ops, "If", lambda c, t, f: t if c else f),
-            "Sum": ops.Sum,
-            "Corr": ops.Corr,
-            "Rank": ops.Rank,
-            **features,
-        }
+        Uses the full operator set from _ops_cache, including C++ extensions:
+        - Resi, Slope, Rsquare (expanding/rolling regression)
+        - All standard rolling operators (Mean, Std, Var, Skew, Kurt, etc.)
+        - Pair rolling operators (Corr, Cov)
+        """
+        # Build evaluation context from cached operators
+        context = {**self._ops_cache, **features}
 
         # Evaluate (simplified - real impl would use proper parser)
         try:

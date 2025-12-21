@@ -205,7 +205,7 @@ class FactorEvaluationAgent:
         self.llm_provider = llm_provider
         # Qlib expression engine for factor_value computation (expression-only by default).
         from iqfmp.core.qlib_crypto import QlibExpressionEngine
-        self._expression_engine = QlibExpressionEngine(require_qlib=False)
+        self._expression_engine = QlibExpressionEngine(require_qlib=True)
 
         # Create evaluator with config
         eval_config = EvaluationConfig(

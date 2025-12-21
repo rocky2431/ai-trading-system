@@ -818,6 +818,8 @@ class FactorEvaluator:
         rank_ic = self.calculator.calculate_rank_ic(df[factor_col], df[return_col])
 
         # Calculate IC series by period for IR
+        # Avoid SettingWithCopyWarning when df is derived from a slice.
+        df = df.copy()
         df["_period"] = df["_date"].dt.to_period("M")
         ic_series = []
 

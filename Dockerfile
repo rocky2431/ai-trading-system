@@ -1,5 +1,6 @@
 # ==================== Builder Stage ====================
-FROM python:3.11-slim as builder
+# NOTE: Project requires Python >=3.12 (see pyproject.toml)
+FROM python:3.12-slim as builder
 
 WORKDIR /app
 
@@ -20,7 +21,7 @@ RUN pip install --no-cache-dir build && \
     pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -e ".[qlib]"
 
 # ==================== Production Stage ====================
-FROM python:3.11-slim as production
+FROM python:3.12-slim as production
 
 WORKDIR /app
 

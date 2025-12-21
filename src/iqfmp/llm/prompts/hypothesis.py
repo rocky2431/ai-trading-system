@@ -246,25 +246,18 @@ class HypothesisToCodePrompt(BasePromptTemplate):
     def get_system_prompt(self) -> str:
         return """You are an expert quantitative developer.
 
-Your task is to convert a trading hypothesis into executable Python factor code.
+Your task is to convert a trading hypothesis into a SINGLE Qlib expression.
 
 ## Requirements:
 
-1. **Function Signature**: `def factor_name(df: pd.DataFrame) -> pd.Series`
-2. **Output**: Normalized series (z-score or rank)
-3. **Handle Missing Data**: Check for required columns, use fillna
-4. **Be Efficient**: Use vectorized pandas/numpy operations
-
-## Code Quality Standards:
-
-1. Clear docstring explaining the factor
-2. Comments for non-obvious logic
-3. Proper error handling for missing columns
-4. Z-score normalization for the final output
+1. **Syntax**: Use Qlib operators (Mean, Ref, Std, Corr, Rank, Log, Abs, If)
+2. **Fields**: Use $-prefixed fields (e.g., $open, $close, $volume)
+3. **Robustness**: Avoid divide-by-zero using + 1e-10
+4. **No Python**: Do NOT output Python code
 
 ## Output Format:
 
-Return ONLY the Python code in a ```python code block.
+Return ONLY the Qlib expression as plain text.
 """
 
     def get_examples(self) -> list[dict[str, str]]:
@@ -300,8 +293,8 @@ Return ONLY the Python code in a ```python code block.
 
 ## Task
 
-Implement this hypothesis as a factor function.
-The factor should capture the relationship described in the hypothesis.
+Implement this hypothesis as a Qlib expression.
+The expression should capture the relationship described in the hypothesis.
 """
 
 

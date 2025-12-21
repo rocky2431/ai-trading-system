@@ -39,7 +39,7 @@ from iqfmp.agents.orchestrator import (
     MemorySaver,
     PostgresCheckpointSaver,
 )
-from iqfmp.agents.hypothesis_agent import HypothesisAgent
+from iqfmp.agents.hypothesis_agent import HypothesisAgent, HypothesisFamily
 from iqfmp.agents.factor_generation import (
     FactorFamily,
     FactorGenerationAgent,
@@ -345,6 +345,9 @@ class PipelineBuilder:
             except Exception as e:
                 logger.warning(f"Failed to inject default evaluation_data: {e}")
 
+        if context.get("market_data") is None and context.get("evaluation_data") is not None:
+            context["market_data"] = context["evaluation_data"]
+
         return state.update(context=context)
 
     async def _hypothesis_node(self, state: AgentState) -> AgentState:
@@ -352,13 +355,28 @@ class PipelineBuilder:
         logger.info("Generating hypotheses")
         agent = self._agents.get("hypothesis")
         if agent:
-            # Use hypothesis agent
             context = state.context.copy()
             context["pipeline_stage"] = "hypothesis"
-            # Generate hypotheses based on context
-            hypotheses = agent.generate(
-                market=context.get("market", "crypto"),
-                n_hypotheses=context.get("n_hypotheses", 3),
+            market_data = context.get("market_data")
+            if market_data is None:
+                market_data = context.get("evaluation_data")
+            if market_data is None:
+                logger.warning("No market_data/evaluation_data for hypothesis generation")
+                context["hypotheses"] = []
+                return state.update(context=context)
+
+            focus_family = context.get("focus_family")
+            if isinstance(focus_family, str):
+                try:
+                    focus_family = HypothesisFamily(focus_family)
+                except ValueError:
+                    logger.warning("Unknown focus_family: %s", focus_family)
+                    focus_family = None
+
+            hypotheses = agent.generate_hypotheses(
+                market_data=market_data,
+                n_hypotheses=int(context.get("n_hypotheses", 3)),
+                focus_family=focus_family if isinstance(focus_family, HypothesisFamily) else None,
             )
             context["hypotheses"] = [h.to_dict() for h in hypotheses]
             return state.update(context=context)

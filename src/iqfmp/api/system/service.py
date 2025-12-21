@@ -668,14 +668,14 @@ class SystemService:
                 "name": "Factor Generator",
                 "description": "AI agent for generating quantitative factors using LLM",
                 "system_prompt": """You are a quantitative factor generation expert.
-Your task is to generate valid Python code for calculating quantitative factors.
+Your task is to generate a SINGLE Qlib expression for calculating quantitative factors.
 
 Rules:
-1. Use only allowed libraries: numpy, pandas, talib
-2. Factor code must be a function that takes a DataFrame with OHLCV columns
-3. Return a pandas Series with the factor values
-4. Include proper error handling
-5. Document the factor's logic and expected behavior""",
+1. Use Qlib operators (Mean, Ref, Std, Corr, Rank, Log, Abs, If)
+2. Use $-prefixed field names (e.g., $open, $close, $volume)
+3. Keep expressions robust with + 1e-10 where needed
+4. Do NOT output Python code
+5. Document the factor's logic in plain language only if asked""",
                 "user_prompt_template": """Generate a quantitative factor based on the following description:
 
 {description}
@@ -684,31 +684,15 @@ Target task: {target_task}
 Factor family: {family}
 
 Requirements:
-- Function name should be descriptive
-- Include docstring explaining the factor
-- Handle edge cases (NaN, insufficient data)
-- Return a pandas Series""",
-                "examples": """Example factor code:
+- Return ONLY the Qlib expression""",
+                "examples": """Example factor expression:
 
-def momentum_factor(df: pd.DataFrame, window: int = 20) -> pd.Series:
-    \"\"\"Calculate price momentum over a window period.
-
-    Args:
-        df: DataFrame with 'close' column
-        window: Lookback window for momentum calculation
-
-    Returns:
-        Series of momentum values (current price / past price - 1)
-    \"\"\"
-    if len(df) < window:
-        return pd.Series(index=df.index, dtype=float)
-
-    return df['close'].pct_change(window)""",
+($close / Ref($close, 20) - 1)""",
                 "config": {
                     "security_check_enabled": True,
                     "field_constraint_enabled": True,
                     "max_code_length": 5000,
-                    "allowed_imports": ["numpy", "pandas", "talib"],
+                    "allowed_imports": [],
                 },
             },
             {
@@ -819,5 +803,4 @@ Parameters:
                 success=False,
                 message=f"Failed to initialize agent configs: {str(e)}",
             )
-
 

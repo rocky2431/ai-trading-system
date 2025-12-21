@@ -5,7 +5,7 @@
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Generator
 from unittest.mock import MagicMock, patch
 
@@ -113,7 +113,7 @@ def sample_factor_result() -> dict[str, Any]:
             "regime_stability": random.uniform(0.55, 0.8),
         },
         "passed_threshold": True,
-        "evaluation_date": datetime.utcnow().isoformat(),
+        "evaluation_date": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -263,7 +263,7 @@ def mock_exchange_adapter():
                 "amount": amount,
                 "price": price,
                 "status": "filled",
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
             self.orders.append(order)
             return order

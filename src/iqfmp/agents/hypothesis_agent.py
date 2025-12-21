@@ -68,24 +68,18 @@ Focus on hypotheses that are:
 
 Output your hypotheses in JSON format."""
 
-CODE_GENERATION_SYSTEM_PROMPT = """You are an expert Python developer specializing in quantitative finance.
+CODE_GENERATION_SYSTEM_PROMPT = """You are an expert quantitative developer specializing in Qlib factor research.
 
-Your task is to convert trading hypotheses into executable factor code that works with pandas DataFrames.
+Your task is to convert trading hypotheses into a SINGLE Qlib expression.
 
 Requirements:
-1. The function must accept a DataFrame with OHLCV columns: open, high, low, close, volume
-2. Return a pandas Series of factor values (typically z-scored)
-3. Handle edge cases (NaN, insufficient data)
-4. Use only pandas, numpy - no external dependencies
-5. Apply proper normalization (z-score with rolling mean/std)
+1. Use Qlib expression syntax (e.g., Mean, Ref, Std, Corr, Rank, Log, Abs, If)
+2. Use $-prefixed field names (e.g., $open, $close, $volume)
+3. Prefer robust normalization where appropriate
+4. Do NOT output Python code
 
 Output format:
-```python
-def factor_name(df):
-    \"\"\"Docstring explaining the factor.\"\"\"
-    # Your implementation
-    return factor_values
-```"""
+Return ONLY the Qlib expression as plain text."""
 
 FEEDBACK_SYSTEM_PROMPT = """You are an expert quantitative researcher analyzing factor performance results.
 
@@ -582,97 +576,21 @@ Generate exactly {n_hypotheses} hypotheses in the following JSON format:
 
 
 class HypothesisToCode:
-    """Convert trading hypotheses to executable factor code using LLM.
+    """Convert trading hypotheses to Qlib factor expressions using LLM.
 
     Uses frontend-configured model from ConfigService via model_config.py.
     Falls back to template-based conversion if LLM is unavailable.
     """
 
-    # Code templates for each family (fallback)
+    # Qlib expression templates for each hypothesis (fallback)
     CODE_TEMPLATES: dict[str, str] = {
-        "Price Momentum": '''
-def {func_name}(df):
-    """Price momentum factor - {period}d returns."""
-    returns = df["close"].pct_change({period})
-    factor = (returns - returns.rolling(60).mean()) / (returns.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
-        "RSI Oversold Reversal": '''
-def {func_name}(df):
-    """RSI mean reversion factor."""
-    delta = df["close"].diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / (loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    # Long when RSI oversold, short when overbought
-    factor = 50 - rsi  # Negative = overbought, Positive = oversold
-    factor = (factor - factor.rolling(60).mean()) / (factor.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
-        "Low Volatility Premium": '''
-def {func_name}(df):
-    """Low volatility premium factor."""
-    import numpy as np
-    returns = df["close"].pct_change()
-    vol = returns.rolling(20).std() * np.sqrt(252)
-    # Negative because low vol is good
-    factor = -vol
-    factor = (factor - factor.rolling(60).mean()) / (factor.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
-        "Volatility Breakout": '''
-def {func_name}(df):
-    """Volatility breakout factor - compression predicts expansion."""
-    import numpy as np
-    returns = df["close"].pct_change()
-    vol_short = returns.rolling(5).std()
-    vol_long = returns.rolling(20).std()
-    # Low short-term vol relative to long-term = compression
-    compression = -vol_short / (vol_long + 1e-10)
-    # Direction based on price momentum
-    momentum = np.sign(returns.rolling(5).mean())
-    factor = compression * momentum
-    factor = (factor - factor.rolling(60).mean()) / (factor.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
-        "Funding Rate Mean Reversion": '''
-def {func_name}(df):
-    """Funding rate mean reversion factor (crypto-specific)."""
-    if "funding_rate" not in df.columns:
-        return df["close"] * 0  # Return zeros if no funding data
-    funding = df["funding_rate"]
-    # Short when funding extreme positive, long when extreme negative
-    factor = -funding
-    factor = (factor - factor.rolling(60).mean()) / (factor.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
-        "Bollinger Band Mean Reversion": '''
-def {func_name}(df):
-    """Bollinger band mean reversion factor."""
-    ma20 = df["close"].rolling(20).mean()
-    std20 = df["close"].rolling(20).std()
-    upper = ma20 + 2 * std20
-    lower = ma20 - 2 * std20
-    # Position within band (-1 to 1)
-    bb_position = (df["close"] - ma20) / (2 * std20 + 1e-10)
-    # Mean reversion: short when high, long when low
-    factor = -bb_position
-    return factor.fillna(0)
-''',
-        "Volume Confirmation": '''
-def {func_name}(df):
-    """Volume-confirmed momentum factor."""
-    import numpy as np
-    if "volume" not in df.columns:
-        return df["close"] * 0
-    returns = df["close"].pct_change()
-    vol_ratio = df["volume"] / df["volume"].rolling(20).mean()
-    # Momentum confirmed by high volume
-    factor = returns.rolling(5).mean() * vol_ratio
-    factor = (factor - factor.rolling(60).mean()) / (factor.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
+        "Price Momentum": "($close / Ref($close, {period}) - 1)",
+        "RSI Oversold Reversal": "50 - (100 - (100 / (1 + (Mean(If(Ref($close, 1) < $close, $close - Ref($close, 1), 0), 14) / (Mean(If(Ref($close, 1) > $close, Ref($close, 1) - $close, 0), 14) + 1e-10)))))",
+        "Low Volatility Premium": "-1 * Std($close / Ref($close, 1) - 1, 20)",
+        "Volatility Breakout": "-1 * Std($close / Ref($close, 1) - 1, 5) / (Std($close / Ref($close, 1) - 1, 20) + 1e-10)",
+        "Funding Rate Mean Reversion": "-1 * $funding_rate",
+        "Bollinger Band Mean Reversion": "-1 * (($close - Mean($close, 20)) / (2 * Std($close, 20) + 1e-10))",
+        "Volume Confirmation": "Mean($close / Ref($close, 1) - 1, 5) * ($volume / (Mean($volume, 20) + 1e-10))",
     }
 
     def __init__(
@@ -692,14 +610,14 @@ def {func_name}(df):
         hypothesis: Hypothesis,
         params: Optional[dict[str, Any]] = None,
     ) -> str:
-        """Convert hypothesis to factor code using LLM.
+        """Convert hypothesis to Qlib expression using LLM.
 
         Args:
             hypothesis: Hypothesis to convert
             params: Optional parameters for the factor
 
         Returns:
-            Executable Python code string
+            Qlib expression string
         """
         if self.llm_provider is None:
             logger.warning("No LLM provider, falling back to template conversion")
@@ -709,11 +627,11 @@ def {func_name}(df):
         from iqfmp.agents.model_config import get_agent_full_config
         model_id, temperature, custom_system_prompt = get_agent_full_config("factor_generation")
 
-        # Generate function name
+        # Generate factor name (labeling only)
         func_name = self._generate_func_name(hypothesis)
 
         # Build prompt
-        prompt = f"""Convert the following trading hypothesis into executable Python factor code.
+        prompt = f"""Convert the following trading hypothesis into a SINGLE Qlib expression.
 
 Hypothesis:
 - Name: {hypothesis.name}
@@ -723,18 +641,12 @@ Hypothesis:
 - Expected Direction: {hypothesis.expected_direction}
 
 Requirements:
-1. Function name must be: {func_name}
-2. Input: pandas DataFrame with columns: open, high, low, close, volume
-3. Output: pandas Series of factor values (z-scored for normalization)
-4. Handle edge cases: NaN values, insufficient data
-5. Use only pandas, numpy - no external dependencies
+1. Use Qlib operators (Mean, Ref, Std, Corr, Rank, Log, Abs, If)
+2. Use $-prefixed field names (e.g., $open, $close, $volume)
+3. Keep it robust (avoid division by zero using + 1e-10)
+4. Output ONLY the Qlib expression string
 
-Return ONLY the Python code in a code block:
-```python
-def {func_name}(df):
-    # Your implementation
-    return factor_values
-```"""
+Return ONLY the Qlib expression as plain text."""
 
         try:
             # Use custom system prompt if configured, otherwise use default
@@ -748,14 +660,18 @@ def {func_name}(df):
                 max_tokens=2048,
             )
 
-            # Parse code from response
+            # Parse expression from response
             code = self._extract_code(response.content, func_name)
+            if self._looks_like_python(code):
+                raise ValueError("LLM returned Python code; Qlib expression required")
 
             self._conversion_count += 1
             hypothesis.factor_code = code
             hypothesis.factor_name = func_name
 
-            logger.info(f"LLM generated code for '{hypothesis.name}' using model {model_id}")
+            logger.info(
+                f"LLM generated Qlib expression for '{hypothesis.name}' using model {model_id}"
+            )
             return code
 
         except Exception as e:
@@ -763,33 +679,51 @@ def {func_name}(df):
             return self.convert(hypothesis, params)
 
     def _extract_code(self, response_text: str, func_name: str) -> str:
-        """Extract Python code from LLM response."""
-        # Try to find code block
-        code_match = re.search(r'```python\s*(.*?)```', response_text, re.DOTALL)
-        if code_match:
-            return code_match.group(1).strip()
+        """Extract Qlib expression from LLM response."""
+        code_match = re.search(r"```(?:qlib|text|python)?\s*(.*?)```", response_text, re.DOTALL)
+        content = code_match.group(1).strip() if code_match else response_text.strip()
 
-        # Try to find function definition directly
-        func_match = re.search(rf'(def {func_name}\(.*?\):.*)', response_text, re.DOTALL)
-        if func_match:
-            return func_match.group(1).strip()
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        expression_lines: list[str] = []
+        for line in lines:
+            if line.startswith("#") and expression_lines:
+                break
+            if line.lower().startswith("expression:"):
+                line = line.split(":", 1)[1].strip()
+            expression_lines.append(line)
 
-        # Return the whole response as a fallback
-        return response_text.strip()
+        if expression_lines:
+            expression = " ".join(expression_lines)
+            expression = re.sub(r"\s+", " ", expression).strip()
+            return expression
+
+        return content
+
+    @staticmethod
+    def _looks_like_python(code: str) -> bool:
+        """Heuristic to detect Python code in LLM output."""
+        lowered = code.strip().lower()
+        return (
+            "def " in lowered
+            or "import " in lowered
+            or "return " in lowered
+            or "pd." in lowered
+            or "np." in lowered
+        )
 
     def convert(
         self,
         hypothesis: Hypothesis,
         params: Optional[dict[str, Any]] = None,
     ) -> str:
-        """Convert hypothesis to factor code.
+        """Convert hypothesis to Qlib expression.
 
         Args:
             hypothesis: Hypothesis to convert
             params: Optional parameters for the factor
 
         Returns:
-            Executable Python code string
+            Qlib expression string
         """
         params = params or {}
 
@@ -824,33 +758,11 @@ def {func_name}(df):
         return f"factor_{name}"
 
     def _get_family_template(self, family: HypothesisFamily) -> str:
-        """Get generic template for a family."""
+        """Get generic Qlib expression template for a family."""
         templates = {
-            HypothesisFamily.MOMENTUM: '''
-def {func_name}(df):
-    """Momentum factor."""
-    returns = df["close"].pct_change({period})
-    factor = (returns - returns.rolling(60).mean()) / (returns.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
-            HypothesisFamily.MEAN_REVERSION: '''
-def {func_name}(df):
-    """Mean reversion factor."""
-    ma = df["close"].rolling({period}).mean()
-    deviation = (df["close"] - ma) / ma
-    factor = -deviation  # Short when above MA, long when below
-    return factor.fillna(0)
-''',
-            HypothesisFamily.VOLATILITY: '''
-def {func_name}(df):
-    """Volatility factor."""
-    import numpy as np
-    returns = df["close"].pct_change()
-    vol = returns.rolling({period}).std() * np.sqrt(252)
-    factor = -vol  # Low vol premium
-    factor = (factor - factor.rolling(60).mean()) / (factor.rolling(60).std() + 1e-10)
-    return factor.fillna(0)
-''',
+            HypothesisFamily.MOMENTUM: "($close / Ref($close, {period}) - 1)",
+            HypothesisFamily.MEAN_REVERSION: "-1 * (($close - Mean($close, {period})) / (Std($close, {period}) + 1e-10))",
+            HypothesisFamily.VOLATILITY: "-1 * Std($close / Ref($close, 1) - 1, {period})",
         }
         return templates.get(family, templates[HypothesisFamily.MOMENTUM])
 

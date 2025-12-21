@@ -304,7 +304,7 @@ class FactorLibraryStats(BaseModel):
 class FactorCompareRequest(BaseModel):
     """Request to compare multiple factors."""
 
-    factor_ids: list[str] = Field(..., min_items=2, max_items=10)
+    factor_ids: list[str] = Field(..., min_length=2, max_length=10)
 
 
 class FactorCompareResponse(BaseModel):

@@ -45,6 +45,22 @@ except ImportError:
     RealisticBacktestEngine = None
     BacktestCostConfig = None
 
+# Phase 3: Unified Crypto Backtest Engine (Qlib + Funding Rate + Liquidation)
+try:
+    from iqfmp.core.crypto_backtest import (
+        CryptoQlibBacktest,
+        CryptoBacktestConfig,
+        CryptoBacktestResult,
+        run_crypto_backtest,
+    )
+    CRYPTO_BACKTEST_AVAILABLE = True
+except ImportError:
+    CRYPTO_BACKTEST_AVAILABLE = False
+    CryptoQlibBacktest = None
+    CryptoBacktestConfig = None
+    CryptoBacktestResult = None
+    run_crypto_backtest = None
+
 logger = logging.getLogger(__name__)
 
 # Qlib Backtest Integration - Full Import
@@ -1265,3 +1281,64 @@ def create_backtest_agent(
         Configured BacktestOptimizationAgent instance
     """
     return BacktestOptimizationAgent(config=config)
+
+
+# =============================================================================
+# Crypto Perpetual Futures Backtest (Phase 3)
+# =============================================================================
+
+
+def run_crypto_perpetual_backtest(
+    data: pd.DataFrame,
+    signals: pd.Series,
+    initial_capital: float = 100000.0,
+    leverage: int = 10,
+    symbol: str = "ETHUSDT",
+    funding_enabled: bool = True,
+    liquidation_enabled: bool = True,
+) -> Optional["CryptoBacktestResult"]:
+    """Run crypto perpetual futures backtest with unified engine.
+
+    This function uses the CryptoQlibBacktest engine which combines:
+    - Qlib's C++ expression engine for factor computation
+    - Crypto-specific Funding Rate settlement (8h cycles)
+    - MarginCalculator for liquidation detection
+
+    Args:
+        data: OHLCV DataFrame with 'close' and optional 'funding_rate' columns
+        signals: Trading signals (1=long, -1=short, 0=flat)
+        initial_capital: Starting capital in USDT
+        leverage: Position leverage (1-125x)
+        symbol: Trading symbol (e.g., "ETHUSDT", "BTCUSDT")
+        funding_enabled: Whether to apply funding rate settlements
+        liquidation_enabled: Whether to check and execute liquidations
+
+    Returns:
+        CryptoBacktestResult with metrics and history, or None if unavailable
+
+    Example:
+        >>> data = pd.DataFrame(...)  # OHLCV + funding_rate
+        >>> signals = pd.Series(...)  # 1=long, -1=short, 0=flat
+        >>> result = run_crypto_perpetual_backtest(
+        ...     data, signals,
+        ...     initial_capital=100000,
+        ...     leverage=10,
+        ...     symbol="ETHUSDT"
+        ... )
+        >>> if result:
+        ...     print(f"Sharpe: {result.sharpe_ratio:.2f}")
+        ...     print(f"Net Funding: ${result.net_funding:.2f}")
+    """
+    if not CRYPTO_BACKTEST_AVAILABLE:
+        logger.warning("CryptoQlibBacktest not available")
+        return None
+
+    config = CryptoBacktestConfig(
+        initial_capital=initial_capital,
+        leverage=leverage,
+        funding_enabled=funding_enabled,
+        liquidation_enabled=liquidation_enabled,
+    )
+
+    engine = CryptoQlibBacktest(config, [symbol])
+    return engine.run(data, signals, symbol)

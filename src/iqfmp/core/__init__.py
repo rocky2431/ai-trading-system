@@ -43,6 +43,13 @@ from iqfmp.core.rd_loop import (
     RDLoop,
     create_rd_loop,
 )
+from iqfmp.core.crypto_backtest import (
+    CryptoQlibBacktest,
+    CryptoBacktestConfig,
+    CryptoBacktestResult,
+    CryptoExchange,
+    run_crypto_backtest,
+)
 
 __all__ = [
     # Security
@@ -82,4 +89,10 @@ __all__ = [
     "LoopState",
     "RDLoop",
     "create_rd_loop",
+    # Crypto Backtest (Unified Engine)
+    "CryptoQlibBacktest",
+    "CryptoBacktestConfig",
+    "CryptoBacktestResult",
+    "CryptoExchange",
+    "run_crypto_backtest",
 ]

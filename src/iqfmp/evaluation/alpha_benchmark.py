@@ -249,7 +249,11 @@ class AlphaBenchmarker:
         """
         self.expressions = expressions or ALPHA158_EXPRESSIONS
         self.novelty_threshold = novelty_threshold
-        self._engine = QlibExpressionEngine()
+        # Use lazy loader to get QlibExpressionEngine (avoid circular import)
+        engine_class = _get_qlib_expression_engine()
+        if engine_class is None:
+            raise RuntimeError("QlibExpressionEngine not available - Qlib must be installed")
+        self._engine = engine_class()
         self._benchmark_cache: dict[str, pd.Series] = {}
         self._benchmark_metrics: dict[str, dict[str, float]] = {}
 

@@ -1,5 +1,25 @@
 """Backtest Engine for strategy evaluation.
 
+.. deprecated:: Phase 3
+    This module is DEPRECATED. Use `iqfmp.core.crypto_backtest.CryptoQlibBacktest`
+    for crypto perpetual futures backtesting with:
+    - Qlib C++ expression engine
+    - Funding Rate settlement (8h cycles)
+    - MarginCalculator for liquidation
+    - Multi-asset portfolio support
+
+    Example migration:
+        # Old (deprecated):
+        from iqfmp.strategy.backtest import BacktestEngine
+        engine = BacktestEngine(config)
+        result = engine.run_backtest(data, signals)
+
+        # New (recommended):
+        from iqfmp.core.crypto_backtest import CryptoQlibBacktest, CryptoBacktestConfig
+        config = CryptoBacktestConfig(initial_capital=100000, leverage=10)
+        engine = CryptoQlibBacktest(config)
+        result = engine.run(data, signals, "ETHUSDT")
+
 This module provides:
 - BacktestEngine: Core backtesting engine
 - PerformanceMetrics: Performance calculations
@@ -8,6 +28,16 @@ This module provides:
 """
 
 from __future__ import annotations
+
+import warnings
+
+# Emit deprecation warning on import
+warnings.warn(
+    "iqfmp.strategy.backtest is deprecated. "
+    "Use iqfmp.core.crypto_backtest.CryptoQlibBacktest instead.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 from dataclasses import dataclass, field
 from datetime import datetime

@@ -141,20 +141,21 @@ def convert_csv_to_qlib_binary(csv_path: str, output_dir: str = None) -> bool:
     start_date = df["datetime"].min()
     print(f"   日期范围: {df['datetime'].min()} ~ {df['datetime'].max()}")
 
-    # Map to calendar index (days since epoch)
-    epoch = pd.Timestamp("1970-01-01")
-    df["_cal_idx"] = (df["datetime"] - epoch).dt.days
-    start_index = int(df["_cal_idx"].iloc[0])
+    # IMPORTANT: Qlib uses calendar position index (0, 1, 2, ...), NOT epoch days!
+    # The start_index in .bin file should match the position in calendars/day.txt
+    start_index = 0  # First entry in calendar starts at index 0
 
     # Fields to convert
+    # NOTE: Qlib's parse_field('$close') creates Feature("close") - WITHOUT $ prefix
+    # So file should be named "close.day.bin" not "$close.day.bin"
     field_mapping = {
-        "open": "$open",
-        "high": "$high",
-        "low": "$low",
-        "close": "$close",
-        "volume": "$volume",
-        "funding_rate": "$funding_rate",
-        "open_interest": "$open_interest",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "volume",
+        "funding_rate": "funding_rate",
+        "open_interest": "open_interest",
     }
 
     converted = []

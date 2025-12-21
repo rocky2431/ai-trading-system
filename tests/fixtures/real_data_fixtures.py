@@ -158,18 +158,20 @@ def real_crypto_data_handler(real_ohlcv_data: pd.DataFrame):
 def real_backtest_engine(real_ohlcv_with_funding: pd.DataFrame):
     """Create real backtest engine with actual data.
 
-    Uses real market data for backtesting.
+    Uses CryptoQlibBacktest - the unified crypto perpetual futures engine.
     """
-    from iqfmp.strategy.backtest import BacktestConfig, BacktestEngine
+    from iqfmp.core.crypto_backtest import CryptoQlibBacktest, CryptoBacktestConfig
 
-    config = BacktestConfig(
+    config = CryptoBacktestConfig(
         initial_capital=100000.0,
-        commission=0.001,
-        slippage=0.0005,
-        include_funding=True,
+        leverage=10,
+        commission_rate=0.0004,
+        slippage_rate=0.0001,
+        funding_enabled=True,
+        liquidation_enabled=True,
     )
 
-    return BacktestEngine(config=config)
+    return CryptoQlibBacktest(config)
 
 
 @pytest.fixture

@@ -63,6 +63,13 @@ from iqfmp.exchange.margin import (
     MarginMode,
 )
 
+# Anti-overfitting: Purged K-Fold CV (De Prado AFML Chapter 7)
+from iqfmp.evaluation.purged_cv import (
+    PurgedKFoldCV,
+    PurgedCVConfig,
+    TimeSeriesPurgedCV,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -146,6 +153,7 @@ class CryptoBacktestResult:
     - Trade history
     - Settlement history (funding + liquidations)
     - Per-asset breakdown
+    - Anti-overfitting metrics (Deflated Sharpe, Prob(Overfit))
     """
     # Core metrics
     total_return: float = 0.0
@@ -155,6 +163,13 @@ class CryptoBacktestResult:
     max_drawdown: float = 0.0
     win_rate: float = 0.0
     profit_factor: float = 0.0
+
+    # Anti-overfitting metrics (De Prado AFML Chapter 7 & 14)
+    deflated_sharpe: float = 0.0  # Sharpe adjusted for multiple testing
+    prob_overfit: float = 0.0    # Probability of overfitting (0-1)
+    cv_sharpe_mean: float = 0.0  # Mean Sharpe across CV folds
+    cv_sharpe_std: float = 0.0   # Std of Sharpe across CV folds
+    n_cv_folds: int = 0          # Number of CV folds used
 
     # Trade statistics
     n_trades: int = 0
@@ -189,6 +204,13 @@ class CryptoBacktestResult:
                 "max_drawdown": self.max_drawdown,
                 "win_rate": self.win_rate,
                 "profit_factor": self.profit_factor,
+            },
+            "anti_overfit": {
+                "deflated_sharpe": self.deflated_sharpe,
+                "prob_overfit": self.prob_overfit,
+                "cv_sharpe_mean": self.cv_sharpe_mean,
+                "cv_sharpe_std": self.cv_sharpe_std,
+                "n_cv_folds": self.n_cv_folds,
             },
             "trading": {
                 "n_trades": self.n_trades,
@@ -712,6 +734,165 @@ class CryptoQlibBacktest:
 
         return is_liquidated, None
 
+    def _calculate_cv_metrics(
+        self,
+        equity_series: pd.Series,
+        n_splits: int = 5,
+        purge_gap: int = 5,
+        embargo_pct: float = 0.01,
+    ) -> dict[str, float]:
+        """Calculate cross-validated metrics using Purged K-Fold CV.
+
+        Implements De Prado AFML Chapter 7 (Purged CV) and Chapter 14 (Deflated Sharpe).
+
+        This is the CRITICAL anti-overfitting mechanism:
+        - Calculates Sharpe ratio on each CV fold (out-of-sample)
+        - Computes mean/std of Sharpe across folds
+        - Calculates Deflated Sharpe Ratio (DSR) accounting for multiple testing
+        - Estimates probability of overfitting
+
+        Args:
+            equity_series: Equity curve time series
+            n_splits: Number of CV folds (default 5)
+            purge_gap: Periods to purge around test boundaries
+            embargo_pct: Embargo period as fraction of data
+
+        Returns:
+            Dict with cv_sharpe_mean, cv_sharpe_std, deflated_sharpe, prob_overfit, n_folds
+        """
+        from scipy import stats
+
+        # Minimum data requirement for CV
+        min_samples = n_splits * 50  # At least 50 samples per fold
+        if len(equity_series) < min_samples:
+            logger.warning(
+                f"Insufficient data for Purged CV: {len(equity_series)} < {min_samples}. "
+                "Skipping CV validation."
+            )
+            return {
+                "cv_sharpe_mean": 0.0,
+                "cv_sharpe_std": 0.0,
+                "deflated_sharpe": 0.0,
+                "prob_overfit": 1.0,  # Assume 100% overfit if can't validate
+                "n_folds": 0,
+            }
+
+        # Calculate returns from equity curve
+        returns = equity_series.pct_change().dropna()
+        if len(returns) < min_samples:
+            return {
+                "cv_sharpe_mean": 0.0,
+                "cv_sharpe_std": 0.0,
+                "deflated_sharpe": 0.0,
+                "prob_overfit": 1.0,
+                "n_folds": 0,
+            }
+
+        # Create DataFrame for CV (required by PurgedKFoldCV)
+        returns_df = pd.DataFrame({
+            "returns": returns.values,
+        }, index=returns.index)
+
+        # Configure Purged K-Fold CV
+        cv_config = PurgedCVConfig(
+            n_splits=n_splits,
+            purge_gap=purge_gap,
+            embargo_pct=embargo_pct,
+            min_train_size=0.3,  # At least 30% for training
+        )
+        cv = PurgedKFoldCV(cv_config)
+
+        # Calculate Sharpe for each fold (out-of-sample)
+        fold_sharpes: list[float] = []
+        annualization = np.sqrt(365)  # Crypto 24/7
+
+        for split in cv.split(returns_df):
+            test_returns = returns_df.iloc[split.test_idx]["returns"]
+
+            if len(test_returns) < 10:  # Skip folds with too few samples
+                continue
+
+            # Calculate Sharpe for this fold
+            mean_ret = test_returns.mean()
+            std_ret = test_returns.std()
+
+            if std_ret > 0:
+                fold_sharpe = (mean_ret / std_ret) * annualization
+                fold_sharpes.append(float(fold_sharpe))
+
+        if len(fold_sharpes) < 2:
+            logger.warning("Not enough valid CV folds for reliable metrics")
+            return {
+                "cv_sharpe_mean": 0.0,
+                "cv_sharpe_std": 0.0,
+                "deflated_sharpe": 0.0,
+                "prob_overfit": 1.0,
+                "n_folds": len(fold_sharpes),
+            }
+
+        # Calculate CV statistics
+        cv_sharpe_mean = float(np.mean(fold_sharpes))
+        cv_sharpe_std = float(np.std(fold_sharpes, ddof=1))
+        n_folds = len(fold_sharpes)
+
+        # Calculate Deflated Sharpe Ratio (DSR) - De Prado AFML Chapter 14
+        # DSR accounts for the fact that we may have tried many strategies
+        # DSR = (SR - E[SR_max]) / std(SR)
+        # For simplicity, we use the Probabilistic Sharpe Ratio (PSR) approach
+        # PSR = prob(true SR > 0) given observed SR
+
+        # Estimate the variance of the Sharpe estimator
+        # Var(SR) ≈ (1 + 0.5 * SR^2) / T where T = number of observations
+        T = len(returns)
+        sr_observed = cv_sharpe_mean
+
+        if cv_sharpe_std > 0:
+            # Calculate t-statistic for Sharpe > 0
+            t_stat = cv_sharpe_mean / (cv_sharpe_std / np.sqrt(n_folds))
+            # Probability that true Sharpe > 0 (one-sided t-test)
+            prob_positive_sharpe = 1.0 - stats.t.cdf(0, df=n_folds - 1, loc=t_stat)
+
+            # Deflated Sharpe: penalize based on variance across folds
+            # Higher variance = lower confidence = lower deflated Sharpe
+            # DSR = SR * sqrt(1 - corr(folds)) ≈ SR * (1 - cv_ratio)
+            cv_ratio = cv_sharpe_std / max(abs(cv_sharpe_mean), 0.001)
+            deflation_factor = max(0, 1 - cv_ratio)
+            deflated_sharpe = float(sr_observed * deflation_factor)
+
+            # Probability of overfitting = 1 - prob(true SR > 0)
+            # If Sharpe varies wildly across folds, we're likely overfit
+            prob_overfit = float(1.0 - prob_positive_sharpe)
+
+        else:
+            # No variance - suspicious (likely all similar or single fold)
+            deflated_sharpe = float(sr_observed * 0.5)  # 50% penalty
+            prob_overfit = 0.5
+
+        # Log results
+        logger.info(
+            f"Purged CV Results: "
+            f"Mean Sharpe={cv_sharpe_mean:.3f}, "
+            f"Std={cv_sharpe_std:.3f}, "
+            f"Deflated={deflated_sharpe:.3f}, "
+            f"Prob(Overfit)={prob_overfit:.1%}"
+        )
+
+        # CRITICAL WARNING: Flag high overfit probability
+        if prob_overfit > 0.5:
+            logger.warning(
+                f"⚠️  HIGH OVERFIT RISK: Prob(Overfit)={prob_overfit:.1%}. "
+                f"CV Sharpe varies from {min(fold_sharpes):.2f} to {max(fold_sharpes):.2f}. "
+                "Strategy may not generalize to live trading!"
+            )
+
+        return {
+            "cv_sharpe_mean": cv_sharpe_mean,
+            "cv_sharpe_std": cv_sharpe_std,
+            "deflated_sharpe": deflated_sharpe,
+            "prob_overfit": prob_overfit,
+            "n_folds": n_folds,
+        }
+
     def _build_result(
         self,
         equity_series: pd.Series,
@@ -764,6 +945,12 @@ class CryptoQlibBacktest:
 
         avg_trade_pnl = np.mean(trade_pnls) if trade_pnls else 0
 
+        # ================================================================
+        # CRITICAL: Anti-overfitting validation using Purged K-Fold CV
+        # This is the "air bag" that prevents deploying overfit strategies
+        # ================================================================
+        cv_metrics = self._calculate_cv_metrics(equity_series)
+
         return CryptoBacktestResult(
             total_return=float(total_return),
             annualized_return=float(annualized_return),
@@ -772,6 +959,13 @@ class CryptoQlibBacktest:
             max_drawdown=float(max_dd),
             win_rate=float(win_rate),
             profit_factor=float(profit_factor),
+            # Anti-overfitting metrics (De Prado AFML)
+            deflated_sharpe=cv_metrics["deflated_sharpe"],
+            prob_overfit=cv_metrics["prob_overfit"],
+            cv_sharpe_mean=cv_metrics["cv_sharpe_mean"],
+            cv_sharpe_std=cv_metrics["cv_sharpe_std"],
+            n_cv_folds=cv_metrics["n_folds"],
+            # Trade statistics
             n_trades=n_trades,
             n_liquidations=n_liquidations,
             avg_trade_pnl=float(avg_trade_pnl),

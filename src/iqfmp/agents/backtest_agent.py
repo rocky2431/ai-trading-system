@@ -26,6 +26,26 @@ import pandas as pd
 
 from iqfmp.agents.orchestrator import AgentState
 
+# ============================================================================
+# ACTION 2: Connect Research Ledger for dynamic thresholds
+# ============================================================================
+try:
+    from iqfmp.evaluation.research_ledger import (
+        ResearchLedger,
+        TrialRecord,
+        DynamicThreshold,
+        FileStorage,
+        ThresholdResult,
+    )
+    RESEARCH_LEDGER_AVAILABLE = True
+except ImportError:
+    RESEARCH_LEDGER_AVAILABLE = False
+    ResearchLedger = None
+    TrialRecord = None
+    DynamicThreshold = None
+    FileStorage = None
+    ThresholdResult = None
+
 # Import SignalConverter for factor-to-signal conversion
 try:
     from iqfmp.core.signal_converter import SignalConverter, SignalConfig
@@ -112,6 +132,62 @@ class OptimizationFailedError(BacktestAgentError):
     """Raised when parameter optimization fails."""
 
     pass
+
+
+# ============================================================================
+# ACTION 3: Purged CV Gatekeeper - Reject overfit factors
+# ============================================================================
+class OverfitRejectionError(BacktestAgentError):
+    """Raised when a factor is rejected due to high overfitting probability.
+
+    This is a HARD rejection - the factor cannot be deployed to production.
+    The feedback loop should guide the FactorGen agent to try a different approach.
+    """
+
+    def __init__(
+        self,
+        prob_overfit: float,
+        threshold: float,
+        sharpe_ratio: float,
+        factor_name: str = "",
+    ):
+        self.prob_overfit = prob_overfit
+        self.threshold = threshold
+        self.sharpe_ratio = sharpe_ratio
+        self.factor_name = factor_name
+        message = (
+            f"Factor '{factor_name}' REJECTED: Prob(Overfit)={prob_overfit:.1%} > "
+            f"threshold={threshold:.1%}. Sharpe={sharpe_ratio:.2f} is likely spurious. "
+            f"Suggestion: Reduce complexity, add regularization, or use different features."
+        )
+        super().__init__(message)
+
+
+class DynamicThresholdNotMetError(BacktestAgentError):
+    """Raised when Sharpe ratio doesn't meet dynamic threshold.
+
+    As more trials are conducted, the required Sharpe threshold increases
+    to account for multiple hypothesis testing (Deflated Sharpe Ratio).
+    """
+
+    def __init__(
+        self,
+        sharpe_ratio: float,
+        threshold: float,
+        n_trials: int,
+        factor_name: str = "",
+    ):
+        self.sharpe_ratio = sharpe_ratio
+        self.threshold = threshold
+        self.n_trials = n_trials
+        self.factor_name = factor_name
+        message = (
+            f"Factor '{factor_name}' doesn't meet dynamic threshold: "
+            f"Sharpe={sharpe_ratio:.2f} < threshold={threshold:.2f} "
+            f"(adjusted for {n_trials} trials). "
+            f"Need stronger alpha or fewer experiments."
+        )
+        super().__init__(message)
 
 
 class OptimizationMethod(Enum):
@@ -209,6 +285,21 @@ class BacktestConfig:
     slippage_base: float = 0.0001  # Base slippage (1 bp)
     slippage_vol_multiplier: float = 0.5  # Volatility impact on slippage
 
+    # =========================================================================
+    # ACTION 1 & 3: Feedback Loop + Purged CV Gatekeeper
+    # =========================================================================
+    # Feedback loop settings
+    max_retry_attempts: int = 3  # Max retries before giving up
+    enable_feedback_loop: bool = True  # Enable Agent retry mechanism
+
+    # Purged CV Gatekeeper settings (De Prado AFML)
+    prob_overfit_threshold: float = 0.05  # Reject if Prob(Overfit) > 5%
+    enable_overfit_gatekeeper: bool = True  # Enable hard rejection
+
+    # Dynamic threshold settings (Research Ledger)
+    enable_dynamic_threshold: bool = True  # Adjust threshold based on trials
+    ledger_path: str = ".ultra/research_ledger.json"  # Where to store trials
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -231,6 +322,13 @@ class BacktestConfig:
             "taker_fee": self.taker_fee,
             "slippage_base": self.slippage_base,
             "slippage_vol_multiplier": self.slippage_vol_multiplier,
+            # ACTION 1 & 3: Feedback loop and gatekeeper
+            "max_retry_attempts": self.max_retry_attempts,
+            "enable_feedback_loop": self.enable_feedback_loop,
+            "prob_overfit_threshold": self.prob_overfit_threshold,
+            "enable_overfit_gatekeeper": self.enable_overfit_gatekeeper,
+            "enable_dynamic_threshold": self.enable_dynamic_threshold,
+            "ledger_path": self.ledger_path,
         }
 
 
@@ -769,6 +867,27 @@ class BacktestOptimizationAgent:
             ))
             logger.info("BacktestOptimizationAgent: SignalConverter initialized")
 
+        # =====================================================================
+        # ACTION 2: Initialize Research Ledger for trial tracking
+        # =====================================================================
+        self.research_ledger: Optional[ResearchLedger] = None
+        if RESEARCH_LEDGER_AVAILABLE and self.config.enable_dynamic_threshold:
+            from pathlib import Path
+            ledger_path = Path(self.config.ledger_path)
+            ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            storage = FileStorage(ledger_path)
+            self.research_ledger = ResearchLedger(storage=storage)
+            logger.info(
+                f"BacktestOptimizationAgent: ResearchLedger initialized "
+                f"({self.research_ledger.get_trial_count()} existing trials, "
+                f"current threshold={self.research_ledger.get_current_threshold():.2f})"
+            )
+        elif self.config.enable_dynamic_threshold:
+            logger.warning(
+                "enable_dynamic_threshold=True but ResearchLedger not available. "
+                "Install iqfmp.evaluation.research_ledger module."
+            )
+
         # Qlib is REQUIRED for all backtests - no fallback options
         if not QLIB_AVAILABLE:
             raise RuntimeError(
@@ -906,6 +1025,110 @@ class BacktestOptimizationAgent:
             oos_metrics,
         )
 
+        # =====================================================================
+        # ACTION 2: Record trial to Research Ledger
+        # =====================================================================
+        factor_name = context.get("factor_name", "unnamed_factor")
+        factor_family = context.get("factor_family", "default")
+        retry_count = context.get("retry_count", 0)
+
+        threshold_result: Optional[ThresholdResult] = None
+        if self.research_ledger is not None:
+            # Record this trial
+            trial = TrialRecord(
+                factor_name=factor_name,
+                factor_family=factor_family,
+                sharpe_ratio=result.best_metrics.sharpe_ratio,
+                ic_mean=None,  # Can be added if available
+                ir=None,
+                max_drawdown=result.best_metrics.max_drawdown,
+                win_rate=result.best_metrics.win_rate,
+                metadata={
+                    "parameters": result.best_parameters,
+                    "n_trials": result.n_trials,
+                    "optimization_time": result.optimization_time,
+                    "oos_sharpe": oos_metrics.sharpe_ratio if oos_metrics else None,
+                    "overfit_ratio": overfit_ratio,
+                    "retry_count": retry_count,
+                },
+            )
+            self.research_ledger.record(trial)
+
+            # Check against dynamic threshold
+            threshold_result = self.research_ledger.check_significance(
+                result.best_metrics.sharpe_ratio
+            )
+            logger.info(
+                f"ResearchLedger: Trial #{self.research_ledger.get_trial_count()} recorded. "
+                f"Sharpe={result.best_metrics.sharpe_ratio:.2f}, "
+                f"Threshold={threshold_result.threshold:.2f}, "
+                f"Passes={threshold_result.passes}"
+            )
+
+        # =====================================================================
+        # ACTION 3: Purged CV Gatekeeper - REJECT overfit factors
+        # =====================================================================
+        prob_overfit = context.get("prob_overfit", 0.0)
+        cv_result = context.get("cv_result")
+        if cv_result and isinstance(cv_result, dict):
+            prob_overfit = cv_result.get("prob_overfit", 0.0)
+
+        rejection_reason = None
+        should_retry = False
+
+        if self.config.enable_overfit_gatekeeper and prob_overfit > self.config.prob_overfit_threshold:
+            rejection_reason = (
+                f"REJECTED by Purged CV Gatekeeper: "
+                f"Prob(Overfit)={prob_overfit:.1%} > threshold={self.config.prob_overfit_threshold:.1%}"
+            )
+            logger.warning(f"⛔ {rejection_reason}")
+            should_retry = self.config.enable_feedback_loop and retry_count < self.config.max_retry_attempts
+
+        # Check dynamic threshold
+        elif threshold_result is not None and not threshold_result.passes:
+            rejection_reason = (
+                f"REJECTED by Dynamic Threshold: "
+                f"Sharpe={result.best_metrics.sharpe_ratio:.2f} < "
+                f"threshold={threshold_result.threshold:.2f} "
+                f"(adjusted for {threshold_result.n_trials} trials)"
+            )
+            logger.warning(f"⛔ {rejection_reason}")
+            should_retry = self.config.enable_feedback_loop and retry_count < self.config.max_retry_attempts
+
+        # Check basic constraints
+        elif not result.best_metrics.passes_constraints(self.config):
+            rejection_reason = (
+                f"REJECTED by Basic Constraints: "
+                f"Sharpe={result.best_metrics.sharpe_ratio:.2f} < {self.config.min_sharpe}, "
+                f"WinRate={result.best_metrics.win_rate:.1%} < {self.config.min_win_rate:.1%}, or "
+                f"MaxDD={result.best_metrics.max_drawdown:.1%} > {self.config.max_drawdown:.1%}"
+            )
+            logger.warning(f"⛔ {rejection_reason}")
+            should_retry = self.config.enable_feedback_loop and retry_count < self.config.max_retry_attempts
+
+        # =====================================================================
+        # ACTION 1: Feedback Loop - Set retry state for FactorGen
+        # =====================================================================
+        feedback_for_factor_gen = None
+        if should_retry:
+            feedback_for_factor_gen = {
+                "rejection_reason": rejection_reason,
+                "retry_count": retry_count + 1,
+                "max_retries": self.config.max_retry_attempts,
+                "suggestions": self._generate_feedback_suggestions(
+                    result.best_metrics,
+                    prob_overfit,
+                    threshold_result,
+                ),
+                "last_sharpe": result.best_metrics.sharpe_ratio,
+                "last_prob_overfit": prob_overfit,
+                "dynamic_threshold": threshold_result.threshold if threshold_result else self.config.min_sharpe,
+            }
+            logger.info(
+                f"🔄 FEEDBACK LOOP: Retry {retry_count + 1}/{self.config.max_retry_attempts}. "
+                f"Suggestions: {feedback_for_factor_gen['suggestions']}"
+            )
+
         # Update state
         new_context = {
             **context,
@@ -914,17 +1137,81 @@ class BacktestOptimizationAgent:
             "backtest_metrics": result.best_metrics.to_dict(),
             "oos_metrics": oos_metrics.to_dict() if oos_metrics else None,
             "overfit_ratio": overfit_ratio,
-            "passes_backtest": result.best_metrics.passes_constraints(self.config),
+            "passes_backtest": rejection_reason is None,
+            # Feedback loop state
+            "rejection_reason": rejection_reason,
+            "should_retry": should_retry,
+            "feedback_for_factor_gen": feedback_for_factor_gen,
+            "retry_count": retry_count + 1 if should_retry else retry_count,
+            # Dynamic threshold info
+            "dynamic_threshold": threshold_result.threshold if threshold_result else None,
+            "threshold_passes": threshold_result.passes if threshold_result else None,
+            "total_trials": self.research_ledger.get_trial_count() if self.research_ledger else 0,
         }
 
-        logger.info(
-            f"BacktestOptimizationAgent: Completed. "
-            f"Best Sharpe: {result.best_metrics.sharpe_ratio:.2f}, "
-            f"Trials: {result.n_trials}, "
-            f"Time: {result.optimization_time:.1f}s"
-        )
+        if rejection_reason:
+            logger.warning(
+                f"BacktestOptimizationAgent: FAILED. {rejection_reason}"
+            )
+        else:
+            logger.info(
+                f"BacktestOptimizationAgent: PASSED. "
+                f"Best Sharpe: {result.best_metrics.sharpe_ratio:.2f}, "
+                f"Trials: {result.n_trials}, "
+                f"Time: {result.optimization_time:.1f}s"
+            )
 
         return state.update(context=new_context)
+
+    def _generate_feedback_suggestions(
+        self,
+        metrics: BacktestMetrics,
+        prob_overfit: float,
+        threshold_result: Optional[ThresholdResult],
+    ) -> list[str]:
+        """Generate actionable suggestions for FactorGen based on failure reason.
+
+        This is the core of the feedback loop - translating backtest failures
+        into concrete guidance for the factor generation agent.
+        """
+        suggestions = []
+
+        # High overfitting probability
+        if prob_overfit > 0.5:
+            suggestions.append("SIMPLIFY: Reduce factor complexity (fewer operators)")
+            suggestions.append("REGULARIZE: Add smoothing or rolling windows")
+            suggestions.append("DIVERSIFY: Use different market features")
+        elif prob_overfit > 0.1:
+            suggestions.append("ROBUST: Test on multiple market regimes")
+            suggestions.append("STABLE: Prefer features with low variance across time")
+
+        # Low Sharpe ratio
+        if metrics.sharpe_ratio < 0.5:
+            suggestions.append("ALPHA: Factor lacks predictive power - try different hypothesis")
+            suggestions.append("TIMING: Consider momentum vs mean-reversion regime")
+        elif metrics.sharpe_ratio < 1.0:
+            suggestions.append("ENHANCE: Combine with complementary factors")
+
+        # High drawdown
+        if metrics.max_drawdown > 0.2:
+            suggestions.append("PROTECT: Add risk-off signals for high volatility")
+            suggestions.append("SCALE: Reduce position sizing during drawdowns")
+
+        # Low win rate
+        if metrics.win_rate < 0.45:
+            suggestions.append("FILTER: Add trend/regime filter to reduce false signals")
+
+        # Dynamic threshold not met
+        if threshold_result and not threshold_result.passes:
+            suggestions.append(
+                f"THRESHOLD: Need Sharpe > {threshold_result.threshold:.2f} "
+                f"(currently {metrics.sharpe_ratio:.2f})"
+            )
+
+        if not suggestions:
+            suggestions.append("EXPLORE: Try alternative factor hypotheses")
+
+        return suggestions[:5]  # Limit to top 5 suggestions
 
     def _get_parameter_space(self) -> list[ParameterSpace]:
         """Get default parameter search space.

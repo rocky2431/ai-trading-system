@@ -573,6 +573,8 @@ class FactorGenerationConfig:
         max_retries: Maximum LLM call retries
         timeout_seconds: LLM call timeout
         include_examples: Include few-shot examples in prompt
+        vector_dedup_enabled: Enable vector-based duplicate detection (Phase 2 fix)
+        vector_dedup_threshold: Similarity threshold for duplicate detection (0-1)
     """
 
     name: str
@@ -589,6 +591,9 @@ class FactorGenerationConfig:
     max_retries: int = 3
     timeout_seconds: float = 30.0
     include_examples: bool = True
+    # Phase 2: Vector-based duplicate detection
+    vector_dedup_enabled: bool = True  # ON by default to prevent "memory loss"
+    vector_dedup_threshold: float = 0.85  # 85% similarity = duplicate
 
 
 class ASTSecurityChecker:
@@ -794,6 +799,9 @@ class FactorGenerationAgent:
             config: Agent configuration
             llm_provider: LLM provider for code generation
         """
+        import logging
+        self._logger = logging.getLogger(__name__)
+
         self.config = config
         self.llm_provider = llm_provider
         self.template = FactorPromptTemplate()
@@ -801,6 +809,120 @@ class FactorGenerationAgent:
         self.field_validator = FactorFieldValidator()
         # Use CRYPTO field set for cryptocurrency trading system
         self.expression_gate = ExpressionGate(field_set=FieldSet.CRYPTO)
+
+        # Phase 2: Initialize vector store for duplicate detection
+        self._vector_searcher = None
+        self._vector_store = None
+        if self.config.vector_dedup_enabled:
+            try:
+                from iqfmp.vector import SimilaritySearcher, FactorVectorStore
+                self._vector_searcher = SimilaritySearcher(
+                    similarity_threshold=self.config.vector_dedup_threshold
+                )
+                self._vector_store = FactorVectorStore()
+                self._logger.info(
+                    f"Vector dedup enabled: threshold={self.config.vector_dedup_threshold}"
+                )
+            except Exception as e:
+                self._logger.warning(
+                    f"Vector dedup unavailable (Qdrant not running?): {e}. "
+                    "Agent will generate factors without memory."
+                )
+
+    def _check_duplicate_factor(
+        self,
+        user_request: str,
+        factor_family: Optional[FactorFamily] = None,
+    ) -> Optional["GeneratedFactor"]:
+        """Check if a similar factor already exists in vector store.
+
+        Phase 2 Anti-Memory-Loss: Before generating a new factor, check if
+        we've already generated something similar. This prevents the Agent
+        from "reinventing the wheel" every time.
+
+        Args:
+            user_request: Natural language description of the factor
+            factor_family: Optional factor family constraint
+
+        Returns:
+            GeneratedFactor if duplicate found, None otherwise
+        """
+        if not self._vector_searcher:
+            return None
+
+        try:
+            # Search for similar factors based on the hypothesis/request
+            is_duplicate, similar = self._vector_searcher.check_duplicate(
+                code="",  # We don't have code yet, search by hypothesis
+                name="",
+                hypothesis=user_request,
+                threshold=self.config.vector_dedup_threshold,
+            )
+
+            if is_duplicate and similar:
+                self._logger.info(
+                    f"🔄 DUPLICATE DETECTED: Found similar factor '{similar.name}' "
+                    f"(score={similar.score:.3f} >= {self.config.vector_dedup_threshold}). "
+                    "Returning cached factor instead of regenerating."
+                )
+
+                # Return the existing factor as GeneratedFactor
+                return GeneratedFactor(
+                    code=similar.code,
+                    name=similar.name,
+                    family=similar.family,
+                    hypothesis=similar.hypothesis,
+                    is_python=False,  # Assume Qlib expression
+                    metadata={
+                        "from_cache": True,
+                        "cache_score": similar.score,
+                        "original_id": similar.factor_id,
+                        **similar.metadata,
+                    },
+                )
+
+            return None
+
+        except Exception as e:
+            self._logger.warning(f"Duplicate check failed: {e}. Proceeding with generation.")
+            return None
+
+    def _store_generated_factor(
+        self,
+        factor: "GeneratedFactor",
+        user_request: str,
+    ) -> None:
+        """Store generated factor in vector store for future dedup.
+
+        Args:
+            factor: The generated factor to store
+            user_request: Original user request (hypothesis)
+        """
+        if not self._vector_store:
+            return
+
+        try:
+            import uuid
+            factor_id = str(uuid.uuid4())
+
+            self._vector_store.add_factor(
+                factor_id=factor_id,
+                name=factor.name,
+                code=factor.code,
+                hypothesis=user_request,
+                family=factor.family,
+                metadata={
+                    "is_python": factor.is_python,
+                    **(factor.metadata or {}),
+                },
+            )
+
+            self._logger.info(
+                f"📦 Stored factor '{factor.name}' in vector store (id={factor_id[:8]}...)"
+            )
+
+        except Exception as e:
+            self._logger.warning(f"Failed to store factor in vector store: {e}")
 
     async def generate(
         self,
@@ -826,6 +948,14 @@ class FactorGenerationAgent:
         # Validate input
         if not user_request or not user_request.strip():
             raise ValueError("Request cannot be empty")
+
+        # ================================================================
+        # Phase 2: Check for duplicate factor BEFORE LLM generation
+        # This prevents the Agent from "reinventing the wheel"
+        # ================================================================
+        cached_factor = self._check_duplicate_factor(user_request, factor_family)
+        if cached_factor is not None:
+            return cached_factor
 
         # Build prompt with field constraints if enabled
         prompt = self.template.render(
@@ -1065,13 +1195,21 @@ class FactorGenerationAgent:
                 }
             )
 
-        return GeneratedFactor(
+        generated_factor = GeneratedFactor(
             name=name,
             description=description,
             code=refined_code,
             family=family,
             metadata=metadata,
         )
+
+        # ================================================================
+        # Phase 2: Store generated factor for future dedup
+        # This builds the Agent's "memory" of generated factors
+        # ================================================================
+        self._store_generated_factor(generated_factor, user_request)
+
+        return generated_factor
 
     def _extract_code(self, content: str) -> str:
         """Extract Qlib expression or Python code from LLM response.

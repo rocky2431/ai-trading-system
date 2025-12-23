@@ -93,6 +93,14 @@ class PipelineConfig:
     timeout: float = 600.0  # 10 minutes
     checkpoint_enabled: bool = True
 
+    # ==========================================================================
+    # ACTION 1: Feedback Loop Configuration
+    # When backtest fails (low Sharpe, high overfit), retry factor generation
+    # ==========================================================================
+    enable_feedback_loop: bool = True  # Enable backtest → generate retry loop
+    max_retry_attempts: int = 3  # Maximum retries before giving up
+    prob_overfit_threshold: float = 0.05  # Reject if Prob(Overfit) > 5%
+
     # Agent configs (optional - use defaults if not provided)
     factor_config: Optional[FactorGenerationConfig] = None
     evaluation_config: Optional[EvaluationAgentConfig] = None
@@ -289,12 +297,30 @@ class PipelineBuilder:
             else:
                 self._graph.add_edge("strategy", "finish")
 
-        # Backtest → risk or finish
+        # =======================================================================
+        # ACTION 1: Backtest → conditional routing (FEEDBACK LOOP)
+        # If should_retry=True, route back to generate for factor refinement
+        # =======================================================================
         if self.config.enable_backtest:
-            if self.config.enable_risk_check:
-                self._graph.add_edge("backtest", "risk")
+            if self.config.enable_feedback_loop:
+                # Conditional edge: can retry generate or proceed to risk/finish
+                possible_targets = ["generate"]  # Feedback loop target
+                if self.config.enable_risk_check:
+                    possible_targets.append("risk")
+                else:
+                    possible_targets.append("finish")
+
+                self._graph.add_conditional_edge(
+                    "backtest",
+                    self._route_after_backtest,
+                    possible_targets,
+                )
             else:
-                self._graph.add_edge("backtest", "finish")
+                # No feedback loop - direct edge
+                if self.config.enable_risk_check:
+                    self._graph.add_edge("backtest", "risk")
+                else:
+                    self._graph.add_edge("backtest", "finish")
 
         # Risk → conditional routing
         if self.config.enable_risk_check:
@@ -428,10 +454,46 @@ class PipelineBuilder:
 
         IMPORTANT: Production pipelines REQUIRE Qdrant for factor deduplication.
         Set require_vector_db=True in PipelineConfig for production use.
+
+        ACTION 1: FEEDBACK LOOP SUPPORT
+        When this node is reached via feedback loop (retry), it uses the
+        feedback_for_factor_gen suggestions to adjust factor generation.
         """
-        logger.info("Generating factors")
         context = state.context.copy()
         context["pipeline_stage"] = "generate"
+
+        # =====================================================================
+        # ACTION 1: Check if we're in a feedback loop retry
+        # =====================================================================
+        retry_count = context.get("retry_count", 0)
+        feedback = context.get("feedback_for_factor_gen")
+        is_retry = retry_count > 0 and feedback is not None
+
+        if is_retry:
+            logger.warning(
+                f"🔄 GENERATE NODE: Feedback loop retry #{retry_count}. "
+                f"Applying suggestions from backtest failure."
+            )
+            suggestions = feedback.get("suggestions", [])
+            last_sharpe = feedback.get("last_sharpe", 0)
+            last_prob_overfit = feedback.get("last_prob_overfit", 0)
+            dynamic_threshold = feedback.get("dynamic_threshold", 2.0)
+
+            # Log feedback details for transparency
+            logger.info(
+                f"   Previous: Sharpe={last_sharpe:.2f}, Prob(Overfit)={last_prob_overfit:.1%}"
+            )
+            logger.info(f"   Target: Sharpe > {dynamic_threshold:.2f}")
+            for i, suggestion in enumerate(suggestions[:3], 1):
+                logger.info(f"   Suggestion {i}: {suggestion}")
+
+            # Pass feedback context to factor generation
+            context["generation_mode"] = "retry"
+            context["retry_suggestions"] = suggestions
+            context["target_sharpe"] = dynamic_threshold
+        else:
+            logger.info("Generating factors (first attempt)")
+            context["generation_mode"] = "initial"
 
         # Initialize vector search for deduplication
         similarity_searcher = None
@@ -638,6 +700,67 @@ class PipelineBuilder:
             return "finish"
         else:
             logger.warning("Strategy not approved by risk check")
+            return "finish"
+
+    # ==========================================================================
+    # ACTION 1: FEEDBACK LOOP ROUTER
+    # This is the CRITICAL function that closes the Agent feedback loop
+    # ==========================================================================
+    def _route_after_backtest(self, state: AgentState) -> str:
+        """Route based on backtest results - implements feedback loop.
+
+        This router reads the backtest agent's output and decides:
+        1. If should_retry=True and retry_count < max_retries → back to generate
+        2. Otherwise → proceed to risk check or finish
+
+        The feedback loop enables the system to:
+        - Detect overfit factors (high prob_overfit)
+        - Detect weak factors (low Sharpe)
+        - Guide FactorGen to try different approaches
+
+        Returns:
+            "generate" for retry, "risk" or "finish" to proceed
+        """
+        context = state.context
+
+        # Read backtest agent's feedback signals
+        should_retry = context.get("should_retry", False)
+        retry_count = context.get("retry_count", 0)
+        rejection_reason = context.get("rejection_reason")
+        feedback = context.get("feedback_for_factor_gen")
+
+        # Check retry conditions
+        if should_retry and retry_count < self.config.max_retry_attempts:
+            # Log feedback loop activation
+            logger.warning(
+                f"🔄 FEEDBACK LOOP ACTIVATED: Retry {retry_count}/{self.config.max_retry_attempts}. "
+                f"Reason: {rejection_reason}"
+            )
+            if feedback:
+                suggestions = feedback.get("suggestions", [])
+                logger.info(f"   Suggestions for FactorGen: {suggestions[:3]}")
+
+            # Route back to generate for factor refinement
+            return "generate"
+
+        # Check if max retries exceeded
+        if should_retry and retry_count >= self.config.max_retry_attempts:
+            logger.error(
+                f"⛔ FEEDBACK LOOP EXHAUSTED: {retry_count} retries failed. "
+                f"Final rejection: {rejection_reason}"
+            )
+            # Fall through to risk/finish
+
+        # Backtest passed or retries exhausted - proceed normally
+        if context.get("passes_backtest", False):
+            logger.info("✅ Backtest PASSED - proceeding to risk check")
+        else:
+            logger.warning("⚠️ Backtest not passed, but no retries left - proceeding anyway")
+
+        # Route to next stage
+        if self.config.enable_risk_check:
+            return "risk"
+        else:
             return "finish"
 
     def _generate_summary(self, context: dict[str, Any]) -> dict[str, Any]:

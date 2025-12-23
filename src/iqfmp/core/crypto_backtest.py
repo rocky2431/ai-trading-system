@@ -70,6 +70,25 @@ from iqfmp.evaluation.purged_cv import (
     TimeSeriesPurgedCV,
 )
 
+# =============================================================================
+# ACTION 2: Research Ledger for trial tracking
+# Every backtest result MUST be recorded to prevent P-hacking
+# =============================================================================
+try:
+    from iqfmp.evaluation.research_ledger import (
+        ResearchLedger,
+        TrialRecord,
+        FileStorage,
+        MemoryStorage,
+    )
+    RESEARCH_LEDGER_AVAILABLE = True
+except ImportError:
+    RESEARCH_LEDGER_AVAILABLE = False
+    ResearchLedger = None
+    TrialRecord = None
+    FileStorage = None
+    MemoryStorage = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -448,15 +467,44 @@ class CryptoQlibBacktest:
         self,
         config: Optional[CryptoBacktestConfig] = None,
         symbols: Optional[list[str]] = None,
+        ledger: Optional["ResearchLedger"] = None,
+        factor_name: str = "unnamed_factor",
+        factor_family: str = "crypto",
     ):
         """Initialize backtest engine.
 
         Args:
             config: Backtest configuration
             symbols: List of symbols for multi-asset backtest
+            ledger: Optional ResearchLedger for trial tracking (ACTION 2)
+            factor_name: Name of factor being backtested (for ledger)
+            factor_family: Family/category of factor (for ledger)
         """
         self.config = config or CryptoBacktestConfig()
         self.symbols = symbols or ["ETHUSDT"]
+
+        # =======================================================================
+        # ACTION 2: Research Ledger integration
+        # Every backtest result MUST be recorded to prevent P-hacking
+        # =======================================================================
+        self.ledger = ledger
+        self.factor_name = factor_name
+        self.factor_family = factor_family
+
+        if self.ledger is not None:
+            logger.info(
+                f"CryptoQlibBacktest: Research Ledger connected "
+                f"({self.ledger.get_trial_count()} existing trials)"
+            )
+        elif RESEARCH_LEDGER_AVAILABLE:
+            # Auto-create ledger if module available but not provided
+            from pathlib import Path
+            ledger_path = Path(".ultra/crypto_research_ledger.json")
+            ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            self.ledger = ResearchLedger(storage=FileStorage(ledger_path))
+            logger.info(
+                f"CryptoQlibBacktest: Auto-created Research Ledger at {ledger_path}"
+            )
 
         # Initialize margin calculator
         margin_config = MarginConfig.from_leverage(self.config.leverage)
@@ -1039,6 +1087,61 @@ class CryptoQlibBacktest:
         # ================================================================
         cv_metrics = self._calculate_cv_metrics(equity_series)
 
+        # ================================================================
+        # ACTION 2: Record trial to Research Ledger
+        # This is MANDATORY for preventing P-hacking in factor research
+        # ================================================================
+        if self.ledger is not None and RESEARCH_LEDGER_AVAILABLE:
+            try:
+                trial = TrialRecord(
+                    factor_name=self.factor_name,
+                    factor_family=self.factor_family,
+                    sharpe_ratio=float(sharpe),
+                    ic_mean=None,  # Not available in backtest context
+                    ir=None,
+                    max_drawdown=float(max_dd),
+                    win_rate=float(win_rate),
+                    metadata={
+                        "symbol": symbol,
+                        "initial_capital": initial_capital,
+                        "leverage": self.config.leverage,
+                        "n_trades": n_trades,
+                        "n_liquidations": n_liquidations,
+                        "total_return": float(total_return),
+                        "annualized_return": float(annualized_return),
+                        "sortino_ratio": float(sortino),
+                        "profit_factor": float(profit_factor),
+                        "net_funding": funding_received - funding_paid,
+                        # Anti-overfitting metrics
+                        "deflated_sharpe": cv_metrics["deflated_sharpe"],
+                        "prob_overfit": cv_metrics["prob_overfit"],
+                        "cv_sharpe_mean": cv_metrics["cv_sharpe_mean"],
+                        "cv_sharpe_std": cv_metrics["cv_sharpe_std"],
+                        "n_cv_folds": cv_metrics["n_folds"],
+                    },
+                )
+                trial_id = self.ledger.record(trial)
+                n_trials = self.ledger.get_trial_count()
+                current_threshold = self.ledger.get_current_threshold()
+
+                logger.info(
+                    f"📊 Research Ledger: Trial #{n_trials} recorded. "
+                    f"Factor='{self.factor_name}', Sharpe={sharpe:.2f}, "
+                    f"Prob(Overfit)={cv_metrics['prob_overfit']:.1%}, "
+                    f"Dynamic Threshold={current_threshold:.2f}"
+                )
+
+                # Warn if factor doesn't meet dynamic threshold
+                threshold_result = self.ledger.check_significance(sharpe)
+                if not threshold_result.passes:
+                    logger.warning(
+                        f"⚠️ Factor '{self.factor_name}' below dynamic threshold: "
+                        f"Sharpe={sharpe:.2f} < {threshold_result.threshold:.2f} "
+                        f"(adjusted for {n_trials} trials)"
+                    )
+            except Exception as e:
+                logger.error(f"Failed to record trial to Research Ledger: {e}")
+
         return CryptoBacktestResult(
             total_return=float(total_return),
             annualized_return=float(annualized_return),
@@ -1129,6 +1232,9 @@ def run_crypto_backtest(
     initial_capital: float = 100000.0,
     leverage: int = 10,
     symbol: str = "ETHUSDT",
+    factor_name: str = "unnamed_factor",
+    factor_family: str = "crypto",
+    ledger: Optional["ResearchLedger"] = None,
 ) -> CryptoBacktestResult:
     """Convenience function to run a crypto backtest.
 
@@ -1138,6 +1244,9 @@ def run_crypto_backtest(
         initial_capital: Starting capital
         leverage: Position leverage
         symbol: Trading symbol
+        factor_name: Name of factor being backtested (ACTION 2: for ledger)
+        factor_family: Family/category of factor (ACTION 2: for ledger)
+        ledger: Optional ResearchLedger for trial tracking
 
     Returns:
         Backtest result
@@ -1146,7 +1255,13 @@ def run_crypto_backtest(
         initial_capital=initial_capital,
         leverage=leverage,
     )
-    engine = CryptoQlibBacktest(config, [symbol])
+    engine = CryptoQlibBacktest(
+        config,
+        [symbol],
+        ledger=ledger,
+        factor_name=factor_name,
+        factor_family=factor_family,
+    )
     return engine.run(data, signals, symbol)
 
 

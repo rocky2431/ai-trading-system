@@ -74,6 +74,39 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
+# Exceptions
+# =============================================================================
+
+
+class InsufficientDataError(Exception):
+    """数据不足以进行可靠的防过拟合验证。
+
+    当数据量不足以进行 Purged K-Fold CV 验证时抛出此异常。
+    这是一个严格的错误 - 禁止静默返回误导性的 prob_overfit=1.0。
+
+    解决方案：
+    1. 提供更多历史数据（至少 n_splits * 50 个样本）
+    2. 降低 n_splits 参数
+    3. 设置 strict_cv_mode=False 以获取 NaN 值而非异常
+    """
+
+    def __init__(
+        self,
+        required_samples: int,
+        actual_samples: int,
+        message: str = "",
+    ):
+        self.required_samples = required_samples
+        self.actual_samples = actual_samples
+        super().__init__(
+            message or
+            f"Insufficient data for reliable CV validation: "
+            f"need {required_samples} samples, got {actual_samples}. "
+            f"Either provide more data or set strict_cv_mode=False."
+        )
+
+
+# =============================================================================
 # Enums and Configuration
 # =============================================================================
 
@@ -118,6 +151,9 @@ class CryptoBacktestConfig:
     liquidation_enabled: bool = True
     max_position_pct: float = 0.95  # Max 95% of capital
     min_trade_amount: float = 10.0  # Min $10 trade
+    # 严格 CV 模式：数据不足时抛出异常而非静默返回误导性值
+    # 生产环境必须设置为 True，只有测试环境可以设置为 False
+    strict_cv_mode: bool = True
 
 
 @dataclass
@@ -765,28 +801,50 @@ class CryptoQlibBacktest:
         # Minimum data requirement for CV
         min_samples = n_splits * 50  # At least 50 samples per fold
         if len(equity_series) < min_samples:
-            logger.warning(
-                f"Insufficient data for Purged CV: {len(equity_series)} < {min_samples}. "
-                "Skipping CV validation."
-            )
-            return {
-                "cv_sharpe_mean": 0.0,
-                "cv_sharpe_std": 0.0,
-                "deflated_sharpe": 0.0,
-                "prob_overfit": 1.0,  # Assume 100% overfit if can't validate
-                "n_folds": 0,
-            }
+            if self.config.strict_cv_mode:
+                # 严格模式：抛出异常，禁止静默返回误导性值
+                raise InsufficientDataError(
+                    required_samples=min_samples,
+                    actual_samples=len(equity_series),
+                    message=(
+                        f"Insufficient data for Purged CV: need {min_samples} samples, "
+                        f"got {len(equity_series)}. Cannot perform reliable anti-overfitting validation."
+                    ),
+                )
+            else:
+                # 非严格模式：返回 NaN 表示"未知"，而非误导性的 1.0
+                logger.warning(
+                    f"Insufficient data for Purged CV: {len(equity_series)} < {min_samples}. "
+                    "Returning NaN for prob_overfit (unknown, not 1.0)."
+                )
+                return {
+                    "cv_sharpe_mean": float("nan"),
+                    "cv_sharpe_std": float("nan"),
+                    "deflated_sharpe": float("nan"),
+                    "prob_overfit": float("nan"),  # NaN = 未知，非 1.0
+                    "n_folds": 0,
+                }
 
         # Calculate returns from equity curve
         returns = equity_series.pct_change().dropna()
         if len(returns) < min_samples:
-            return {
-                "cv_sharpe_mean": 0.0,
-                "cv_sharpe_std": 0.0,
-                "deflated_sharpe": 0.0,
-                "prob_overfit": 1.0,
-                "n_folds": 0,
-            }
+            if self.config.strict_cv_mode:
+                raise InsufficientDataError(
+                    required_samples=min_samples,
+                    actual_samples=len(returns),
+                    message=(
+                        f"Insufficient returns data for Purged CV: need {min_samples}, "
+                        f"got {len(returns)} after pct_change()."
+                    ),
+                )
+            else:
+                return {
+                    "cv_sharpe_mean": float("nan"),
+                    "cv_sharpe_std": float("nan"),
+                    "deflated_sharpe": float("nan"),
+                    "prob_overfit": float("nan"),
+                    "n_folds": 0,
+                }
 
         # Create DataFrame for CV (required by PurgedKFoldCV)
         returns_df = pd.DataFrame({
@@ -821,14 +879,24 @@ class CryptoQlibBacktest:
                 fold_sharpes.append(float(fold_sharpe))
 
         if len(fold_sharpes) < 2:
-            logger.warning("Not enough valid CV folds for reliable metrics")
-            return {
-                "cv_sharpe_mean": 0.0,
-                "cv_sharpe_std": 0.0,
-                "deflated_sharpe": 0.0,
-                "prob_overfit": 1.0,
-                "n_folds": len(fold_sharpes),
-            }
+            if self.config.strict_cv_mode:
+                raise InsufficientDataError(
+                    required_samples=2,  # Need at least 2 valid folds
+                    actual_samples=len(fold_sharpes),
+                    message=(
+                        f"Not enough valid CV folds: need at least 2, got {len(fold_sharpes)}. "
+                        "Data may be too sparse or volatile for reliable validation."
+                    ),
+                )
+            else:
+                logger.warning("Not enough valid CV folds for reliable metrics")
+                return {
+                    "cv_sharpe_mean": float("nan"),
+                    "cv_sharpe_std": float("nan"),
+                    "deflated_sharpe": float("nan"),
+                    "prob_overfit": float("nan"),
+                    "n_folds": len(fold_sharpes),
+                }
 
         # Calculate CV statistics
         cv_sharpe_mean = float(np.mean(fold_sharpes))
@@ -846,7 +914,20 @@ class CryptoQlibBacktest:
         T = len(returns)
         sr_observed = cv_sharpe_mean
 
-        if cv_sharpe_std > 0:
+        # CRITICAL: Handle edge cases explicitly, no mathematical tricks
+        MIN_MEANINGFUL_SHARPE = 0.01  # Below this, strategy has no meaningful edge
+
+        if abs(cv_sharpe_mean) < MIN_MEANINGFUL_SHARPE:
+            # Strategy has no meaningful edge - be explicit about this
+            logger.warning(
+                f"Strategy has near-zero Sharpe ({cv_sharpe_mean:.4f}). "
+                "No meaningful edge detected."
+            )
+            deflated_sharpe = 0.0
+            prob_overfit = float("nan")  # Unknown - we can't assess overfitting without edge
+            cv_ratio = float("nan")
+
+        elif cv_sharpe_std > 0:
             # Calculate t-statistic for Sharpe > 0
             t_stat = cv_sharpe_mean / (cv_sharpe_std / np.sqrt(n_folds))
             # Probability that true Sharpe > 0 (one-sided t-test)
@@ -855,7 +936,8 @@ class CryptoQlibBacktest:
             # Deflated Sharpe: penalize based on variance across folds
             # Higher variance = lower confidence = lower deflated Sharpe
             # DSR = SR * sqrt(1 - corr(folds)) ≈ SR * (1 - cv_ratio)
-            cv_ratio = cv_sharpe_std / max(abs(cv_sharpe_mean), 0.001)
+            # NOTE: cv_sharpe_mean is guaranteed > MIN_MEANINGFUL_SHARPE here
+            cv_ratio = cv_sharpe_std / abs(cv_sharpe_mean)
             deflation_factor = max(0, 1 - cv_ratio)
             deflated_sharpe = float(sr_observed * deflation_factor)
 
@@ -864,9 +946,15 @@ class CryptoQlibBacktest:
             prob_overfit = float(1.0 - prob_positive_sharpe)
 
         else:
-            # No variance - suspicious (likely all similar or single fold)
+            # cv_sharpe_std = 0 means all folds have identical Sharpe
+            # This is suspicious - likely means not enough variance in data
+            logger.warning(
+                "Zero variance in CV Sharpe ratios - all folds identical. "
+                "This is suspicious and suggests insufficient data variance."
+            )
             deflated_sharpe = float(sr_observed * 0.5)  # 50% penalty
-            prob_overfit = 0.5
+            prob_overfit = float("nan")  # Unknown due to suspicious data
+            cv_ratio = 0.0
 
         # Log results
         logger.info(

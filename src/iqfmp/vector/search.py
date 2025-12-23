@@ -7,7 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from .client import QdrantClient, get_qdrant_client
+from .client import QdrantClient, QdrantConfig, get_qdrant_client
 from .embedding import EmbeddingGenerator, get_embedding_generator
 from .store import DEFAULT_COLLECTION
 
@@ -46,6 +46,7 @@ class SimilaritySearcher:
         qdrant_client: Optional[QdrantClient] = None,
         embedding_generator: Optional[EmbeddingGenerator] = None,
         similarity_threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+        qdrant_config: Optional[QdrantConfig] = None,
     ):
         """
         初始化相似度检索器
@@ -55,9 +56,15 @@ class SimilaritySearcher:
             qdrant_client: Qdrant 客户端
             embedding_generator: Embedding 生成器
             similarity_threshold: 相似度阈值
+            qdrant_config: Qdrant 配置（用于控制严格模式）
         """
         self.collection_name = collection_name
-        self.qdrant = qdrant_client or get_qdrant_client()
+        if qdrant_client:
+            self.qdrant = qdrant_client
+        elif qdrant_config:
+            self.qdrant = QdrantClient(qdrant_config)
+        else:
+            self.qdrant = get_qdrant_client()
         self.embedding = embedding_generator or get_embedding_generator()
         self.similarity_threshold = similarity_threshold
 
@@ -91,21 +98,19 @@ class SimilaritySearcher:
             hypothesis=query_hypothesis,
         )
 
-        # 构建过滤条件
+        # 构建过滤条件 - 严格模式，无 Mock 降级
+        from qdrant_client.http import models
+
         query_filter = None
         if filter_family:
-            try:
-                from qdrant_client.http import models
-                query_filter = models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="family",
-                            match=models.MatchValue(value=filter_family),
-                        )
-                    ]
-                )
-            except ImportError:
-                pass
+            query_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="family",
+                        match=models.MatchValue(value=filter_family),
+                    )
+                ]
+            )
 
         # 执行搜索
         try:

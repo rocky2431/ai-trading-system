@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
 
-from .client import QdrantClient, get_qdrant_client
+from .client import QdrantClient, QdrantConfig, get_qdrant_client
 from .embedding import EmbeddingGenerator, get_embedding_generator
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ class FactorVectorStore:
         collection_name: str = DEFAULT_COLLECTION,
         qdrant_client: Optional[QdrantClient] = None,
         embedding_generator: Optional[EmbeddingGenerator] = None,
+        qdrant_config: Optional[QdrantConfig] = None,
     ):
         """
         初始化因子向量存储
@@ -50,9 +51,15 @@ class FactorVectorStore:
             collection_name: 集合名称
             qdrant_client: Qdrant 客户端
             embedding_generator: Embedding 生成器
+            qdrant_config: Qdrant 配置（用于控制严格模式）
         """
         self.collection_name = collection_name
-        self.qdrant = qdrant_client or get_qdrant_client()
+        if qdrant_client:
+            self.qdrant = qdrant_client
+        elif qdrant_config:
+            self.qdrant = QdrantClient(qdrant_config)
+        else:
+            self.qdrant = get_qdrant_client()
         self.embedding = embedding_generator or get_embedding_generator()
 
         # 确保集合存在
@@ -109,10 +116,10 @@ class FactorVectorStore:
             **(metadata or {}),
         }
 
-        # 存储到 Qdrant
-        try:
-            from qdrant_client.http import models
+        # 存储到 Qdrant - 严格模式，无 Mock 降级
+        from qdrant_client.http import models
 
+        try:
             self.qdrant.client.upsert(
                 collection_name=self.collection_name,
                 points=[
@@ -125,14 +132,6 @@ class FactorVectorStore:
             )
 
             logger.info(f"Added factor to vector store: {factor_id}")
-            return factor_id
-
-        except ImportError:
-            # 使用 Mock 客户端
-            self.qdrant.client.upsert(
-                collection_name=self.collection_name,
-                points=[{"id": factor_id, "vector": embedding, "payload": payload}],
-            )
             return factor_id
 
         except Exception as e:
@@ -177,19 +176,13 @@ class FactorVectorStore:
                 **(f.get("metadata") or {}),
             }
 
-            try:
-                from qdrant_client.http import models
-                points.append(models.PointStruct(
-                    id=factor_id,
-                    vector=embeddings[i],
-                    payload=payload,
-                ))
-            except ImportError:
-                points.append({
-                    "id": factor_id,
-                    "vector": embeddings[i],
-                    "payload": payload,
-                })
+            # 严格模式：必须使用 Qdrant models，无 Mock 降级
+            from qdrant_client.http import models
+            points.append(models.PointStruct(
+                id=factor_id,
+                vector=embeddings[i],
+                payload=payload,
+            ))
 
         # 批量存储
         try:
@@ -270,9 +263,10 @@ class FactorVectorStore:
         Returns:
             是否删除成功
         """
-        try:
-            from qdrant_client.http import models
+        # 严格模式：必须使用真实 Qdrant，无 Mock 降级
+        from qdrant_client.http import models
 
+        try:
             self.qdrant.client.delete(
                 collection_name=self.collection_name,
                 points_selector=models.PointIdsList(
@@ -281,11 +275,6 @@ class FactorVectorStore:
             )
 
             logger.info(f"Deleted factor: {factor_id}")
-            return True
-
-        except ImportError:
-            # Mock 实现
-            logger.info(f"[Mock] Deleted factor: {factor_id}")
             return True
 
         except Exception as e:

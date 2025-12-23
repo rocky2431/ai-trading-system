@@ -13,6 +13,14 @@ from .store import DEFAULT_COLLECTION
 logger = logging.getLogger(__name__)
 
 
+class ClusteringDependencyError(Exception):
+    """聚类依赖包未安装时抛出的异常。
+
+    严格模式 - 禁止静默降级为 Mock 聚类。
+    """
+    pass
+
+
 @dataclass
 class ClusterInfo:
     """聚类信息"""
@@ -185,13 +193,16 @@ class FactorClusterer:
                 silhouette_score=sil_score,
             )
 
-        except ImportError:
-            logger.warning("sklearn not installed, using mock clustering")
-            return self._mock_cluster(ids, n_clusters)
+        except ImportError as e:
+            # 严格模式：sklearn 未安装时抛出异常，禁止 Mock 降级
+            raise ClusteringDependencyError(
+                "sklearn is required for K-Means clustering. "
+                "Install with: pip install scikit-learn"
+            ) from e
 
         except Exception as e:
             logger.error(f"K-Means clustering failed: {e}")
-            return self._mock_cluster(ids, n_clusters)
+            raise
 
     def _hierarchical_cluster(
         self,
@@ -261,16 +272,19 @@ class FactorClusterer:
                 silhouette_score=sil_score,
             )
 
-        except ImportError:
-            logger.warning("sklearn not installed, using mock clustering")
-            return self._mock_cluster(ids, n_clusters)
+        except ImportError as e:
+            # 严格模式：sklearn 未安装时抛出异常，禁止 Mock 降级
+            raise ClusteringDependencyError(
+                "sklearn is required for Hierarchical clustering. "
+                "Install with: pip install scikit-learn"
+            ) from e
 
         except Exception as e:
             logger.error(f"Hierarchical clustering failed: {e}")
-            return self._mock_cluster(ids, n_clusters)
+            raise
 
     def _mock_cluster(self, ids: list[str], n_clusters: int) -> ClusterResult:
-        """模拟聚类结果"""
+        """模拟聚类结果 - 仅用于测试环境，生产环境禁用。"""
         clusters = []
         factor_assignments = {}
 

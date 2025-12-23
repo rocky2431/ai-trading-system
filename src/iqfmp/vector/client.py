@@ -11,6 +11,15 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 
+class QdrantUnavailableError(Exception):
+    """Qdrant 服务不可用时抛出的异常。
+
+    这是一个严格的错误 - 禁止静默降级为 Mock。
+    如果需要 Mock，必须显式设置 allow_mock=True。
+    """
+    pass
+
+
 @dataclass
 class QdrantConfig:
     """Qdrant 配置"""
@@ -21,6 +30,9 @@ class QdrantConfig:
     https: bool = False
     timeout: float = 30.0
     prefer_grpc: bool = True
+    # 严格模式：禁止静默降级为 Mock
+    # 只有显式设置 allow_mock=True 才允许使用 Mock
+    allow_mock: bool = False
 
 
 class QdrantClient:
@@ -59,10 +71,19 @@ class QdrantClient:
         return self._client
 
     def _create_client(self):
-        """创建 Qdrant 客户端"""
+        """创建 Qdrant 客户端。
+
+        严格模式（默认）：
+        - 如果 qdrant-client 未安装，抛出 QdrantUnavailableError
+        - 如果 Qdrant 服务不可用，抛出 QdrantUnavailableError
+        - 禁止静默降级为 Mock
+
+        宽松模式（allow_mock=True）：
+        - 仅用于单元测试
+        - 允许使用 MockQdrantClient
+        """
         try:
             from qdrant_client import QdrantClient as QdrantClientLib
-            from qdrant_client.http import models
 
             client = QdrantClientLib(
                 host=self.config.host,
@@ -74,16 +95,48 @@ class QdrantClient:
                 prefer_grpc=self.config.prefer_grpc,
             )
 
-            logger.info(f"Connected to Qdrant at {self.config.host}:{self.config.port}")
+            # 验证连接是否真正可用
+            try:
+                client.get_collections()
+                logger.info(f"Connected to Qdrant at {self.config.host}:{self.config.port}")
+            except Exception as conn_err:
+                if self.config.allow_mock:
+                    logger.warning(
+                        f"Qdrant service unavailable ({conn_err}), using MockQdrantClient. "
+                        "WARNING: Data will NOT persist across restarts!"
+                    )
+                    return MockQdrantClient()
+                else:
+                    raise QdrantUnavailableError(
+                        f"Qdrant service at {self.config.host}:{self.config.port} is not responding. "
+                        f"Error: {conn_err}. "
+                        "Please start Qdrant service or set allow_mock=True for testing."
+                    ) from conn_err
+
             return client
 
-        except ImportError:
-            logger.warning("qdrant-client not installed, using mock client")
-            return MockQdrantClient()
+        except ImportError as e:
+            if self.config.allow_mock:
+                logger.warning(
+                    "qdrant-client not installed, using MockQdrantClient. "
+                    "WARNING: Data will NOT persist across restarts! "
+                    "Install with: pip install qdrant-client"
+                )
+                return MockQdrantClient()
+            else:
+                raise QdrantUnavailableError(
+                    "qdrant-client package is not installed. "
+                    "Install with: pip install qdrant-client"
+                ) from e
+
+        except QdrantUnavailableError:
+            raise
 
         except Exception as e:
             logger.error(f"Failed to connect to Qdrant: {e}")
-            raise
+            raise QdrantUnavailableError(
+                f"Failed to connect to Qdrant: {e}"
+            ) from e
 
     def create_collection(
         self,

@@ -7,13 +7,27 @@ This module provides the critical conversion layer between:
 The SignalConverter ensures compatibility between LLM-generated factor code
 (which outputs pandas DataFrames) and Qlib's backtest infrastructure
 (which expects Dataset format with MultiIndex).
+
+Phase 3 Enhancement: ML-based signal generation using LightGBM.
+Instead of simple Z-Score normalization, use LightGBM to predict
+forward returns from factor values.
 """
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
+
+# ML imports - lazy loaded
+try:
+    import lightgbm as lgb
+    LIGHTGBM_AVAILABLE = True
+except ImportError:
+    LIGHTGBM_AVAILABLE = False
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,6 +46,28 @@ class SignalConfig:
     position_scale: float = 1.0
     max_position: float = 0.1  # Max position per asset
 
+    # ==========================================================================
+    # Phase 3: ML-based signal generation (LightGBM)
+    # ==========================================================================
+    ml_signal_enabled: bool = False  # Enable ML-based signal generation
+    ml_model_type: str = "lightgbm"  # Model type: lightgbm, catboost, xgboost
+    ml_lookback_window: int = 60  # Window for feature engineering
+    ml_forward_period: int = 5  # Forward period for target calculation
+    ml_train_ratio: float = 0.7  # Train/test split ratio
+    ml_n_estimators: int = 100  # Number of trees
+    ml_max_depth: int = 6  # Maximum tree depth
+    ml_learning_rate: float = 0.1  # Learning rate
+    ml_min_samples: int = 100  # Minimum samples required for ML
+    ml_retrain_frequency: int = 20  # Retrain every N days (0 = train once)
+
+    # Default LightGBM params (can be overridden)
+    ml_params: dict = field(default_factory=lambda: {
+        "objective": "regression",
+        "boosting_type": "gbdt",
+        "verbose": -1,
+        "n_jobs": -1,
+    })
+
 
 class SignalConverter:
     """Convert pandas factors to trading signals and Qlib Dataset.
@@ -46,10 +82,22 @@ class SignalConverter:
 
         # From signal to Qlib-compatible Dataset
         dataset = converter.to_qlib_dataset(signal, instruments)
+
+    Phase 3 Enhancement:
+        # Enable ML-based signal generation
+        config = SignalConfig(ml_signal_enabled=True)
+        converter = SignalConverter(config)
+        signal = converter.to_signal(factor_values, price_data=df)
     """
 
     def __init__(self, config: Optional[SignalConfig] = None):
         self.config = config or SignalConfig()
+
+        # Phase 3: ML model state
+        self._ml_model: Optional[Any] = None
+        self._ml_feature_names: list[str] = []
+        self._ml_last_train_idx: int = 0
+        self._ml_train_count: int = 0
 
     def normalize(self, factor: pd.Series) -> pd.Series:
         """Normalize factor values.
@@ -82,19 +130,262 @@ class SignalConverter:
         else:  # none
             return factor
 
+    # ==========================================================================
+    # Phase 3: ML-based Signal Generation
+    # ==========================================================================
+
+    def _build_ml_features(
+        self,
+        factor: pd.Series,
+        price_data: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Build features for ML model from factor and price data.
+
+        Features include:
+        - Raw factor value
+        - Factor rolling statistics (mean, std, min, max)
+        - Factor momentum (diff, pct_change)
+        - Price-based features (returns, volatility)
+
+        Args:
+            factor: Factor values
+            price_data: OHLCV data with 'close' column
+
+        Returns:
+            Feature DataFrame aligned with factor index
+        """
+        window = self.config.ml_lookback_window
+        features = pd.DataFrame(index=factor.index)
+
+        # Factor-based features
+        features["factor_raw"] = factor
+        features["factor_zscore"] = (factor - factor.rolling(window).mean()) / factor.rolling(window).std()
+        features["factor_rank"] = factor.rolling(window).apply(lambda x: x.rank(pct=True).iloc[-1], raw=False)
+        features["factor_ma_ratio"] = factor / factor.rolling(window).mean()
+        features["factor_momentum"] = factor.diff(5)
+        features["factor_momentum_10"] = factor.diff(10)
+
+        # Price-based features (if available)
+        if "close" in price_data.columns:
+            close = price_data["close"]
+            # Align close to factor index
+            close = close.reindex(factor.index)
+
+            features["return_1d"] = close.pct_change(1)
+            features["return_5d"] = close.pct_change(5)
+            features["return_10d"] = close.pct_change(10)
+            features["volatility_20d"] = close.pct_change().rolling(20).std()
+            features["ma_ratio_20"] = close / close.rolling(20).mean()
+            features["ma_ratio_60"] = close / close.rolling(60).mean()
+
+            if "volume" in price_data.columns:
+                volume = price_data["volume"].reindex(factor.index)
+                features["volume_ma_ratio"] = volume / volume.rolling(20).mean()
+
+        self._ml_feature_names = list(features.columns)
+        return features
+
+    def _calculate_target(
+        self,
+        price_data: pd.DataFrame,
+        index: pd.Index,
+    ) -> pd.Series:
+        """Calculate forward returns as ML target.
+
+        Args:
+            price_data: OHLCV data with 'close' column
+            index: Index to align target with
+
+        Returns:
+            Forward returns Series
+        """
+        if "close" not in price_data.columns:
+            raise ValueError("price_data must contain 'close' column for ML target")
+
+        close = price_data["close"]
+        forward_period = self.config.ml_forward_period
+
+        # Forward return
+        forward_return = close.shift(-forward_period) / close - 1
+        return forward_return.reindex(index)
+
+    def _train_ml_model(
+        self,
+        X: pd.DataFrame,
+        y: pd.Series,
+    ) -> None:
+        """Train LightGBM model on features and target.
+
+        Args:
+            X: Feature DataFrame
+            y: Target Series (forward returns)
+        """
+        if not LIGHTGBM_AVAILABLE:
+            raise ImportError(
+                "LightGBM is not installed. Install with: pip install lightgbm"
+            )
+
+        # Prepare data - remove NaN
+        valid_mask = X.notna().all(axis=1) & y.notna()
+        X_clean = X.loc[valid_mask]
+        y_clean = y.loc[valid_mask]
+
+        if len(X_clean) < self.config.ml_min_samples:
+            logger.warning(
+                f"Insufficient samples for ML training: {len(X_clean)} < {self.config.ml_min_samples}. "
+                "Falling back to Z-Score."
+            )
+            self._ml_model = None
+            return
+
+        # Train/test split (time-series aware)
+        train_size = int(len(X_clean) * self.config.ml_train_ratio)
+        X_train = X_clean.iloc[:train_size]
+        y_train = y_clean.iloc[:train_size]
+        X_val = X_clean.iloc[train_size:]
+        y_val = y_clean.iloc[train_size:]
+
+        # Build model params
+        params = {
+            **self.config.ml_params,
+            "n_estimators": self.config.ml_n_estimators,
+            "max_depth": self.config.ml_max_depth,
+            "learning_rate": self.config.ml_learning_rate,
+            "random_state": 42,
+        }
+
+        # Train model
+        model = lgb.LGBMRegressor(**params)
+
+        if len(X_val) > 10:
+            model.fit(
+                X_train.values, y_train.values,
+                eval_set=[(X_val.values, y_val.values)],
+                callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
+            )
+        else:
+            model.fit(X_train.values, y_train.values)
+
+        self._ml_model = model
+        self._ml_train_count += 1
+
+        # Log feature importance
+        importance = dict(zip(self._ml_feature_names, model.feature_importances_))
+        top_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:5]
+        logger.info(
+            f"ML model trained (iteration {self._ml_train_count}). "
+            f"Top features: {top_features}"
+        )
+
+    def _generate_ml_signal(
+        self,
+        factor: pd.Series,
+        price_data: pd.DataFrame,
+    ) -> pd.Series:
+        """Generate trading signal using ML model.
+
+        Args:
+            factor: Factor values
+            price_data: OHLCV data
+
+        Returns:
+            ML-predicted signal (-1 to 1)
+        """
+        # Build features
+        features = self._build_ml_features(factor, price_data)
+        target = self._calculate_target(price_data, factor.index)
+
+        # Check if we need to (re)train
+        current_idx = len(factor)
+        should_train = (
+            self._ml_model is None or
+            (self.config.ml_retrain_frequency > 0 and
+             current_idx - self._ml_last_train_idx >= self.config.ml_retrain_frequency)
+        )
+
+        if should_train:
+            # Train on historical data (exclude last forward_period for target)
+            train_end = max(0, len(factor) - self.config.ml_forward_period)
+            X_train = features.iloc[:train_end]
+            y_train = target.iloc[:train_end]
+            self._train_ml_model(X_train, y_train)
+            self._ml_last_train_idx = current_idx
+
+        # If training failed, fallback to Z-Score
+        if self._ml_model is None:
+            logger.warning("ML model not available, falling back to Z-Score normalization")
+            return self._generate_zscore_signal(factor)
+
+        # Predict on all data
+        valid_mask = features.notna().all(axis=1)
+        predictions = pd.Series(0.0, index=factor.index)
+
+        if valid_mask.sum() > 0:
+            X_pred = features.loc[valid_mask]
+            pred_values = self._ml_model.predict(X_pred.values)
+            predictions.loc[valid_mask] = pred_values
+
+        # Normalize predictions to signal range (-1 to 1)
+        # Use Z-Score normalization on predictions
+        mean_pred = predictions.mean()
+        std_pred = predictions.std()
+        if std_pred > 0:
+            signal = (predictions - mean_pred) / std_pred
+            signal = signal.clip(-self.config.clip_std, self.config.clip_std)
+            # Scale to -1 to 1
+            signal = signal / self.config.clip_std
+        else:
+            signal = predictions
+
+        return signal
+
+    def _generate_zscore_signal(self, factor: pd.Series) -> pd.Series:
+        """Generate signal using Z-Score normalization (original method).
+
+        Args:
+            factor: Factor values
+
+        Returns:
+            Z-Score normalized signal
+        """
+        normalized = self.normalize(factor)
+
+        if self.config.top_k:
+            k = min(self.config.top_k, len(factor) // 2)
+            signal = pd.Series(0.0, index=factor.index)
+            if k > 0:
+                signal.loc[normalized.nlargest(k).index] = 1.0
+                signal.loc[normalized.nsmallest(k).index] = -1.0
+            return signal
+        else:
+            threshold = self.config.signal_threshold
+            signal = pd.Series(0.0, index=factor.index)
+            signal[normalized > threshold] = normalized[normalized > threshold]
+            signal[normalized < -threshold] = normalized[normalized < -threshold]
+            return signal.clip(-1, 1)
+
+    # ==========================================================================
+    # Original Methods (updated for ML integration)
+    # ==========================================================================
+
     def to_signal(
         self,
         factor: Union[pd.Series, pd.DataFrame],
         normalize: bool = True,
+        price_data: Optional[pd.DataFrame] = None,
     ) -> pd.Series:
         """Convert factor values to trading signal.
 
         Args:
             factor: Factor values (can be DataFrame or Series)
             normalize: Whether to normalize first
+            price_data: OHLCV data (required for ML signal generation)
 
         Returns:
             Trading signal (-1 to 1)
+
+        Phase 3: If ml_signal_enabled=True and price_data is provided,
+        uses LightGBM to predict forward returns and convert to signal.
         """
         # Handle DataFrame input - extract first column or 'value' column
         if isinstance(factor, pd.DataFrame):
@@ -110,6 +401,28 @@ class SignalConverter:
         # Drop NaN values for calculation
         factor = factor.dropna()
 
+        # ======================================================================
+        # Phase 3: ML-based signal generation
+        # ======================================================================
+        if self.config.ml_signal_enabled:
+            if price_data is None:
+                logger.warning(
+                    "ML signal enabled but no price_data provided. "
+                    "Falling back to Z-Score normalization."
+                )
+            elif not LIGHTGBM_AVAILABLE:
+                logger.warning(
+                    "ML signal enabled but LightGBM not installed. "
+                    "Install with: pip install lightgbm. "
+                    "Falling back to Z-Score normalization."
+                )
+            else:
+                # Use ML-based signal generation
+                return self._generate_ml_signal(factor, price_data)
+
+        # ======================================================================
+        # Original Z-Score based signal generation
+        # ======================================================================
         if normalize:
             factor = self.normalize(factor)
 

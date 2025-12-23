@@ -48,6 +48,7 @@ from iqfmp.core.crypto_backtest import (
     CryptoBacktestConfig,
     CryptoBacktestResult,
     CryptoExchange,
+    InsufficientDataError,
     run_crypto_backtest,
 )
 
@@ -94,5 +95,6 @@ __all__ = [
     "CryptoBacktestConfig",
     "CryptoBacktestResult",
     "CryptoExchange",
+    "InsufficientDataError",
     "run_crypto_backtest",
 ]

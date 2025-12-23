@@ -594,6 +594,9 @@ class FactorGenerationConfig:
     # Phase 2: Vector-based duplicate detection
     vector_dedup_enabled: bool = True  # ON by default to prevent "memory loss"
     vector_dedup_threshold: float = 0.85  # 85% similarity = duplicate
+    # 严格模式：如果 vector_dedup_enabled=True 但 Qdrant 不可用，抛出异常而非静默降级
+    # 生产环境必须设置为 True，只有测试环境可以设置为 False
+    vector_strict_mode: bool = True
 
 
 class ASTSecurityChecker:
@@ -811,23 +814,59 @@ class FactorGenerationAgent:
         self.expression_gate = ExpressionGate(field_set=FieldSet.CRYPTO)
 
         # Phase 2: Initialize vector store for duplicate detection
+        # 严格模式（默认）：如果 Qdrant 不可用，抛出异常而非静默降级
         self._vector_searcher = None
         self._vector_store = None
         if self.config.vector_dedup_enabled:
             try:
-                from iqfmp.vector import SimilaritySearcher, FactorVectorStore
+                from iqfmp.vector import (
+                    SimilaritySearcher,
+                    FactorVectorStore,
+                    QdrantUnavailableError,
+                    QdrantConfig,
+                )
+
+                # 根据严格模式决定是否允许 Mock
+                qdrant_config = QdrantConfig(
+                    allow_mock=not self.config.vector_strict_mode
+                )
+
                 self._vector_searcher = SimilaritySearcher(
-                    similarity_threshold=self.config.vector_dedup_threshold
+                    similarity_threshold=self.config.vector_dedup_threshold,
+                    qdrant_config=qdrant_config,
                 )
-                self._vector_store = FactorVectorStore()
+                self._vector_store = FactorVectorStore(qdrant_config=qdrant_config)
                 self._logger.info(
-                    f"Vector dedup enabled: threshold={self.config.vector_dedup_threshold}"
+                    f"Vector dedup enabled: threshold={self.config.vector_dedup_threshold}, "
+                    f"strict_mode={self.config.vector_strict_mode}"
                 )
+            except ImportError as e:
+                # qdrant-client 未安装
+                if self.config.vector_strict_mode:
+                    raise RuntimeError(
+                        "Vector dedup is enabled but qdrant-client is not installed. "
+                        "Install with: pip install qdrant-client. "
+                        "Or set vector_strict_mode=False for testing without persistence."
+                    ) from e
+                else:
+                    self._logger.warning(
+                        f"Vector dedup unavailable ({e}). "
+                        "Agent will generate factors without memory. "
+                        "Set vector_strict_mode=True in production!"
+                    )
             except Exception as e:
-                self._logger.warning(
-                    f"Vector dedup unavailable (Qdrant not running?): {e}. "
-                    "Agent will generate factors without memory."
-                )
+                # 其他错误（如 Qdrant 服务不可用）
+                if self.config.vector_strict_mode:
+                    raise RuntimeError(
+                        f"Vector dedup is enabled but Qdrant is unavailable: {e}. "
+                        "Please start Qdrant service or set vector_strict_mode=False for testing."
+                    ) from e
+                else:
+                    self._logger.warning(
+                        f"Vector dedup unavailable ({e}). "
+                        "Agent will generate factors without memory. "
+                        "Set vector_strict_mode=True in production!"
+                    )
 
     def _check_duplicate_factor(
         self,

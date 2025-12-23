@@ -30,7 +30,8 @@ const navigation = [
   { name: 'Strategies', href: '/strategies', icon: Wrench },
   { name: 'Backtest', href: '/backtest', icon: FlaskConical },
   { name: 'Research', href: '/research', icon: Beaker },
-  { name: 'Trading', href: '/trading', icon: Zap },
+  // DISABLED: Live trading uses mock data, backend API not implemented
+  // { name: 'Trading', href: '/trading', icon: Zap },
   { name: 'Pipeline', href: '/pipeline', icon: Activity },
   { name: 'Settings', href: '/settings', icon: Settings },
 ]

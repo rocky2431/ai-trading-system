@@ -1046,18 +1046,18 @@ def _execute_factor_generation(
     logger.info("Reloaded agent model registry from config file")
 
     # 尝试从环境变量加载 LLM 配置
+    # P1 FIX: 禁止返回占位符因子，LLM 未配置时必须抛出错误
     try:
         llm_config = LLMConfig.from_env()
     except ValueError as e:
-        # 如果没有配置 API key，记录警告并返回降级结果
-        logger.warning(f"LLM config error: {e}. Factor generation will use fallback.")
-        return {
-            "factor_id": str(uuid.uuid4()),
-            "hypothesis": hypothesis,
-            "family": factor_family,
-            "code": f"# LLM not configured - placeholder factor\n# Hypothesis: {hypothesis}\ndef calculate(data):\n    return data['close'].pct_change()",
-            "warning": "LLM not configured. Please configure OpenRouter API key in Settings page.",
-        }
+        # LLM 未配置时抛出明确错误，而不是返回无意义的占位符因子
+        error_msg = (
+            f"LLM configuration error: {e}. "
+            "Factor generation requires a valid LLM API key. "
+            "Please configure your OpenRouter API key in the Settings page before generating factors."
+        )
+        logger.error(error_msg)
+        raise ValueError(error_msg) from e
 
     task.update_state(
         state="PROGRESS",

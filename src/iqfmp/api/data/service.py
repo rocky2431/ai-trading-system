@@ -71,27 +71,27 @@ DATA_TYPES = [
     },
     {
         "id": "agg_trades",
-        "name": "Aggregated Trades",
-        "description": "Trade records aggregated by price, including buy/sell direction",
+        "name": "Aggregated Trades (Coming Soon)",
+        "description": "[NOT IMPLEMENTED] Trade records aggregated by price. Planned for future release.",
         "requires_futures": False,
         "min_interval": "tick",
-        "supported": False,  # TODO: Implement
+        "supported": False,
     },
     {
         "id": "trades",
-        "name": "Tick Trades",
-        "description": "Detailed record of each trade",
+        "name": "Tick Trades (Coming Soon)",
+        "description": "[NOT IMPLEMENTED] Detailed record of each trade. Planned for future release.",
         "requires_futures": False,
         "min_interval": "tick",
-        "supported": False,  # TODO: Implement
+        "supported": False,
     },
     {
         "id": "depth",
-        "name": "Order Book Snapshot",
-        "description": "Order book bid/ask snapshot",
+        "name": "Order Book Snapshot (Coming Soon)",
+        "description": "[NOT IMPLEMENTED] Order book bid/ask snapshot. Planned for future release.",
         "requires_futures": False,
         "min_interval": "snapshot",
-        "supported": False,  # TODO: Implement
+        "supported": False,
     },
     {
         "id": "funding_rate",

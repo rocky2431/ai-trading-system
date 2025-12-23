@@ -36,10 +36,87 @@ except ImportError:
 # =============================================================================
 try:
     from qlib.contrib.model.gbdt import LGBModel as QlibLGBModel
+    from qlib.data.dataset.handler import DataHandlerLP
     QLIB_MODEL_AVAILABLE = True
 except ImportError:
     QLIB_MODEL_AVAILABLE = False
     QlibLGBModel = None
+    DataHandlerLP = None
+
+
+class DataFrameDatasetH:
+    """Adapter to wrap pandas DataFrame as Qlib DatasetH-compatible object.
+
+    This allows using Qlib's LGBModel.fit() with plain DataFrames
+    instead of requiring full Qlib data infrastructure.
+
+    Usage:
+        dataset = DataFrameDatasetH(X_train, y_train, X_val, y_val)
+        model = QlibLGBModel(...)
+        model.fit(dataset)
+    """
+
+    def __init__(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_val: Optional[pd.DataFrame] = None,
+        y_val: Optional[pd.Series] = None,
+    ):
+        self._X_train = X_train
+        self._y_train = y_train
+        self._X_val = X_val
+        self._y_val = y_val
+
+        # Build segments dict (required by Qlib LGBModel)
+        self.segments = {"train": ("train_start", "train_end")}
+        if X_val is not None and len(X_val) > 0:
+            self.segments["valid"] = ("valid_start", "valid_end")
+
+    def prepare(
+        self,
+        segment: str,
+        col_set: list = None,
+        data_key: Any = None,
+    ) -> pd.DataFrame:
+        """Prepare data for a segment (Qlib DatasetH interface).
+
+        Args:
+            segment: "train" or "valid"
+            col_set: Column set to return ["feature", "label"] or ["feature"]
+            data_key: Ignored (for Qlib compatibility)
+
+        Returns:
+            DataFrame with MultiIndex columns: ("feature", col_names) and ("label", "label")
+        """
+        if segment == "train":
+            X, y = self._X_train, self._y_train
+        elif segment == "valid":
+            if self._X_val is None:
+                raise ValueError("No validation data provided")
+            X, y = self._X_val, self._y_val
+        else:
+            raise ValueError(f"Unknown segment: {segment}")
+
+        # Build MultiIndex columns like Qlib expects
+        # feature columns: ("feature", col_name)
+        # label column: ("label", "label")
+        feature_cols = pd.MultiIndex.from_tuples(
+            [("feature", col) for col in X.columns]
+        )
+        X_multi = X.copy()
+        X_multi.columns = feature_cols
+
+        if col_set == ["feature"]:
+            return X_multi
+
+        # Add label column
+        label_df = pd.DataFrame(
+            {("label", "label"): y.values},
+            index=X.index
+        )
+
+        return pd.concat([X_multi, label_df], axis=1)
 
 logger = logging.getLogger(__name__)
 
@@ -286,58 +363,72 @@ class SignalConverter:
         X_val: pd.DataFrame,
         y_val: pd.Series,
     ) -> None:
-        """Train using Qlib-style LightGBM (P1 optimization).
+        """Train using Qlib's native LGBModel (P1 optimization).
 
-        NOTE: Full Qlib LGBModel.fit() requires Qlib DatasetH infrastructure.
-        This method uses Qlib-compatible parameters and structure while training
-        with raw LightGBM for standalone DataFrame usage.
-
-        For full Qlib Model Zoo integration (with model versioning, persistence),
-        see P2 priority: integrate with Qlib's complete data infrastructure.
-
-        Benefits of Qlib-style training:
-        - Same hyperparameter conventions as Qlib models
-        - Easy migration to full Qlib infrastructure later
-        - Consistent with Qlib ecosystem patterns
+        Uses DataFrameDatasetH adapter to bridge pandas DataFrame to Qlib's
+        DatasetH interface, enabling full Qlib LGBModel functionality:
+        - Native Qlib model interface
+        - Built-in early stopping
+        - Consistent with Qlib Model Zoo patterns
+        - Model serialization compatible with Qlib workflow
         """
-        logger.info("Training with Qlib-compatible LightGBM (P1 optimization)")
+        logger.info("Training with Qlib LGBModel (P1 - full Qlib integration)")
 
-        # Use Qlib-style parameters for consistency with Model Zoo
-        # These params match Qlib's LGBModel defaults
-        qlib_style_params = {
-            "objective": "regression",
-            "boosting_type": "gbdt",
-            "n_estimators": self.config.ml_n_estimators,
-            "max_depth": self.config.ml_max_depth,
-            "learning_rate": self.config.ml_learning_rate,
-            "num_leaves": 31,  # Qlib default
-            "verbose": -1,
-            "n_jobs": -1,
-            "random_state": 42,
-        }
+        # Create DatasetH-compatible wrapper for our DataFrames
+        dataset = DataFrameDatasetH(
+            X_train=X_train,
+            y_train=y_train,
+            X_val=X_val if len(X_val) > 10 else None,
+            y_val=y_val if len(X_val) > 10 else None,
+        )
 
-        model = lgb.LGBMRegressor(**qlib_style_params)
+        # Create Qlib LGBModel with our parameters
+        model = QlibLGBModel(
+            loss="mse",
+            early_stopping_rounds=20 if len(X_val) > 10 else None,
+            num_boost_round=self.config.ml_n_estimators,
+            max_depth=self.config.ml_max_depth,
+            learning_rate=self.config.ml_learning_rate,
+            num_leaves=31,
+            verbosity=-1,
+        )
 
-        # Train with early stopping (Qlib-style)
-        if len(X_val) > 10:
-            model.fit(
-                X_train.values, y_train.values,
-                eval_set=[(X_val.values, y_val.values)],
-                callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
-            )
-        else:
-            model.fit(X_train.values, y_train.values)
+        # Train using Qlib's native fit() method
+        # Note: Qlib LGBModel.fit() may call R.log_metrics() which requires qlib.init()
+        # We catch this error as it only affects logging, not the trained model
+        evals_result = {}
+        try:
+            model.fit(dataset, evals_result=evals_result, verbose_eval=0)
+        except AttributeError as e:
+            if "qlib.init()" in str(e):
+                # Model training succeeded, only R.log_metrics() failed
+                # The model is already trained and usable
+                logger.debug(
+                    "Qlib workflow not initialized (R.log_metrics failed). "
+                    "Model training succeeded."
+                )
+            else:
+                raise
 
         self._ml_model = model
-        self._ml_model_type = "qlib_compat"  # Qlib-compatible but standalone
+        self._ml_model_type = "qlib"  # Full Qlib LGBModel
 
-        # Log feature importance (Qlib-style reporting)
-        importance = dict(zip(self._ml_feature_names, model.feature_importances_))
-        top_features = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:5]
-        logger.info(
-            f"Qlib-compatible LightGBM trained (iteration {self._ml_train_count + 1}). "
-            f"Top features: {top_features}"
-        )
+        # Log feature importance using Qlib's interface
+        try:
+            # Qlib LGBModel stores underlying model in .model attribute
+            if hasattr(model, 'model') and model.model is not None:
+                importance = model.model.feature_importance()
+                top_features = sorted(
+                    zip(self._ml_feature_names, importance),
+                    key=lambda x: x[1],
+                    reverse=True
+                )[:5]
+                logger.info(
+                    f"Qlib LGBModel trained (iteration {self._ml_train_count + 1}). "
+                    f"Top features: {top_features}"
+                )
+        except Exception as e:
+            logger.debug(f"Could not get feature importance: {e}")
 
     def _train_with_raw_lightgbm(
         self,
@@ -431,9 +522,13 @@ class SignalConverter:
             X_pred = features.loc[valid_mask]
 
             # P1: Handle different model types
-            # Both qlib_compat and raw use sklearn-style predict with numpy arrays
-            # Full Qlib LGBModel (future P2) would use DataFrame directly
-            pred_values = self._ml_model.predict(X_pred.values)
+            if self._ml_model_type == "qlib":
+                # Qlib LGBModel: use underlying lgb.Booster directly for prediction
+                # This avoids creating DatasetH for inference
+                pred_values = self._ml_model.model.predict(X_pred.values)
+            else:
+                # Raw LightGBM: sklearn-style predict with numpy arrays
+                pred_values = self._ml_model.predict(X_pred.values)
 
             predictions.loc[valid_mask] = pred_values
 

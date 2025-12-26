@@ -1,11 +1,15 @@
 """FastAPI application entry point."""
 
 import logging
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from iqfmp import __version__
 from iqfmp.api.auth.dependencies import get_current_user
@@ -48,6 +52,70 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await close_db()
 
 
+# =============================================================================
+# P0 SECURITY: Rate Limiting Middleware
+# Prevents API abuse and DoS attacks per 8.2 API Security requirements
+# =============================================================================
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Simple in-memory rate limiter.
+
+    For production, replace with Redis-based rate limiting.
+    """
+
+    def __init__(
+        self,
+        app: FastAPI,
+        requests_per_minute: int = 60,
+        requests_per_second: int = 10,
+    ) -> None:
+        super().__init__(app)
+        self.requests_per_minute = requests_per_minute
+        self.requests_per_second = requests_per_second
+        self._minute_requests: dict[str, list[float]] = defaultdict(list)
+        self._second_requests: dict[str, list[float]] = defaultdict(list)
+
+    async def dispatch(self, request: Request, call_next):
+        # Skip rate limiting for health check
+        if request.url.path == "/health":
+            return await call_next(request)
+
+        # Get client IP (use X-Forwarded-For if behind proxy)
+        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+        if "," in client_ip:
+            client_ip = client_ip.split(",")[0].strip()
+
+        now = time.time()
+
+        # Clean old entries and check per-second limit
+        self._second_requests[client_ip] = [
+            t for t in self._second_requests[client_ip] if now - t < 1
+        ]
+        if len(self._second_requests[client_ip]) >= self.requests_per_second:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded. Please slow down."},
+                headers={"Retry-After": "1"},
+            )
+
+        # Clean old entries and check per-minute limit
+        self._minute_requests[client_ip] = [
+            t for t in self._minute_requests[client_ip] if now - t < 60
+        ]
+        if len(self._minute_requests[client_ip]) >= self.requests_per_minute:
+            return JSONResponse(
+                status_code=429,
+                content={"detail": "Rate limit exceeded. Try again in a minute."},
+                headers={"Retry-After": "60"},
+            )
+
+        # Record this request
+        self._second_requests[client_ip].append(now)
+        self._minute_requests[client_ip].append(now)
+
+        response = await call_next(request)
+        return response
+
+
 def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     app = FastAPI(
@@ -68,6 +136,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # P0 SECURITY: Rate limiting middleware per 8.2 API Security
+    # 60 requests/minute, 10 requests/second per client IP
+    app.add_middleware(RateLimitMiddleware, requests_per_minute=60, requests_per_second=10)
 
     # Include routers
     # Auth router - NO authentication required (login/register endpoints)

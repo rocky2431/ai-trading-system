@@ -43,6 +43,20 @@ except ImportError:
     QlibLGBModel = None
     DataHandlerLP = None
 
+# =============================================================================
+# P2: Optuna for Hyperparameter Optimization
+# Supports: bayesian (TPE), random, grid, genetic (NSGA-II)
+# =============================================================================
+try:
+    import optuna
+    from optuna.samplers import TPESampler, RandomSampler, GridSampler, NSGAIISampler
+    OPTUNA_AVAILABLE = True
+    # Suppress Optuna logging
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+except ImportError:
+    OPTUNA_AVAILABLE = False
+    optuna = None
+
 
 class DataFrameDatasetH:
     """Adapter to wrap pandas DataFrame as Qlib DatasetH-compatible object.
@@ -155,6 +169,15 @@ class SignalConfig:
     ml_min_samples: int = 100  # Minimum samples required for ML
     ml_retrain_frequency: int = 20  # Retrain every N days (0 = train once)
     ml_early_stopping_rounds: int = 20  # Early stopping rounds for LightGBM
+
+    # ==========================================================================
+    # P2: Hyperparameter Optimization with Optuna
+    # Supports: bayesian (TPE), random, grid, genetic (NSGA-II)
+    # ==========================================================================
+    ml_optimization_method: str = "none"  # none, bayesian, random, grid, genetic
+    ml_optimization_trials: int = 20  # Number of optimization trials (for bayesian/random/genetic)
+    ml_optimization_timeout: int = 300  # Timeout in seconds for optimization
+    ml_optimization_metric: str = "ic"  # Metric to optimize: ic, sharpe, mse
 
     # Default LightGBM params (can be overridden)
     ml_params: dict = field(default_factory=lambda: {
@@ -315,6 +338,9 @@ class SignalConverter:
         P1 OPTIMIZATION: Supports both Qlib LGBModel and raw LightGBM.
         Qlib LGBModel is preferred for better ecosystem integration.
 
+        P2 ENHANCEMENT: Supports hyperparameter optimization via Optuna.
+        When ml_optimization_method != "none", optimizes hyperparams before training.
+
         Args:
             X: Feature DataFrame
             y: Target Series (forward returns)
@@ -348,12 +374,27 @@ class SignalConverter:
         y_val = y_clean.iloc[train_size:]
 
         # =====================================================================
+        # P2: Hyperparameter optimization with Optuna (if enabled)
+        # =====================================================================
+        optimized_params = None
+        if self.config.ml_optimization_method != "none":
+            if len(X_val) > 10:
+                optimized_params = self._optimize_hyperparameters(
+                    X_train, y_train, X_val, y_val
+                )
+                logger.info(f"Using optimized params: {optimized_params}")
+            else:
+                logger.warning(
+                    "Insufficient validation data for optimization, using defaults"
+                )
+
+        # =====================================================================
         # P1: Use Qlib LGBModel if available (preferred)
         # =====================================================================
         if use_qlib:
-            self._train_with_qlib_model(X_train, y_train, X_val, y_val)
+            self._train_with_qlib_model(X_train, y_train, X_val, y_val, optimized_params)
         else:
-            self._train_with_raw_lightgbm(X_train, y_train, X_val, y_val)
+            self._train_with_raw_lightgbm(X_train, y_train, X_val, y_val, optimized_params)
 
         self._ml_train_count += 1
 
@@ -363,6 +404,7 @@ class SignalConverter:
         y_train: pd.Series,
         X_val: pd.DataFrame,
         y_val: pd.Series,
+        optimized_params: Optional[dict] = None,
     ) -> None:
         """Train using Qlib's native LGBModel (P1 optimization).
 
@@ -372,8 +414,18 @@ class SignalConverter:
         - Built-in early stopping
         - Consistent with Qlib Model Zoo patterns
         - Model serialization compatible with Qlib workflow
+
+        P2: Now accepts optimized_params from Optuna optimization.
+
+        Args:
+            X_train: Training features
+            y_train: Training target
+            X_val: Validation features
+            y_val: Validation target
+            optimized_params: Optional dict of optimized hyperparameters
         """
-        logger.info("Training with Qlib LGBModel (P1 - full Qlib integration)")
+        opt_info = " with optimized params" if optimized_params else ""
+        logger.info(f"Training with Qlib LGBModel (P1 - full Qlib integration){opt_info}")
 
         # Create DatasetH-compatible wrapper for our DataFrames
         dataset = DataFrameDatasetH(
@@ -383,14 +435,26 @@ class SignalConverter:
             y_val=y_val if len(X_val) > 10 else None,
         )
 
-        # Create Qlib LGBModel with our parameters
+        # Determine parameters - use optimized if available
+        if optimized_params:
+            num_boost_round = optimized_params.get("n_estimators", self.config.ml_n_estimators)
+            max_depth = optimized_params.get("max_depth", self.config.ml_max_depth)
+            learning_rate = optimized_params.get("learning_rate", self.config.ml_learning_rate)
+            num_leaves = optimized_params.get("num_leaves", 31)
+        else:
+            num_boost_round = self.config.ml_n_estimators
+            max_depth = self.config.ml_max_depth
+            learning_rate = self.config.ml_learning_rate
+            num_leaves = 31
+
+        # Create Qlib LGBModel with parameters
         model = QlibLGBModel(
             loss="mse",
             early_stopping_rounds=self.config.ml_early_stopping_rounds if len(X_val) > 10 else None,
-            num_boost_round=self.config.ml_n_estimators,
-            max_depth=self.config.ml_max_depth,
-            learning_rate=self.config.ml_learning_rate,
-            num_leaves=31,
+            num_boost_round=num_boost_round,
+            max_depth=max_depth,
+            learning_rate=learning_rate,
+            num_leaves=num_leaves,
             verbosity=-1,
         )
 
@@ -437,21 +501,38 @@ class SignalConverter:
         y_train: pd.Series,
         X_val: pd.DataFrame,
         y_val: pd.Series,
+        optimized_params: Optional[dict] = None,
     ) -> None:
         """Train using raw LightGBM (fallback).
 
         Used when Qlib Model Zoo is not available.
-        """
-        logger.info("Training with raw LightGBM (fallback)")
 
-        # Build model params
-        params = {
-            **self.config.ml_params,
-            "n_estimators": self.config.ml_n_estimators,
-            "max_depth": self.config.ml_max_depth,
-            "learning_rate": self.config.ml_learning_rate,
-            "random_state": 42,
-        }
+        P2: Now accepts optimized_params from Optuna optimization.
+
+        Args:
+            X_train: Training features
+            y_train: Training target
+            X_val: Validation features
+            y_val: Validation target
+            optimized_params: Optional dict of optimized hyperparameters
+        """
+        opt_info = " with optimized params" if optimized_params else ""
+        logger.info(f"Training with raw LightGBM (fallback){opt_info}")
+
+        # Build model params - use optimized if available, otherwise defaults
+        if optimized_params:
+            params = {
+                **optimized_params,
+                "random_state": 42,
+            }
+        else:
+            params = {
+                **self.config.ml_params,
+                "n_estimators": self.config.ml_n_estimators,
+                "max_depth": self.config.ml_max_depth,
+                "learning_rate": self.config.ml_learning_rate,
+                "random_state": 42,
+            }
 
         # Train model
         model = lgb.LGBMRegressor(**params)
@@ -475,6 +556,174 @@ class SignalConverter:
             f"Raw LightGBM trained (iteration {self._ml_train_count + 1}). "
             f"Top features: {top_features}"
         )
+
+    # =========================================================================
+    # P2: Hyperparameter Optimization with Optuna
+    # =========================================================================
+
+    def _optimize_hyperparameters(
+        self,
+        X_train: pd.DataFrame,
+        y_train: pd.Series,
+        X_val: pd.DataFrame,
+        y_val: pd.Series,
+    ) -> dict:
+        """Optimize LightGBM hyperparameters using Optuna.
+
+        Supports multiple optimization strategies:
+        - bayesian: Tree-structured Parzen Estimator (TPE) - Default, most efficient
+        - random: Random search - Fast baseline
+        - grid: Grid search - Exhaustive but slow
+        - genetic: NSGA-II evolutionary algorithm - Good for multi-objective
+
+        Args:
+            X_train: Training features
+            y_train: Training target
+            X_val: Validation features
+            y_val: Validation target
+
+        Returns:
+            Optimized hyperparameters dict
+        """
+        if not OPTUNA_AVAILABLE:
+            logger.warning("Optuna not available, using default hyperparameters")
+            return self._get_default_params()
+
+        method = self.config.ml_optimization_method
+        if method == "none":
+            return self._get_default_params()
+
+        logger.info(f"Starting hyperparameter optimization with method='{method}'")
+
+        # Select sampler based on method
+        sampler = self._get_optuna_sampler(method)
+
+        # Create Optuna study
+        study = optuna.create_study(
+            direction="maximize" if self.config.ml_optimization_metric in ["ic", "sharpe"] else "minimize",
+            sampler=sampler,
+        )
+
+        # Define objective function
+        def objective(trial: optuna.Trial) -> float:
+            params = {
+                "n_estimators": trial.suggest_int("n_estimators", 50, 300),
+                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+                "num_leaves": trial.suggest_int("num_leaves", 15, 63),
+                "min_child_samples": trial.suggest_int("min_child_samples", 5, 50),
+                "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+                "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+                "reg_alpha": trial.suggest_float("reg_alpha", 1e-8, 10.0, log=True),
+                "reg_lambda": trial.suggest_float("reg_lambda", 1e-8, 10.0, log=True),
+                **self.config.ml_params,  # Base params (objective, boosting_type, etc.)
+            }
+
+            # Train model
+            model = lgb.LGBMRegressor(**params)
+            if len(X_val) > 10:
+                model.fit(
+                    X_train.values, y_train.values,
+                    eval_set=[(X_val.values, y_val.values)],
+                    callbacks=[lgb.early_stopping(stopping_rounds=self.config.ml_early_stopping_rounds, verbose=False)],
+                )
+            else:
+                model.fit(X_train.values, y_train.values)
+
+            # Evaluate based on metric
+            y_pred = model.predict(X_val.values)
+            return self._calculate_optimization_metric(y_val.values, y_pred)
+
+        # Run optimization
+        study.optimize(
+            objective,
+            n_trials=self.config.ml_optimization_trials,
+            timeout=self.config.ml_optimization_timeout,
+            show_progress_bar=False,
+        )
+
+        logger.info(
+            f"Optimization complete: best {self.config.ml_optimization_metric}={study.best_value:.4f}, "
+            f"trials={len(study.trials)}"
+        )
+
+        # Return best params merged with base params
+        best_params = {**self.config.ml_params, **study.best_params}
+        return best_params
+
+    def _get_optuna_sampler(self, method: str):
+        """Get Optuna sampler based on optimization method.
+
+        Args:
+            method: One of 'bayesian', 'random', 'grid', 'genetic'
+
+        Returns:
+            Optuna sampler instance
+        """
+        if method == "bayesian":
+            return TPESampler(seed=42)
+        elif method == "random":
+            return RandomSampler(seed=42)
+        elif method == "grid":
+            # Grid sampler requires search space - use default grid
+            search_space = {
+                "n_estimators": [50, 100, 150, 200],
+                "max_depth": [3, 5, 7, 9],
+                "learning_rate": [0.01, 0.05, 0.1, 0.2],
+                "num_leaves": [15, 31, 47, 63],
+            }
+            return GridSampler(search_space, seed=42)
+        elif method == "genetic":
+            return NSGAIISampler(seed=42)
+        else:
+            logger.warning(f"Unknown optimization method '{method}', using bayesian")
+            return TPESampler(seed=42)
+
+    def _calculate_optimization_metric(self, y_true: np.ndarray, y_pred: np.ndarray) -> float:
+        """Calculate optimization metric.
+
+        Args:
+            y_true: True values
+            y_pred: Predicted values
+
+        Returns:
+            Metric value (higher is better for ic/sharpe, lower for mse)
+        """
+        metric = self.config.ml_optimization_metric
+
+        if metric == "ic":
+            # Information Coefficient (rank correlation)
+            from scipy.stats import spearmanr
+            ic, _ = spearmanr(y_true, y_pred)
+            return ic if not np.isnan(ic) else 0.0
+
+        elif metric == "sharpe":
+            # Simplified Sharpe-like metric: mean / std of prediction-aligned returns
+            # Positive predictions aligned with positive returns
+            aligned_returns = y_true * np.sign(y_pred)
+            if np.std(aligned_returns) > 0:
+                return np.mean(aligned_returns) / np.std(aligned_returns)
+            return 0.0
+
+        elif metric == "mse":
+            # Mean Squared Error (lower is better, return negative for maximization)
+            mse = np.mean((y_true - y_pred) ** 2)
+            return -mse  # Negative because Optuna maximizes
+
+        else:
+            logger.warning(f"Unknown metric '{metric}', using IC")
+            from scipy.stats import spearmanr
+            ic, _ = spearmanr(y_true, y_pred)
+            return ic if not np.isnan(ic) else 0.0
+
+    def _get_default_params(self) -> dict:
+        """Get default LightGBM parameters from config."""
+        return {
+            **self.config.ml_params,
+            "n_estimators": self.config.ml_n_estimators,
+            "max_depth": self.config.ml_max_depth,
+            "learning_rate": self.config.ml_learning_rate,
+        }
 
     def _generate_ml_signal(
         self,

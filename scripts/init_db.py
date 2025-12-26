@@ -93,7 +93,30 @@ async def init_database():
                 print("ohlcv_data index created")
 
                 # ========================================
-                # 4. Create indexes for other tables
+                # 4. Derivative data hypertables (crypto-specific)
+                # ========================================
+                derivative_tables = [
+                    ("funding_rates", "资金费率"),
+                    ("open_interest", "持仓量"),
+                    ("liquidations", "强平数据"),
+                    ("long_short_ratios", "多空比"),
+                    ("mark_prices", "标记价格"),
+                    ("taker_buy_sell", "主动买卖"),
+                ]
+                for table_name, desc in derivative_tables:
+                    try:
+                        await conn.execute(text(
+                            f"SELECT create_hypertable('{table_name}', 'timestamp', if_not_exists => TRUE);"
+                        ))
+                        await conn.execute(text(
+                            f"SELECT add_compression_policy('{table_name}', INTERVAL '7 days', if_not_exists => TRUE);"
+                        ))
+                        print(f"{table_name} hypertable created ({desc})")
+                    except Exception as e:
+                        print(f"Warning: {table_name} hypertable creation failed: {e}")
+
+                # ========================================
+                # 5. Create indexes for other tables
                 # ========================================
                 # mining_tasks index
                 await conn.execute(text("""

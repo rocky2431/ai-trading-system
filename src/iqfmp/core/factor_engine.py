@@ -751,9 +751,11 @@ class QlibFactorEngine:
         # This is the critical security gate - no code runs without passing
         # =====================================================================
         security_checker = ASTSecurityChecker()
-        is_safe, violations = security_checker.check(code)
-        if not is_safe:
-            violation_details = "; ".join(violations[:5])  # Limit to first 5
+        result = security_checker.check(code)
+        if not result.is_safe:
+            violation_details = "; ".join(
+                [v.message for v in result.violations[:5]]
+            )  # Limit to first 5
             raise ValueError(
                 f"SECURITY VIOLATION: Code failed security check. "
                 f"Violations: {violation_details}"

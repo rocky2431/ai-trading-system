@@ -332,9 +332,11 @@ class QlibExpressionEngine:
         # P0 SECURITY: Mandatory AST security check before any eval
         # This prevents code injection through malicious expressions
         # =====================================================================
-        is_safe, violations = _security_checker.check(expr)
-        if not is_safe:
-            violation_details = "; ".join(violations[:5])
+        result = _security_checker.check(expr)
+        if not result.is_safe:
+            violation_details = "; ".join(
+                [v.message for v in result.violations[:5]]
+            )
             raise ValueError(
                 f"SECURITY VIOLATION: Expression failed security check. "
                 f"Expression: {expr[:100]}... Violations: {violation_details}"

@@ -913,11 +913,11 @@ class BacktestOptimizationAgent:
         self.realistic_engine: Optional[RealisticBacktestEngine] = None
         if self.config.use_realistic_costs and REALISTIC_BACKTEST_AVAILABLE:
             cost_config = BacktestCostConfig(
-                funding_settlement_hours=self.config.funding_settlement_hours,
+                funding_settlement_hours=[0, 8, 16],  # Standard 8h settlement
                 maker_fee=self.config.maker_fee,
                 taker_fee=self.config.taker_fee,
-                slippage_base=self.config.slippage_base,
-                slippage_vol_multiplier=self.config.slippage_vol_multiplier,
+                slippage_bps=self.config.slippage_base * 10000,  # Convert to bps
+                slippage_dynamic=self.config.slippage_vol_multiplier > 0,
             )
             self.realistic_engine = RealisticBacktestEngine(cost_config)
             logger.info(

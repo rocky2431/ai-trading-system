@@ -274,15 +274,16 @@ export function FactorMiningPage() {
     minIcImprovement: 0.02,
   })
 
-  // Model Config
+  // Model Config - P0 FIX: Added mlSignalEnabled for explicit ML signal control
   const [modelConfig, setModelConfig] = useState({
+    mlSignalEnabled: true, // Enable ML-based signal generation (not just simple Z-Score)
     modelType: 'lightgbm' as 'lightgbm' | 'xgboost' | 'catboost' | 'linear',
     optimizationMethod: 'bayesian' as 'bayesian' | 'genetic' | 'grid' | 'random',
     maxTrials: 100,
     earlyStoppingRounds: 20,
   })
 
-  // Robustness Config
+  // Robustness Config - P1 FIX: Added enableRedundancyFilter for vector dedup control
   const [robustnessConfig, setRobustnessConfig] = useState({
     enableWalkForward: true,
     walkForwardWindows: 5,
@@ -291,6 +292,7 @@ export function FactorMiningPage() {
     enableDynamicThreshold: true,
     enableIcDecay: true,
     icDecayThreshold: 0.5,
+    enableRedundancyFilter: true, // Vector dedup: prevent generating duplicate factors
     redundancyThreshold: 0.85,
   })
 
@@ -323,7 +325,9 @@ export function FactorMiningPage() {
             min_ic_improvement: benchmarkConfig.minIcImprovement,
           },
           ml_config: {
-            models: [modelConfig.modelType],
+            // P0 FIX: Only include models when ML signal is enabled
+            // Backend checks models[0] to determine if ML is enabled
+            models: modelConfig.mlSignalEnabled ? [modelConfig.modelType] : [],
             optimization_method: modelConfig.optimizationMethod,
             max_trials: modelConfig.maxTrials,
             early_stopping_rounds: modelConfig.earlyStoppingRounds,
@@ -336,6 +340,8 @@ export function FactorMiningPage() {
             enable_dynamic_threshold: robustnessConfig.enableDynamicThreshold,
             enable_ic_decay: robustnessConfig.enableIcDecay,
             ic_decay_threshold: robustnessConfig.icDecayThreshold,
+            // P1 FIX: Vector dedup configuration
+            use_redundancy_filter: robustnessConfig.enableRedundancyFilter,
             redundancy_threshold: robustnessConfig.redundancyThreshold,
           },
         }
@@ -858,11 +864,30 @@ export function FactorMiningPage() {
 
                   {/* Model Config */}
                   <div className="space-y-4 border-t pt-4">
-                    <h4 className="font-medium flex items-center gap-2">
-                      <Brain className="h-4 w-4 text-emerald-500" />
-                      Model Configuration
-                    </h4>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="flex items-center justify-between">
+                      <h4 className="font-medium flex items-center gap-2">
+                        <Brain className="h-4 w-4 text-emerald-500" />
+                        ML Signal Generation
+                      </h4>
+                      {/* P0 FIX: Explicit toggle for ML signal generation */}
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-muted-foreground">
+                          {modelConfig.mlSignalEnabled ? 'LightGBM' : 'Z-Score (default)'}
+                        </span>
+                        <Switch
+                          checked={modelConfig.mlSignalEnabled}
+                          onCheckedChange={(checked) =>
+                            setModelConfig({ ...modelConfig, mlSignalEnabled: checked })
+                          }
+                        />
+                      </div>
+                    </div>
+                    {modelConfig.mlSignalEnabled && (
+                      <p className="text-sm text-muted-foreground">
+                        Use ML model to generate signals from factors (instead of simple Z-Score normalization)
+                      </p>
+                    )}
+                    <div className={`grid grid-cols-2 gap-4 ${!modelConfig.mlSignalEnabled ? 'opacity-50 pointer-events-none' : ''}`}>
                       <div className="space-y-2">
                         <Label>ML Model</Label>
                         <div className="flex flex-wrap gap-2">
@@ -900,7 +925,7 @@ export function FactorMiningPage() {
                         </div>
                       </div>
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className={`grid grid-cols-2 gap-4 ${!modelConfig.mlSignalEnabled ? 'opacity-50 pointer-events-none' : ''}`}>
                       <div className="space-y-2">
                         <Label>Max Trials: {modelConfig.maxTrials}</Label>
                         <Slider
@@ -1017,19 +1042,36 @@ export function FactorMiningPage() {
                           }
                         />
                       </div>
-                      <div className="space-y-2">
-                        <Label>
-                          Redundancy Threshold: {robustnessConfig.redundancyThreshold.toFixed(2)}
-                        </Label>
-                        <Slider
-                          value={robustnessConfig.redundancyThreshold * 100}
-                          onValueChange={(v) =>
-                            setRobustnessConfig({ ...robustnessConfig, redundancyThreshold: v / 100 })
-                          }
-                          min={70}
-                          max={95}
-                          step={5}
-                        />
+                      {/* P1 FIX: Vector dedup toggle and threshold */}
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <Label>Vector Dedup (Redundancy Filter)</Label>
+                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                              Prevent generating duplicate factors
+                            </p>
+                          </div>
+                          <Switch
+                            checked={robustnessConfig.enableRedundancyFilter}
+                            onCheckedChange={(v) =>
+                              setRobustnessConfig({ ...robustnessConfig, enableRedundancyFilter: v })
+                            }
+                          />
+                        </div>
+                        <div className={`space-y-2 ${!robustnessConfig.enableRedundancyFilter ? 'opacity-50 pointer-events-none' : ''}`}>
+                          <Label>
+                            Similarity Threshold: {robustnessConfig.redundancyThreshold.toFixed(2)}
+                          </Label>
+                          <Slider
+                            value={robustnessConfig.redundancyThreshold * 100}
+                            onValueChange={(v) =>
+                              setRobustnessConfig({ ...robustnessConfig, redundancyThreshold: v / 100 })
+                            }
+                            min={70}
+                            max={95}
+                            step={5}
+                          />
+                        </div>
                       </div>
                     </div>
                   </div>

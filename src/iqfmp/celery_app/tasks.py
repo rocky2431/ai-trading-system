@@ -919,6 +919,49 @@ def _execute_factor_evaluation(
 
         factor_values = engine.compute_factor(factor_code, factor_name=factor_id)
 
+        # ==========================================================================
+        # P0 FIX: ML-based signal generation using SignalConverter
+        # When ml_config.models contains ML models, use LightGBM for signal generation
+        # instead of simple Z-Score normalization
+        # ==========================================================================
+        ml_cfg = config.get("ml_config") or {}
+        ml_models = ml_cfg.get("models", [])
+        ml_enabled = len(ml_models) > 0 and ml_models[0] in ["lightgbm", "catboost", "xgboost"]
+
+        if ml_enabled:
+            try:
+                from iqfmp.core.signal_converter import SignalConverter, SignalConfig
+
+                # Map frontend params to SignalConfig
+                # Note: optimization_method (bayesian/genetic/grid) requires Optuna integration (P2 TODO)
+                signal_config = SignalConfig(
+                    ml_signal_enabled=True,
+                    ml_model_type=ml_models[0],  # e.g., "lightgbm"
+                    ml_n_estimators=ml_cfg.get("max_trials", 100),  # Frontend max_trials → ML n_estimators
+                    ml_early_stopping_rounds=ml_cfg.get("early_stopping_rounds", 20),  # Frontend → LightGBM early stopping
+                    ml_lookback_window=60,  # Default lookback
+                    ml_forward_period=5,    # Default forward period
+                    ml_train_ratio=0.7,     # Default train ratio
+                )
+
+                converter = SignalConverter(signal_config)
+                df = engine.data
+
+                task.update_state(
+                    state="PROGRESS",
+                    meta={"current": 55, "total": 100, "status": f"Generating ML signal with {ml_models[0]}..."},
+                )
+
+                # Convert factor to ML-enhanced signal
+                ml_signal = converter.to_signal(factor_values, price_data=df)
+                if ml_signal is not None and len(ml_signal) > 0:
+                    factor_values = ml_signal
+                    logger.info(f"ML signal generation successful with {ml_models[0]}")
+                else:
+                    logger.warning(f"ML signal generation returned empty, using original factor values")
+            except Exception as e:
+                logger.warning(f"ML signal generation failed ({e}), using original factor values")
+
         # 阶段3: 评估因子
         task.update_state(
             state="PROGRESS",
@@ -1070,13 +1113,24 @@ def _execute_factor_generation(
 
     # 创建 agent 配置
     max_retries = config.get("max_retries", 5)
+
+    # P1 FIX: Vector dedup configuration from robustness_config
+    # Accept both frontend field names (redundancy_threshold) and schema field names (cluster_threshold)
+    robustness_cfg = config.get("robustness_config") or {}
+    vector_dedup_enabled = robustness_cfg.get("use_redundancy_filter", True)
+    vector_dedup_threshold = robustness_cfg.get("redundancy_threshold") or robustness_cfg.get("cluster_threshold", 0.85)
+
     agent_config = FactorGenerationConfig(
         name="celery_factor_generator",
         security_check_enabled=True,
         field_constraint_enabled=True,
         max_retries=max_retries,
         include_examples=True,
+        # P1 FIX: Enable vector dedup to prevent "memory loss" (generating duplicate factors)
+        vector_dedup_enabled=vector_dedup_enabled,
+        vector_dedup_threshold=vector_dedup_threshold,
     )
+    logger.info(f"Factor generation config: vector_dedup={vector_dedup_enabled}, threshold={vector_dedup_threshold}")
 
     async def _generate_with_feedback_loop() -> dict[str, Any]:
         """异步生成因子，包含智能指标反馈循环
@@ -1369,6 +1423,8 @@ def mining_task(
             families=families,
             auto_evaluate=auto_evaluate,
             data_config=task_config.get("data_config"),
+            ml_config=task_config.get("ml_config"),  # P0 FIX: Pass ML config for signal generation
+            robustness_config=task_config.get("robustness_config"),  # P1 FIX: Pass robustness config for vector dedup
         )
 
         logger.info(f"Mining task {task_id} completed: {result}")
@@ -1402,6 +1458,8 @@ def _execute_mining_task(
     families: list[str],
     auto_evaluate: bool,
     data_config: dict | None = None,
+    ml_config: dict | None = None,  # P0 FIX: ML configuration for signal generation
+    robustness_config: dict | None = None,  # P1 FIX: Robustness config for vector dedup
 ) -> dict[str, Any]:
     """执行因子挖掘的内部实现.
 
@@ -1482,11 +1540,14 @@ def _execute_mining_task(
 
         try:
             # Generate factor using sync implementation
+            # P1 FIX: Pass robustness_config for vector dedup
             factor_result = _execute_factor_generation(
                 celery_task,
                 hypothesis=description,
                 factor_family=family,
-                config={},
+                config={
+                    "robustness_config": robustness_config or {},
+                },
             )
             generated_count += 1
 
@@ -1500,6 +1561,7 @@ def _execute_mining_task(
                         config={
                             "n_trials": generated_count,
                             "data_config": data_config or {},
+                            "ml_config": ml_config or {},  # P0 FIX: Pass ML config for signal generation
                         },
                     )
                     sharpe = eval_result.get("sharpe", 0.0)

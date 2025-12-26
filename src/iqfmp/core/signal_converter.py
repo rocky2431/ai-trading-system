@@ -154,6 +154,7 @@ class SignalConfig:
     ml_learning_rate: float = 0.1  # Learning rate
     ml_min_samples: int = 100  # Minimum samples required for ML
     ml_retrain_frequency: int = 20  # Retrain every N days (0 = train once)
+    ml_early_stopping_rounds: int = 20  # Early stopping rounds for LightGBM
 
     # Default LightGBM params (can be overridden)
     ml_params: dict = field(default_factory=lambda: {
@@ -385,7 +386,7 @@ class SignalConverter:
         # Create Qlib LGBModel with our parameters
         model = QlibLGBModel(
             loss="mse",
-            early_stopping_rounds=20 if len(X_val) > 10 else None,
+            early_stopping_rounds=self.config.ml_early_stopping_rounds if len(X_val) > 10 else None,
             num_boost_round=self.config.ml_n_estimators,
             max_depth=self.config.ml_max_depth,
             learning_rate=self.config.ml_learning_rate,
@@ -459,7 +460,7 @@ class SignalConverter:
             model.fit(
                 X_train.values, y_train.values,
                 eval_set=[(X_val.values, y_val.values)],
-                callbacks=[lgb.early_stopping(stopping_rounds=20, verbose=False)],
+                callbacks=[lgb.early_stopping(stopping_rounds=self.config.ml_early_stopping_rounds, verbose=False)],
             )
         else:
             model.fit(X_train.values, y_train.values)

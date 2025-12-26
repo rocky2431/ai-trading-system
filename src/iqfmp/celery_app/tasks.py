@@ -933,15 +933,25 @@ def _execute_factor_evaluation(
                 from iqfmp.core.signal_converter import SignalConverter, SignalConfig
 
                 # Map frontend params to SignalConfig
-                # Note: optimization_method (bayesian/genetic/grid) requires Optuna integration (P2 TODO)
+                # P2 COMPLETE: Added Optuna hyperparameter optimization support
+                optimization_method = ml_cfg.get("optimization_method", "none")
+                optimization_trials = ml_cfg.get("max_trials", 20)  # Dual-purpose: n_estimators if no optimization, trials if optimization
+                optimization_metric = ml_cfg.get("optimization_metric", "ic")  # ic, sharpe, mse
+
                 signal_config = SignalConfig(
+                    # P0: ML Signal enabled
                     ml_signal_enabled=True,
                     ml_model_type=ml_models[0],  # e.g., "lightgbm"
-                    ml_n_estimators=ml_cfg.get("max_trials", 100),  # Frontend max_trials → ML n_estimators
-                    ml_early_stopping_rounds=ml_cfg.get("early_stopping_rounds", 20),  # Frontend → LightGBM early stopping
-                    ml_lookback_window=60,  # Default lookback
-                    ml_forward_period=5,    # Default forward period
-                    ml_train_ratio=0.7,     # Default train ratio
+                    ml_n_estimators=100,  # Default; will be optimized if optimization enabled
+                    ml_early_stopping_rounds=ml_cfg.get("early_stopping_rounds", 20),
+                    ml_lookback_window=60,
+                    ml_forward_period=5,
+                    ml_train_ratio=0.7,
+                    # P2: Hyperparameter optimization with Optuna
+                    ml_optimization_method=optimization_method,  # none, bayesian, random, grid, genetic
+                    ml_optimization_trials=optimization_trials,  # Number of optimization trials
+                    ml_optimization_timeout=ml_cfg.get("optimization_timeout", 300),  # Timeout seconds
+                    ml_optimization_metric=optimization_metric,  # ic, sharpe, mse
                 )
 
                 converter = SignalConverter(signal_config)

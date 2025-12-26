@@ -275,11 +275,13 @@ export function FactorMiningPage() {
   })
 
   // Model Config - P0 FIX: Added mlSignalEnabled for explicit ML signal control
+  // P2 COMPLETE: Added optimization_metric and "none" option for optimization
   const [modelConfig, setModelConfig] = useState({
     mlSignalEnabled: true, // Enable ML-based signal generation (not just simple Z-Score)
     modelType: 'lightgbm' as 'lightgbm' | 'xgboost' | 'catboost' | 'linear',
-    optimizationMethod: 'bayesian' as 'bayesian' | 'genetic' | 'grid' | 'random',
-    maxTrials: 100,
+    optimizationMethod: 'bayesian' as 'none' | 'bayesian' | 'genetic' | 'grid' | 'random',
+    optimizationMetric: 'ic' as 'ic' | 'sharpe' | 'mse', // Metric to optimize
+    maxTrials: 20, // Number of optimization trials
     earlyStoppingRounds: 20,
   })
 
@@ -328,7 +330,9 @@ export function FactorMiningPage() {
             // P0 FIX: Only include models when ML signal is enabled
             // Backend checks models[0] to determine if ML is enabled
             models: modelConfig.mlSignalEnabled ? [modelConfig.modelType] : [],
-            optimization_method: modelConfig.optimizationMethod,
+            // P2 COMPLETE: Hyperparameter optimization with Optuna
+            optimization_method: modelConfig.mlSignalEnabled ? modelConfig.optimizationMethod : 'none',
+            optimization_metric: modelConfig.optimizationMetric, // ic, sharpe, mse
             max_trials: modelConfig.maxTrials,
             early_stopping_rounds: modelConfig.earlyStoppingRounds,
           },
@@ -905,9 +909,9 @@ export function FactorMiningPage() {
                         </div>
                       </div>
                       <div className="space-y-2">
-                        <Label>Optimization Method</Label>
+                        <Label>Optimization Method (P2: Optuna)</Label>
                         <div className="flex flex-wrap gap-2">
-                          {(['bayesian', 'genetic', 'grid', 'random'] as const).map((method) => (
+                          {(['none', 'bayesian', 'random', 'grid', 'genetic'] as const).map((method) => (
                             <Button
                               key={method}
                               type="button"
@@ -919,7 +923,28 @@ export function FactorMiningPage() {
                                 setModelConfig({ ...modelConfig, optimizationMethod: method })
                               }
                             >
-                              {method.charAt(0).toUpperCase() + method.slice(1)}
+                              {method === 'none' ? 'None' : method.charAt(0).toUpperCase() + method.slice(1)}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Optimization Metric</Label>
+                        <div className="flex flex-wrap gap-2">
+                          {(['ic', 'sharpe', 'mse'] as const).map((metric) => (
+                            <Button
+                              key={metric}
+                              type="button"
+                              variant={
+                                modelConfig.optimizationMetric === metric ? 'default' : 'outline'
+                              }
+                              size="sm"
+                              onClick={() =>
+                                setModelConfig({ ...modelConfig, optimizationMetric: metric })
+                              }
+                              disabled={modelConfig.optimizationMethod === 'none'}
+                            >
+                              {metric === 'ic' ? 'IC (Rank Corr)' : metric === 'sharpe' ? 'Sharpe-like' : 'MSE'}
                             </Button>
                           ))}
                         </div>

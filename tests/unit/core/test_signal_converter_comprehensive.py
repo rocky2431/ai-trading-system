@@ -654,3 +654,260 @@ class TestSignalConverterIntegration:
         # Convert to DataFrame
         df = dataset.to_dataframe()
         assert isinstance(df, pd.DataFrame)
+
+
+# =============================================================================
+# Test P2: Hyperparameter Optimization with Optuna
+# =============================================================================
+
+class TestSignalConfigOptimization:
+    """Tests for SignalConfig optimization fields (P2)."""
+
+    def test_optimization_default_values(self):
+        """Test default optimization configuration values."""
+        config = SignalConfig()
+
+        assert config.ml_optimization_method == "none"
+        assert config.ml_optimization_trials == 20
+        assert config.ml_optimization_timeout == 300
+        assert config.ml_optimization_metric == "ic"
+
+    def test_optimization_custom_values(self):
+        """Test custom optimization configuration values."""
+        config = SignalConfig(
+            ml_optimization_method="bayesian",
+            ml_optimization_trials=50,
+            ml_optimization_timeout=600,
+            ml_optimization_metric="sharpe",
+        )
+
+        assert config.ml_optimization_method == "bayesian"
+        assert config.ml_optimization_trials == 50
+        assert config.ml_optimization_timeout == 600
+        assert config.ml_optimization_metric == "sharpe"
+
+    def test_optimization_method_options(self):
+        """Test all valid optimization method options."""
+        for method in ["none", "bayesian", "random", "grid", "genetic"]:
+            config = SignalConfig(ml_optimization_method=method)
+            assert config.ml_optimization_method == method
+
+    def test_optimization_metric_options(self):
+        """Test all valid optimization metric options."""
+        for metric in ["ic", "sharpe", "mse"]:
+            config = SignalConfig(ml_optimization_metric=metric)
+            assert config.ml_optimization_metric == metric
+
+
+class TestSignalConverterOptimization:
+    """Tests for SignalConverter optimization methods (P2)."""
+
+    @pytest.fixture
+    def sample_price_data(self) -> pd.DataFrame:
+        """Create sample price data for ML tests."""
+        np.random.seed(42)
+        dates = pd.date_range("2024-01-01", periods=200, freq="D")
+        close = 100 * np.cumprod(1 + np.random.randn(200) * 0.02)
+        volume = np.random.randint(1000, 10000, 200)
+        return pd.DataFrame({
+            "close": close,
+            "volume": volume,
+        }, index=dates)
+
+    @pytest.fixture
+    def sample_factor_for_ml(self) -> pd.Series:
+        """Create sample factor with enough data for ML."""
+        np.random.seed(42)
+        return pd.Series(
+            np.random.randn(200),
+            index=pd.date_range("2024-01-01", periods=200, freq="D"),
+        )
+
+    def test_get_default_params(self):
+        """Test _get_default_params helper method."""
+        config = SignalConfig(
+            ml_n_estimators=150,
+            ml_max_depth=8,
+            ml_learning_rate=0.05,
+        )
+        converter = SignalConverter(config)
+        params = converter._get_default_params()
+
+        assert params["n_estimators"] == 150
+        assert params["max_depth"] == 8
+        assert params["learning_rate"] == 0.05
+        assert "objective" in params  # From ml_params
+
+    def test_calculate_optimization_metric_ic(self):
+        """Test IC (Information Coefficient) metric calculation."""
+        config = SignalConfig(ml_optimization_metric="ic")
+        converter = SignalConverter(config)
+
+        y_true = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+        y_pred = np.array([1.1, 2.2, 2.8, 4.1, 5.2])  # Highly correlated
+
+        ic = converter._calculate_optimization_metric(y_true, y_pred)
+
+        # Should be close to 1.0 for highly correlated predictions
+        assert ic > 0.9
+        assert ic <= 1.0
+
+    def test_calculate_optimization_metric_sharpe(self):
+        """Test Sharpe-like metric calculation."""
+        config = SignalConfig(ml_optimization_metric="sharpe")
+        converter = SignalConverter(config)
+
+        # Predictions aligned with positive returns
+        y_true = np.array([0.01, 0.02, -0.01, 0.03, 0.01])
+        y_pred = np.array([1.0, 1.0, -1.0, 1.0, 1.0])  # Correct signs
+
+        sharpe = converter._calculate_optimization_metric(y_true, y_pred)
+
+        # Should be positive when predictions align with returns
+        assert sharpe > 0
+
+    def test_calculate_optimization_metric_mse(self):
+        """Test MSE metric calculation."""
+        config = SignalConfig(ml_optimization_metric="mse")
+        converter = SignalConverter(config)
+
+        y_true = np.array([1.0, 2.0, 3.0])
+        y_pred = np.array([1.0, 2.0, 3.0])  # Perfect predictions
+
+        mse = converter._calculate_optimization_metric(y_true, y_pred)
+
+        # MSE returns negative for maximization, perfect = 0
+        assert mse == 0.0
+
+    def test_get_optuna_sampler_bayesian(self):
+        """Test Optuna sampler selection for bayesian."""
+        try:
+            from optuna.samplers import TPESampler
+        except ImportError:
+            pytest.skip("Optuna not installed")
+
+        config = SignalConfig(ml_optimization_method="bayesian")
+        converter = SignalConverter(config)
+        sampler = converter._get_optuna_sampler("bayesian")
+
+        assert isinstance(sampler, TPESampler)
+
+    def test_get_optuna_sampler_random(self):
+        """Test Optuna sampler selection for random."""
+        try:
+            from optuna.samplers import RandomSampler
+        except ImportError:
+            pytest.skip("Optuna not installed")
+
+        config = SignalConfig(ml_optimization_method="random")
+        converter = SignalConverter(config)
+        sampler = converter._get_optuna_sampler("random")
+
+        assert isinstance(sampler, RandomSampler)
+
+    def test_get_optuna_sampler_grid(self):
+        """Test Optuna sampler selection for grid."""
+        try:
+            from optuna.samplers import GridSampler
+        except ImportError:
+            pytest.skip("Optuna not installed")
+
+        config = SignalConfig(ml_optimization_method="grid")
+        converter = SignalConverter(config)
+        sampler = converter._get_optuna_sampler("grid")
+
+        assert isinstance(sampler, GridSampler)
+
+    def test_get_optuna_sampler_genetic(self):
+        """Test Optuna sampler selection for genetic."""
+        try:
+            from optuna.samplers import NSGAIISampler
+        except ImportError:
+            pytest.skip("Optuna not installed")
+
+        config = SignalConfig(ml_optimization_method="genetic")
+        converter = SignalConverter(config)
+        sampler = converter._get_optuna_sampler("genetic")
+
+        assert isinstance(sampler, NSGAIISampler)
+
+    def test_get_optuna_sampler_unknown_fallback(self):
+        """Test Optuna sampler fallback for unknown method."""
+        try:
+            from optuna.samplers import TPESampler
+        except ImportError:
+            pytest.skip("Optuna not installed")
+
+        config = SignalConfig()
+        converter = SignalConverter(config)
+        sampler = converter._get_optuna_sampler("unknown_method")
+
+        # Should fallback to TPESampler (bayesian)
+        assert isinstance(sampler, TPESampler)
+
+    @pytest.mark.skipif(
+        not pytest.importorskip("optuna", reason="Optuna not installed"),
+        reason="Optuna not installed"
+    )
+    @pytest.mark.skipif(
+        not pytest.importorskip("lightgbm", reason="LightGBM not installed"),
+        reason="LightGBM not installed"
+    )
+    def test_optimize_hyperparameters_returns_dict(
+        self,
+        sample_factor_for_ml: pd.Series,
+        sample_price_data: pd.DataFrame,
+    ):
+        """Test that _optimize_hyperparameters returns a valid params dict."""
+        config = SignalConfig(
+            ml_signal_enabled=True,
+            ml_optimization_method="random",  # Fast
+            ml_optimization_trials=3,  # Minimal trials for speed
+            ml_optimization_timeout=30,
+        )
+        converter = SignalConverter(config)
+
+        # Build features and target
+        features = converter._build_ml_features(sample_factor_for_ml, sample_price_data)
+        target = converter._calculate_target(sample_price_data, sample_factor_for_ml.index)
+
+        # Clean data
+        valid_mask = features.notna().all(axis=1) & target.notna()
+        X_clean = features.loc[valid_mask]
+        y_clean = target.loc[valid_mask]
+
+        # Split
+        train_size = int(len(X_clean) * 0.7)
+        X_train = X_clean.iloc[:train_size]
+        y_train = y_clean.iloc[:train_size]
+        X_val = X_clean.iloc[train_size:]
+        y_val = y_clean.iloc[train_size:]
+
+        # Run optimization
+        params = converter._optimize_hyperparameters(X_train, y_train, X_val, y_val)
+
+        # Verify params dict structure
+        assert isinstance(params, dict)
+        assert "n_estimators" in params
+        assert "max_depth" in params
+        assert "learning_rate" in params
+
+    def test_optimization_disabled_returns_defaults(self):
+        """Test that optimization='none' returns default params."""
+        config = SignalConfig(
+            ml_signal_enabled=True,
+            ml_optimization_method="none",
+        )
+        converter = SignalConverter(config)
+
+        # Create minimal dummy data
+        X_train = pd.DataFrame({"a": [1, 2, 3]})
+        y_train = pd.Series([0.1, 0.2, 0.3])
+        X_val = pd.DataFrame({"a": [4, 5]})
+        y_val = pd.Series([0.4, 0.5])
+
+        params = converter._optimize_hyperparameters(X_train, y_train, X_val, y_val)
+        default_params = converter._get_default_params()
+
+        # Should return default params when optimization is "none"
+        assert params == default_params

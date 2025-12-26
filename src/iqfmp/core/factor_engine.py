@@ -57,6 +57,9 @@ from iqfmp.core.qlib_crypto import QlibExpressionEngine, QlibUnavailableError
 # Import data provider for DB integration
 from iqfmp.core.data_provider import load_ohlcv_sync, DataProvider
 
+# P0 SECURITY: Import ASTSecurityChecker for mandatory code validation
+from iqfmp.core.security import ASTSecurityChecker
+
 # C4: Import UnifiedMarketDataProvider for derivative fields
 try:
     from iqfmp.data.provider import (
@@ -124,7 +127,8 @@ class QlibFactorEngine:
         timeframe: str = "1d",
         require_qlib: bool = True,
         allow_python_factors: bool = False,
-        use_d_features: bool = False,
+        # P1-3 FIX: Default to True - fully utilize Qlib's optimized expression engine
+        use_d_features: bool = True,
     ):
         """Initialize Qlib factor engine.
 
@@ -138,8 +142,8 @@ class QlibFactorEngine:
             timeframe: Default timeframe to load when df is not provided
             require_qlib: Require Qlib backend; raise if unavailable
             allow_python_factors: Allow custom Python factor functions (non-Qlib)
-            use_d_features: Use D.features() API instead of local DataFrame computation.
-                            Requires Qlib binary data to be available.
+            use_d_features: Use D.features() API for optimized Qlib expression evaluation.
+                            Default True to fully utilize Qlib's vectorized engine.
         """
         self._qlib_initialized = False
         self._provider_uri = provider_uri
@@ -742,8 +746,21 @@ class QlibFactorEngine:
 
         local_vars: dict = {}
 
+        # =====================================================================
+        # P0 SECURITY: Mandatory AST security check before any code execution
+        # This is the critical security gate - no code runs without passing
+        # =====================================================================
+        security_checker = ASTSecurityChecker()
+        is_safe, violations = security_checker.check(code)
+        if not is_safe:
+            violation_details = "; ".join(violations[:5])  # Limit to first 5
+            raise ValueError(
+                f"SECURITY VIOLATION: Code failed security check. "
+                f"Violations: {violation_details}"
+            )
+
         try:
-            # Execute the function definition
+            # Execute the function definition (only after security check passes)
             exec(code, safe_globals, local_vars)
 
             # Get the function

@@ -4,10 +4,11 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from iqfmp import __version__
+from iqfmp.api.auth.dependencies import get_current_user
 from iqfmp.api.auth.router import router as auth_router
 from iqfmp.api.backtest.router import router as backtest_router
 from iqfmp.api.config.router import router as config_router
@@ -69,16 +70,42 @@ def create_app() -> FastAPI:
     )
 
     # Include routers
+    # Auth router - NO authentication required (login/register endpoints)
     app.include_router(auth_router, prefix="/api/v1/auth")
-    app.include_router(backtest_router, prefix="/api/v1/backtest")
-    app.include_router(config_router, prefix="/api/v1/config")
-    app.include_router(data_router, prefix="/api/v1/data")
-    app.include_router(factors_router, prefix="/api/v1/factors")
-    app.include_router(pipeline_router, prefix="/api/v1/pipeline")
-    app.include_router(research_router, prefix="/api/v1/research")
-    app.include_router(metrics_router, prefix="/api/v1/metrics")
-    app.include_router(strategies_router, prefix="/api/v1/strategies")
-    app.include_router(system_router, prefix="/api/v1/system")
+
+    # =========================================================================
+    # P0-2 SECURITY: All protected routes MUST have JWT authentication
+    # This ensures no API endpoint can be accessed without valid credentials
+    # =========================================================================
+    auth_dependency = [Depends(get_current_user)]
+
+    app.include_router(
+        backtest_router, prefix="/api/v1/backtest", dependencies=auth_dependency
+    )
+    app.include_router(
+        config_router, prefix="/api/v1/config", dependencies=auth_dependency
+    )
+    app.include_router(
+        data_router, prefix="/api/v1/data", dependencies=auth_dependency
+    )
+    app.include_router(
+        factors_router, prefix="/api/v1/factors", dependencies=auth_dependency
+    )
+    app.include_router(
+        pipeline_router, prefix="/api/v1/pipeline", dependencies=auth_dependency
+    )
+    app.include_router(
+        research_router, prefix="/api/v1/research", dependencies=auth_dependency
+    )
+    app.include_router(
+        metrics_router, prefix="/api/v1/metrics", dependencies=auth_dependency
+    )
+    app.include_router(
+        strategies_router, prefix="/api/v1/strategies", dependencies=auth_dependency
+    )
+    app.include_router(
+        system_router, prefix="/api/v1/system", dependencies=auth_dependency
+    )
 
     @app.get("/health")
     async def health_check() -> dict[str, str]:

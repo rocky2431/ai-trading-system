@@ -85,7 +85,9 @@ class PipelineConfig:
     enable_risk_check: bool = True
 
     # Vector database settings (Qdrant)
-    require_vector_db: bool = False  # If True, pipeline fails if Qdrant unavailable
+    # P1-1 FIX: Default to True - factor deduplication MUST use vector DB
+    # Without this, duplicate factors waste compute and degrade signal quality
+    require_vector_db: bool = True  # Pipeline fails if Qdrant unavailable
     dedup_threshold: float = 0.85  # Similarity threshold for deduplication
 
     # Orchestrator settings

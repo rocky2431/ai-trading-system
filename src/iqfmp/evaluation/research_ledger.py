@@ -13,6 +13,7 @@ to account for multiple hypothesis testing.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import uuid
 from abc import ABC, abstractmethod
@@ -25,6 +26,8 @@ import numpy as np
 
 # Use Qlib-native statistics instead of scipy
 from iqfmp.evaluation.qlib_stats import normal_ppf, normal_cdf
+
+logger = logging.getLogger(__name__)
 
 
 class InvalidTrialError(Exception):
@@ -717,6 +720,29 @@ class LedgerStatistics:
     median_sharpe: float = 0.0
 
 
+def _get_default_storage() -> "LedgerStorage":
+    """Get the default storage backend with PostgreSQL preference.
+
+    P1-2 FIX: Production systems MUST use PostgresStorage to persist
+    research trials. MemoryStorage loses all data on restart.
+
+    Returns:
+        PostgresStorage if database is available, MemoryStorage with warning otherwise.
+    """
+    try:
+        storage = PostgresStorage()
+        # Test that we can actually load (validates DB connection)
+        storage.load()
+        logger.info("ResearchLedger using PostgresStorage (production mode)")
+        return storage
+    except Exception as e:
+        logger.warning(
+            f"PostgresStorage unavailable ({e}), falling back to MemoryStorage. "
+            "WARNING: Research trials will NOT persist across restarts!"
+        )
+        return MemoryStorage()
+
+
 class ResearchLedger:
     """Main ledger for tracking factor evaluation trials.
 
@@ -735,10 +761,11 @@ class ResearchLedger:
         """Initialize ledger with storage and threshold calculator.
 
         Args:
-            storage: Storage backend (defaults to MemoryStorage)
+            storage: Storage backend (defaults to PostgresStorage with fallback)
             threshold: Threshold calculator (defaults to DynamicThreshold)
         """
-        self._storage = storage or MemoryStorage()
+        # P1-2 FIX: Default to PostgresStorage for production persistence
+        self._storage = storage or _get_default_storage()
         self._threshold = threshold or DynamicThreshold()
         self._trials: list[TrialRecord] = self._storage.load()
 

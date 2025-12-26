@@ -26,6 +26,14 @@ import re
 
 import pandas as pd
 
+# P0 SECURITY: Import ASTSecurityChecker for mandatory code validation
+from iqfmp.core.security import ASTSecurityChecker
+
+# Module-level security checker instance (reused for performance)
+_security_checker = ASTSecurityChecker()
+
+logger = logging.getLogger(__name__)
+
 
 # =============================================================================
 # LLM Integration Protocol and System Prompts
@@ -541,6 +549,18 @@ Format as JSON:
                 raise DataValidationError(
                     f"Python factor code is not allowed by default (factor={factor_name}). "
                     "Provide a Qlib expression or set allow_python_factors=True explicitly."
+                )
+
+            # =================================================================
+            # P0 SECURITY: Mandatory AST security check before any exec
+            # This prevents code injection through malicious factor code
+            # =================================================================
+            is_safe, violations = _security_checker.check(factor_code)
+            if not is_safe:
+                violation_details = "; ".join(violations[:5])
+                raise DataValidationError(
+                    f"SECURITY VIOLATION: Factor code failed security check "
+                    f"(factor={factor_name}). Violations: {violation_details}"
                 )
 
             # Best-effort sandboxed evaluation: no imports, no builtins beyond a small whitelist.

@@ -20,7 +20,13 @@ from typing import Any, Callable, Optional, Union
 import numpy as np
 import pandas as pd
 
+# P0 SECURITY: Import ASTSecurityChecker for mandatory expression validation
+from iqfmp.core.security import ASTSecurityChecker
+
 logger = logging.getLogger(__name__)
+
+# Module-level security checker instance (reused for performance)
+_security_checker = ASTSecurityChecker()
 
 try:
     from iqfmp.qlib_crypto import (
@@ -322,10 +328,22 @@ class QlibExpressionEngine:
         - All standard rolling operators (Mean, Std, Var, Skew, Kurt, etc.)
         - Pair rolling operators (Corr, Cov)
         """
+        # =====================================================================
+        # P0 SECURITY: Mandatory AST security check before any eval
+        # This prevents code injection through malicious expressions
+        # =====================================================================
+        is_safe, violations = _security_checker.check(expr)
+        if not is_safe:
+            violation_details = "; ".join(violations[:5])
+            raise ValueError(
+                f"SECURITY VIOLATION: Expression failed security check. "
+                f"Expression: {expr[:100]}... Violations: {violation_details}"
+            )
+
         # Build evaluation context from cached operators
         context = {**self._ops_cache, **features}
 
-        # Evaluate (simplified - real impl would use proper parser)
+        # Evaluate with Qlib operators
         try:
             result = eval(expr, {"__builtins__": {}}, context)
             if hasattr(result, "load"):

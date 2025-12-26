@@ -44,7 +44,13 @@ from typing import Any, Optional
 import numpy as np
 import pandas as pd
 
+# P0 SECURITY: Import ASTSecurityChecker for mandatory expression validation
+from iqfmp.core.security import ASTSecurityChecker
+
 logger = logging.getLogger(__name__)
+
+# Module-level security checker instance (reused for performance)
+_security_checker = ASTSecurityChecker()
 
 
 # =============================================================================
@@ -390,6 +396,18 @@ class QlibFactorLibrary:
         # Simple field reference
         if expr.startswith("$") and expr in data:
             return data[expr]
+
+        # =====================================================================
+        # P0 SECURITY: Mandatory AST security check before any eval
+        # This prevents code injection through malicious expressions
+        # =====================================================================
+        is_safe, violations = _security_checker.check(expr)
+        if not is_safe:
+            violation_details = "; ".join(violations[:5])
+            raise ValueError(
+                f"SECURITY VIOLATION: Expression failed security check. "
+                f"Expression: {expr[:100]}... Violations: {violation_details}"
+            )
 
         # Build context with Qlib ops and data
         context = {**self._ops_cache, **data}

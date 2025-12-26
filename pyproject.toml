@@ -33,7 +33,8 @@ dependencies = [
 
     # LLM & Agent
     "langchain>=0.2.0",
-    "langgraph>=0.0.40",
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=1.0.0",  # Official PostgreSQL checkpointer
     "openai>=1.12.0",
 
     # Quant

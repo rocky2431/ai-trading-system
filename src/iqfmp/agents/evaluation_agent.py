@@ -555,9 +555,11 @@ Format as JSON:
             # P0 SECURITY: Mandatory AST security check before any exec
             # This prevents code injection through malicious factor code
             # =================================================================
-            is_safe, violations = _security_checker.check(factor_code)
-            if not is_safe:
-                violation_details = "; ".join(violations[:5])
+            check_result = _security_checker.check(factor_code)
+            if not check_result.is_safe:
+                violation_details = "; ".join(
+                    [v.message for v in check_result.violations[:5]]
+                )
                 raise DataValidationError(
                     f"SECURITY VIOLATION: Factor code failed security check "
                     f"(factor={factor_name}). Violations: {violation_details}"

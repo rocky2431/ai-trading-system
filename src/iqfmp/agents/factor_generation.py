@@ -23,6 +23,7 @@ from iqfmp.llm.validation import (
     ExpressionValidationResult,
     FieldSet,
 )
+from iqfmp.core.security import ASTSecurityChecker
 from iqfmp.agents.field_capability import (
     DataSourceType,
     DynamicCapability,
@@ -599,108 +600,6 @@ class FactorGenerationConfig:
     vector_strict_mode: bool = True
 
 
-class ASTSecurityChecker:
-    """AST-based security checker for generated code."""
-
-    DANGEROUS_MODULES = {
-        "os",
-        "sys",
-        "subprocess",
-        "shutil",
-        "socket",
-        "urllib",
-        "requests",
-        "http",
-        "ftplib",
-        "telnetlib",
-        "smtplib",
-        "pickle",
-        "marshal",
-        "shelve",
-    }
-
-    DANGEROUS_BUILTINS = {
-        "eval",
-        "exec",
-        "compile",
-        "__import__",
-        "open",
-        "input",
-        "breakpoint",
-        "globals",
-        "locals",
-        "vars",
-        "dir",
-        "getattr",
-        "setattr",
-        "delattr",
-        "hasattr",
-    }
-
-    DANGEROUS_METHODS = {
-        "system",
-        "popen",
-        "spawn",
-        "call",
-        "run",
-        "Popen",
-    }
-
-    def check(self, code: str) -> tuple[bool, list[str]]:
-        """Check code for security violations.
-
-        Args:
-            code: Python code to check
-
-        Returns:
-            Tuple of (is_safe, list of violation messages)
-        """
-        violations: list[str] = []
-
-        try:
-            tree = ast.parse(code)
-        except SyntaxError as e:
-            return False, [f"Syntax error: {e}"]
-
-        for node in ast.walk(tree):
-            # Check imports
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    module = alias.name.split(".")[0]
-                    if module in self.DANGEROUS_MODULES:
-                        violations.append(f"Dangerous import: {alias.name}")
-
-            elif isinstance(node, ast.ImportFrom):
-                if node.module:
-                    module = node.module.split(".")[0]
-                    if module in self.DANGEROUS_MODULES:
-                        violations.append(f"Dangerous import from: {node.module}")
-
-            # Check function calls
-            elif isinstance(node, ast.Call):
-                func_name = self._get_func_name(node)
-                if func_name in self.DANGEROUS_BUILTINS:
-                    violations.append(f"Dangerous builtin: {func_name}")
-                elif func_name in self.DANGEROUS_METHODS:
-                    violations.append(f"Dangerous method: {func_name}")
-
-                # Check for attribute calls like os.system
-                if isinstance(node.func, ast.Attribute):
-                    if node.func.attr in self.DANGEROUS_METHODS:
-                        violations.append(f"Dangerous method call: {node.func.attr}")
-
-        is_safe = len(violations) == 0
-        return is_safe, violations
-
-    def _get_func_name(self, node: ast.Call) -> str:
-        """Extract function name from Call node."""
-        if isinstance(node.func, ast.Name):
-            return node.func.id
-        elif isinstance(node.func, ast.Attribute):
-            return node.func.attr
-        return ""
-
-
 class FactorFieldValidator:
     """Validator for factor field constraints.
 
@@ -1110,9 +1009,10 @@ class FactorGenerationAgent:
 
             # Security check - only for Python code (Qlib expressions are safe by design)
             if self.config.security_check_enabled and is_python_code:
-                is_safe, violations = self.security_checker.check(code)
-                if not is_safe:
-                    security_violations.extend(violations)
+                check_result = self.security_checker.check(code)
+                if not check_result.is_safe:
+                    # Extract message strings from SecurityViolation objects
+                    security_violations.extend([v.message for v in check_result.violations])
                     continue
 
             # Validate Qlib expression syntax using ExpressionGate

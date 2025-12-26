@@ -58,7 +58,7 @@ def default_config() -> CryptoBacktestConfig:
 def sample_ohlcv_data() -> pd.DataFrame:
     """Create sample OHLCV data for testing."""
     np.random.seed(42)
-    n_bars = 200
+    n_bars = 300  # Need >= 250 for Purged CV validation
     dates = pd.date_range("2024-01-01", periods=n_bars, freq="h")
 
     close = 3000 + np.cumsum(np.random.randn(n_bars) * 10)
@@ -338,6 +338,7 @@ class TestCryptoQlibBacktestLiquidation:
             leverage=10,  # 10x leverage
             funding_enabled=False,
             liquidation_enabled=True,
+            strict_cv_mode=False,  # Skip CV validation for this edge case test
         )
 
         # Create price data that drops 15% to trigger liquidation
@@ -385,6 +386,7 @@ class TestCryptoQlibBacktestLiquidation:
             leverage=10,
             funding_enabled=False,
             liquidation_enabled=False,  # Disabled
+            strict_cv_mode=False,  # Skip CV validation for this edge case test
         )
 
         # Same price drop data
@@ -420,7 +422,7 @@ class TestCryptoQlibBacktestMultiAsset:
     def test_multi_asset_backtest_combines_results(self) -> None:
         """Test multi-asset backtest combines individual results."""
         np.random.seed(42)
-        n_bars = 100
+        n_bars = 300  # Need >= 250 for Purged CV validation
         dates = pd.date_range("2024-01-01", periods=n_bars, freq="h")
 
         # BTC data

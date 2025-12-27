@@ -35,9 +35,8 @@ from iqfmp.evaluation.research_ledger import (
     DynamicThreshold,
     ResearchLedger,
     TrialRecord,
-    MemoryStorage,
     PostgresStorage,
-    validate_production_storage,  # P4.2 FIX: Import strict mode validator
+    # P4 FIX: Removed MemoryStorage and validate_production_storage - no fallbacks allowed
 )
 from iqfmp.models.factor_combiner import (
     FactorCombiner,
@@ -197,23 +196,21 @@ class RDLoop:
         self._factor_metadata: dict[str, dict] = {}
 
     def _create_ledger_with_storage(self) -> ResearchLedger:
-        """Create ResearchLedger with appropriate storage backend.
+        """Create ResearchLedger with PostgresStorage backend.
 
-        P4.2 FIX: Respects RESEARCH_LEDGER_STRICT environment variable.
-        In strict mode, will raise error if PostgresStorage is unavailable.
+        P4 ARCHITECTURE FIX: Production-grade only, no MemoryStorage fallback.
+        "一切以生产级别为主 没有所有的测试环境生产环境的差别 一切以最严苛的环境为基准"
 
-        Tries PostgresStorage first, falls back to MemoryStorage if DB is unavailable
-        and strict mode is not enabled.
+        All environments require PostgreSQL/TimescaleDB for full traceability.
+        For tests, mock the ResearchLedger or configure a test database.
 
         Returns:
-            ResearchLedger with storage backend
+            ResearchLedger with PostgresStorage backend
 
         Raises:
-            RuntimeError: If strict mode enabled and PostgresStorage unavailable
+            RuntimeError: If DATABASE_URL not configured or PostgresStorage unavailable
         """
         import os
-
-        strict_mode = os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true"
 
         # Check if DATABASE_URL is configured
         if os.environ.get("DATABASE_URL"):
@@ -222,25 +219,20 @@ class RDLoop:
                 logger.info("RDLoop using PostgresStorage for persistence")
                 return ResearchLedger(storage=storage)
             except Exception as e:
-                if strict_mode:
-                    raise RuntimeError(
-                        f"P4.2 STRICT MODE: PostgresStorage required but initialization failed: {e}. "
-                        "Set RESEARCH_LEDGER_STRICT=false to allow MemoryStorage fallback."
-                    )
-                logger.warning(f"PostgresStorage initialization failed: {e}, falling back to MemoryStorage")
+                # P4 ARCHITECTURE FIX: No fallback - all environments require PostgreSQL
+                raise RuntimeError(
+                    f"P4 PRODUCTION MODE: PostgresStorage initialization failed: {e}. "
+                    "All environments require PostgreSQL/TimescaleDB for full traceability. "
+                    "For tests, mock the ResearchLedger or configure a test database."
+                )
 
-        # No DATABASE_URL configured
-        if strict_mode:
-            raise RuntimeError(
-                "P4.2 STRICT MODE: DATABASE_URL required for PostgresStorage but not configured. "
-                "Set RESEARCH_LEDGER_STRICT=false to allow MemoryStorage fallback."
-            )
-
-        logger.info("RDLoop using MemoryStorage (no DB configured)")
-        storage = MemoryStorage()
-        # P4.2 FIX: Validate storage in production
-        validate_production_storage(storage)
-        return ResearchLedger(storage=storage)
+        # P4 ARCHITECTURE FIX: No MemoryStorage fallback - production-grade only
+        # "一切以生产级别为主 没有所有的测试环境生产环境的差别 一切以最严苛的环境为基准"
+        raise RuntimeError(
+            "P4 PRODUCTION MODE: DATABASE_URL required for PostgresStorage but not configured. "
+            "All environments require PostgreSQL/TimescaleDB for full traceability. "
+            "For tests, mock the ResearchLedger or configure a test database."
+        )
 
     def load_data(
         self,

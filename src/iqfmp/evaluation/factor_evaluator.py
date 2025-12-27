@@ -903,7 +903,8 @@ class EvaluationPipeline:
         config: Optional[EvaluationConfig] = None,
     ) -> None:
         """Initialize pipeline with Qlib backend."""
-        self.ledger = ledger or ResearchLedger(storage=MemoryStorage())
+        # P4.1 FIX: Use ResearchLedger() default - PostgresStorage with strict mode support
+        self.ledger = ledger or ResearchLedger()
         self.config = config or EvaluationConfig()
         self.evaluator = FactorEvaluator(ledger=self.ledger, config=self.config)
 

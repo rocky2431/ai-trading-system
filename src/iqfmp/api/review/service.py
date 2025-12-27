@@ -1,7 +1,8 @@
-"""Review service with PostgreSQL persistence.
+"""Review service with PostgreSQL persistence and WebSocket broadcasting.
 
 This service provides persistent storage for HumanReviewGate,
 ensuring review requests and decisions survive server restarts.
+Also broadcasts real-time updates via WebSocket for UI updates.
 """
 
 import asyncio
@@ -20,6 +21,12 @@ from iqfmp.core.review import (
     ReviewStatus,
 )
 from iqfmp.db.base import Base
+from iqfmp.api.system.websocket import (
+    broadcast_review_request_created,
+    broadcast_review_decision,
+    broadcast_review_timeout,
+    broadcast_review_stats_update,
+)
 
 
 class ReviewRequestModel(Base):
@@ -131,6 +138,17 @@ class ReviewService:
         except RuntimeError:
             pass  # Queue full, but DB record exists
 
+        # Broadcast WebSocket event for real-time UI updates
+        try:
+            await broadcast_review_request_created(
+                request_id=request_id,
+                factor_name=factor_name,
+                code_summary=code_summary,
+                priority=priority,
+            )
+        except Exception:
+            pass  # Don't fail if broadcast fails
+
         return db_request
 
     async def get_pending_requests(
@@ -237,6 +255,18 @@ class ReviewService:
             await self._gate.decide(request_id, approved, reviewer, reason)
         except ValueError:
             pass  # Not in in-memory queue
+
+        # Broadcast WebSocket event for real-time UI updates
+        try:
+            await broadcast_review_decision(
+                request_id=request_id,
+                approved=approved,
+                reviewer=reviewer,
+                factor_name=request.factor_name,
+                reason=reason,
+            )
+        except Exception:
+            pass  # Don't fail if broadcast fails
 
         return decision
 
@@ -362,6 +392,7 @@ class ReviewService:
         pending_requests = list(result.scalars().all())
 
         timed_out_count = 0
+        timed_out_requests = []
         for request in pending_requests:
             age = (cutoff - request.created_at).total_seconds()
             if age > self._config.timeout_seconds:
@@ -378,8 +409,19 @@ class ReviewService:
                 )
                 self._session.add(decision)
                 timed_out_count += 1
+                timed_out_requests.append(request)
 
         if timed_out_count > 0:
             await self._session.commit()
+
+            # Broadcast timeout events for each request
+            for request in timed_out_requests:
+                try:
+                    await broadcast_review_timeout(
+                        request_id=request.request_id,
+                        factor_name=request.factor_name,
+                    )
+                except Exception:
+                    pass  # Don't fail if broadcast fails
 
         return timed_out_count

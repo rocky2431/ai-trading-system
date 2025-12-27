@@ -21,6 +21,15 @@ import {
   useAgentConfig,
   useFactorMiningConfig,
   useRiskControlConfig,
+  // P3 hooks
+  useSandboxConfig,
+  useExecutionLogs,
+  useSecurityConfig,
+  useLLMAdvancedConfig,
+  useLLMCosts,
+  useDerivativeDataConfig,
+  useBenchmarkConfig,
+  useBenchmarkResults,
 } from '@/hooks/useConfig'
 import {
   Settings,
@@ -36,6 +45,13 @@ import {
   Eye,
   EyeOff,
   Trash2,
+  // P3 icons
+  Lock,
+  Activity,
+  BarChart3,
+  Clock,
+  Zap,
+  Terminal,
 } from 'lucide-react'
 
 export function SettingsPage() {
@@ -57,7 +73,7 @@ export function SettingsPage() {
       <StatusOverview />
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-6">
+        <TabsList className="flex flex-wrap gap-1">
           <TabsTrigger value="llm">
             <Key className="h-4 w-4 mr-2" />
             LLM
@@ -81,6 +97,23 @@ export function SettingsPage() {
           <TabsTrigger value="risk">
             <Shield className="h-4 w-4 mr-2" />
             Risk
+          </TabsTrigger>
+          {/* P3 Tabs */}
+          <TabsTrigger value="security">
+            <Lock className="h-4 w-4 mr-2" />
+            Security
+          </TabsTrigger>
+          <TabsTrigger value="llm-advanced">
+            <Zap className="h-4 w-4 mr-2" />
+            LLM Pro
+          </TabsTrigger>
+          <TabsTrigger value="derivatives">
+            <Activity className="h-4 w-4 mr-2" />
+            Derivatives
+          </TabsTrigger>
+          <TabsTrigger value="benchmark">
+            <BarChart3 className="h-4 w-4 mr-2" />
+            Benchmark
           </TabsTrigger>
         </TabsList>
 
@@ -106,6 +139,23 @@ export function SettingsPage() {
 
         <TabsContent value="risk">
           <RiskControlConfigSection />
+        </TabsContent>
+
+        {/* P3 Tab Contents */}
+        <TabsContent value="security">
+          <SecurityConfigSection />
+        </TabsContent>
+
+        <TabsContent value="llm-advanced">
+          <LLMAdvancedConfigSection />
+        </TabsContent>
+
+        <TabsContent value="derivatives">
+          <DerivativeDataConfigSection />
+        </TabsContent>
+
+        <TabsContent value="benchmark">
+          <BenchmarkConfigSection />
         </TabsContent>
       </Tabs>
 
@@ -1014,6 +1064,765 @@ function RiskControlConfigSection() {
         </Button>
       </CardContent>
     </Card>
+  )
+}
+
+// ============== P3: Security Config Section ==============
+
+function SecurityConfigSection() {
+  const { sandboxConfig, loading: sandboxLoading, saving: sandboxSaving, updateSandboxConfig } = useSandboxConfig()
+  const { securityConfig, loading: securityLoading, saving: securitySaving, updateSecurityConfig } = useSecurityConfig()
+  const { logs, loading: logsLoading, page, setPage, total } = useExecutionLogs()
+
+  const [localSandbox, setLocalSandbox] = useState<{
+    timeout: number
+    maxMemory: number
+    maxCpu: number
+    useSubprocess: boolean
+  } | null>(null)
+
+  useEffect(() => {
+    if (sandboxConfig) {
+      setLocalSandbox({
+        timeout: sandboxConfig.timeout_seconds,
+        maxMemory: sandboxConfig.max_memory_mb,
+        maxCpu: sandboxConfig.max_cpu_seconds,
+        useSubprocess: sandboxConfig.use_subprocess,
+      })
+    }
+  }, [sandboxConfig])
+
+  if (sandboxLoading || securityLoading) {
+    return <LoadingCard title="Security Configuration" />
+  }
+
+  const sandbox = localSandbox || {
+    timeout: 60,
+    maxMemory: 512,
+    maxCpu: 30,
+    useSubprocess: true,
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Sandbox Configuration */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Terminal className="h-5 w-5" />
+            Sandbox Execution Configuration
+          </CardTitle>
+          <CardDescription>
+            Configure secure sandbox environment for factor code execution
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="grid grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Execution Timeout</Label>
+                <span className="text-sm font-medium">{sandbox.timeout}s</span>
+              </div>
+              <Slider
+                value={sandbox.timeout}
+                onValueChange={(v) => setLocalSandbox({ ...sandbox, timeout: v })}
+                min={10}
+                max={300}
+                step={10}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Max Memory</Label>
+                <span className="text-sm font-medium">{sandbox.maxMemory} MB</span>
+              </div>
+              <Slider
+                value={sandbox.maxMemory}
+                onValueChange={(v) => setLocalSandbox({ ...sandbox, maxMemory: v })}
+                min={128}
+                max={4096}
+                step={128}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Max CPU Time</Label>
+                <span className="text-sm font-medium">{sandbox.maxCpu}s</span>
+              </div>
+              <Slider
+                value={sandbox.maxCpu}
+                onValueChange={(v) => setLocalSandbox({ ...sandbox, maxCpu: v })}
+                min={5}
+                max={120}
+                step={5}
+              />
+            </div>
+
+            <div className="flex items-center gap-4">
+              <Switch
+                checked={sandbox.useSubprocess}
+                onCheckedChange={(v) => setLocalSandbox({ ...sandbox, useSubprocess: v })}
+              />
+              <Label>Use Subprocess Isolation</Label>
+            </div>
+          </div>
+
+          <Button
+            onClick={() => updateSandboxConfig({
+              timeout_seconds: sandbox.timeout,
+              max_memory_mb: sandbox.maxMemory,
+              max_cpu_seconds: sandbox.maxCpu,
+              use_subprocess: sandbox.useSubprocess,
+            })}
+            disabled={sandboxSaving}
+          >
+            {sandboxSaving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Save Sandbox Config
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Security Flags */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Lock className="h-5 w-5" />
+            Security Settings
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {securityConfig && (
+            <div className="grid grid-cols-2 gap-4">
+              <div className="flex items-center justify-between p-3 border rounded-lg">
+                <div>
+                  <p className="font-medium">Research Ledger Strict Mode</p>
+                  <p className="text-sm text-muted-foreground">Require PostgreSQL for ResearchLedger</p>
+                </div>
+                <Switch
+                  checked={securityConfig.research_ledger_strict}
+                  onCheckedChange={(v) => updateSecurityConfig({ research_ledger_strict: v })}
+                  disabled={securitySaving}
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 border rounded-lg">
+                <div>
+                  <p className="font-medium">Vector Strict Mode</p>
+                  <p className="text-sm text-muted-foreground">Require Qdrant for vector storage</p>
+                </div>
+                <Switch
+                  checked={securityConfig.vector_strict_mode}
+                  onCheckedChange={(v) => updateSecurityConfig({ vector_strict_mode: v })}
+                  disabled={securitySaving}
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 border rounded-lg">
+                <div>
+                  <p className="font-medium">Human Review Gate</p>
+                  <p className="text-sm text-muted-foreground">Enable human review for LLM code</p>
+                </div>
+                <Switch
+                  checked={securityConfig.human_review_enabled}
+                  onCheckedChange={(v) => updateSecurityConfig({ human_review_enabled: v })}
+                  disabled={securitySaving}
+                />
+              </div>
+
+              <div className="flex items-center justify-between p-3 border rounded-lg">
+                <div>
+                  <p className="font-medium">AST Security Check</p>
+                  <p className="text-sm text-muted-foreground">Enable AST-based security scanning</p>
+                </div>
+                <Switch
+                  checked={securityConfig.ast_security_check}
+                  onCheckedChange={(v) => updateSecurityConfig({ ast_security_check: v })}
+                  disabled={securitySaving}
+                />
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Execution Logs */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Clock className="h-5 w-5" />
+            Execution Logs
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {logsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted">
+                    <tr>
+                      <th className="text-left p-2">Factor</th>
+                      <th className="text-left p-2">Status</th>
+                      <th className="text-left p-2">Time</th>
+                      <th className="text-left p-2">Memory</th>
+                      <th className="text-left p-2">Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {logs.map((log) => (
+                      <tr key={log.execution_id} className="border-t">
+                        <td className="p-2">{log.factor_name || '-'}</td>
+                        <td className="p-2">
+                          <Badge variant={log.status === 'success' ? 'default' : 'destructive'}>
+                            {log.status}
+                          </Badge>
+                        </td>
+                        <td className="p-2">{log.execution_time.toFixed(2)}s</td>
+                        <td className="p-2">{log.memory_used_mb?.toFixed(0) || '-'} MB</td>
+                        <td className="p-2 text-muted-foreground">
+                          {new Date(log.created_at).toLocaleString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {total > 20 && (
+                <div className="flex justify-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage(page - 1)}
+                    disabled={page === 1}
+                  >
+                    Previous
+                  </Button>
+                  <span className="py-2 px-3 text-sm">
+                    Page {page} of {Math.ceil(total / 20)}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage(page + 1)}
+                    disabled={page >= Math.ceil(total / 20)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
+// ============== P3: LLM Advanced Config Section ==============
+
+function LLMAdvancedConfigSection() {
+  const { config, loading, saving, updateConfig } = useLLMAdvancedConfig()
+  const { costs, loading: costsLoading } = useLLMCosts(24)
+
+  const [localConfig, setLocalConfig] = useState<{
+    requestsPerMinute: number
+    tokensPerMinute: number
+    maxRetries: number
+    cacheEnabled: boolean
+    cacheTtl: number
+  } | null>(null)
+
+  useEffect(() => {
+    if (config) {
+      setLocalConfig({
+        requestsPerMinute: config.rate_limit.requests_per_minute,
+        tokensPerMinute: config.rate_limit.tokens_per_minute,
+        maxRetries: config.fallback_chain.max_retries,
+        cacheEnabled: config.cache_enabled,
+        cacheTtl: config.cache_ttl,
+      })
+    }
+  }, [config])
+
+  if (loading) {
+    return <LoadingCard title="LLM Advanced Configuration" />
+  }
+
+  const cfg = localConfig || {
+    requestsPerMinute: 60,
+    tokensPerMinute: 100000,
+    maxRetries: 3,
+    cacheEnabled: false,
+    cacheTtl: 3600,
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Cost Overview */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Activity className="h-5 w-5" />
+            LLM Usage (Last 24h)
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {costsLoading ? (
+            <div className="flex items-center justify-center py-4">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+          ) : costs && (
+            <div className="grid grid-cols-4 gap-4">
+              <div className="p-4 bg-muted rounded-lg">
+                <p className="text-sm text-muted-foreground">Total Cost</p>
+                <p className="text-2xl font-bold">${costs.total_cost.toFixed(4)}</p>
+              </div>
+              <div className="p-4 bg-muted rounded-lg">
+                <p className="text-sm text-muted-foreground">Total Tokens</p>
+                <p className="text-2xl font-bold">{(costs.total_tokens / 1000).toFixed(1)}K</p>
+              </div>
+              <div className="p-4 bg-muted rounded-lg">
+                <p className="text-sm text-muted-foreground">Requests</p>
+                <p className="text-2xl font-bold">{costs.total_requests}</p>
+              </div>
+              <div className="p-4 bg-muted rounded-lg">
+                <p className="text-sm text-muted-foreground">Cache Hit Rate</p>
+                <p className="text-2xl font-bold">{(costs.cache_hit_rate * 100).toFixed(1)}%</p>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Rate Limiting */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Zap className="h-5 w-5" />
+            Rate Limiting & Caching
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="grid grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Requests per Minute</Label>
+                <span className="text-sm font-medium">{cfg.requestsPerMinute}</span>
+              </div>
+              <Slider
+                value={cfg.requestsPerMinute}
+                onValueChange={(v) => setLocalConfig({ ...cfg, requestsPerMinute: v })}
+                min={10}
+                max={500}
+                step={10}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Tokens per Minute</Label>
+                <span className="text-sm font-medium">{(cfg.tokensPerMinute / 1000).toFixed(0)}K</span>
+              </div>
+              <Slider
+                value={cfg.tokensPerMinute}
+                onValueChange={(v) => setLocalConfig({ ...cfg, tokensPerMinute: v })}
+                min={10000}
+                max={500000}
+                step={10000}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Max Retries</Label>
+                <span className="text-sm font-medium">{cfg.maxRetries}</span>
+              </div>
+              <Slider
+                value={cfg.maxRetries}
+                onValueChange={(v) => setLocalConfig({ ...cfg, maxRetries: v })}
+                min={1}
+                max={10}
+                step={1}
+              />
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Cache TTL</Label>
+                <span className="text-sm font-medium">{cfg.cacheTtl / 60} min</span>
+              </div>
+              <Slider
+                value={cfg.cacheTtl}
+                onValueChange={(v) => setLocalConfig({ ...cfg, cacheTtl: v })}
+                min={60}
+                max={86400}
+                step={60}
+              />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <Switch
+              checked={cfg.cacheEnabled}
+              onCheckedChange={(v) => setLocalConfig({ ...cfg, cacheEnabled: v })}
+            />
+            <Label>Enable Response Caching</Label>
+          </div>
+
+          <Button
+            onClick={() => updateConfig({
+              rate_limit: {
+                requests_per_minute: cfg.requestsPerMinute,
+                tokens_per_minute: cfg.tokensPerMinute,
+              },
+              cache_enabled: cfg.cacheEnabled,
+              cache_ttl: cfg.cacheTtl,
+            })}
+            disabled={saving}
+          >
+            {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+            Save LLM Config
+          </Button>
+        </CardContent>
+      </Card>
+
+      {/* Fallback Chain Info */}
+      {config?.fallback_chain && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Fallback Chain</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="flex gap-2 flex-wrap">
+              {config.fallback_chain.models.map((model, i) => (
+                <Badge key={model} variant={i === 0 ? 'default' : 'secondary'}>
+                  {i + 1}. {model}
+                </Badge>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+    </div>
+  )
+}
+
+// ============== P3: Derivative Data Config Section ==============
+
+function DerivativeDataConfigSection() {
+  const { config, loading, saving, updateConfig } = useDerivativeDataConfig()
+
+  if (loading) {
+    return <LoadingCard title="Derivative Data Configuration" />
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Activity className="h-5 w-5" />
+          Derivative Data Configuration
+        </CardTitle>
+        <CardDescription>
+          Configure which derivative data types to collect for factor mining
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        <div className="grid grid-cols-2 gap-4">
+          <div className="flex items-center justify-between p-3 border rounded-lg">
+            <div>
+              <p className="font-medium">Funding Rate</p>
+              <p className="text-sm text-muted-foreground">Perpetual funding rate data</p>
+            </div>
+            <Switch
+              checked={config?.funding_rate_enabled ?? true}
+              onCheckedChange={(v) => updateConfig({ funding_rate_enabled: v })}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 border rounded-lg">
+            <div>
+              <p className="font-medium">Open Interest</p>
+              <p className="text-sm text-muted-foreground">Total open positions data</p>
+            </div>
+            <Switch
+              checked={config?.open_interest_enabled ?? true}
+              onCheckedChange={(v) => updateConfig({ open_interest_enabled: v })}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 border rounded-lg">
+            <div>
+              <p className="font-medium">Liquidations</p>
+              <p className="text-sm text-muted-foreground">Forced liquidation events</p>
+            </div>
+            <Switch
+              checked={config?.liquidation_enabled ?? true}
+              onCheckedChange={(v) => updateConfig({ liquidation_enabled: v })}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 border rounded-lg">
+            <div>
+              <p className="font-medium">Long/Short Ratio</p>
+              <p className="text-sm text-muted-foreground">Top trader positions ratio</p>
+            </div>
+            <Switch
+              checked={config?.long_short_ratio_enabled ?? true}
+              onCheckedChange={(v) => updateConfig({ long_short_ratio_enabled: v })}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 border rounded-lg">
+            <div>
+              <p className="font-medium">Mark Price</p>
+              <p className="text-sm text-muted-foreground">Index and mark price data</p>
+            </div>
+            <Switch
+              checked={config?.mark_price_enabled ?? false}
+              onCheckedChange={(v) => updateConfig({ mark_price_enabled: v })}
+              disabled={saving}
+            />
+          </div>
+
+          <div className="flex items-center justify-between p-3 border rounded-lg">
+            <div>
+              <p className="font-medium">Taker Buy/Sell</p>
+              <p className="text-sm text-muted-foreground">Taker trade direction volume</p>
+            </div>
+            <Switch
+              checked={config?.taker_buy_sell_enabled ?? false}
+              onCheckedChange={(v) => updateConfig({ taker_buy_sell_enabled: v })}
+              disabled={saving}
+            />
+          </div>
+        </div>
+
+        {config && (
+          <div className="p-4 bg-muted rounded-lg">
+            <p className="text-sm text-muted-foreground">
+              Data Source: <span className="font-medium">{config.data_source}</span>
+              {' | '}
+              Exchanges: <span className="font-medium">{config.exchanges?.join(', ') || 'None'}</span>
+            </p>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ============== P3: Benchmark Config Section ==============
+
+function BenchmarkConfigSection() {
+  const { config, loading, saving, updateConfig } = useBenchmarkConfig()
+  const { results, loading: resultsLoading, page, setPage, total, runBenchmark, running } = useBenchmarkResults()
+
+  const [noveltyThreshold, setNoveltyThreshold] = useState(0.3)
+  const [minImprovement, setMinImprovement] = useState(5.0)
+
+  useEffect(() => {
+    if (config) {
+      setNoveltyThreshold(config.novelty_threshold)
+      setMinImprovement(config.min_improvement_pct)
+    }
+  }, [config])
+
+  if (loading) {
+    return <LoadingCard title="Alpha Benchmark Configuration" />
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Benchmark Configuration */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <BarChart3 className="h-5 w-5" />
+            Alpha Benchmark Configuration
+          </CardTitle>
+          <CardDescription>
+            Compare generated factors against standard alpha benchmark sets
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="grid grid-cols-2 gap-6">
+            <div className="space-y-2">
+              <Label>Benchmark Type</Label>
+              <Select
+                options={[
+                  { value: 'alpha158', label: 'Alpha158 (Qlib Standard)' },
+                  { value: 'alpha360', label: 'Alpha360 (Extended)' },
+                ]}
+                value={config?.benchmark_type || 'alpha158'}
+                onChange={(e) => updateConfig({ benchmark_type: e.target.value })}
+                disabled={saving}
+              />
+            </div>
+
+            <div className="flex items-center gap-4 pt-6">
+              <Switch
+                checked={config?.enabled ?? true}
+                onCheckedChange={(v) => updateConfig({ enabled: v })}
+                disabled={saving}
+              />
+              <Label>Enable Benchmark Comparison</Label>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Novelty Threshold</Label>
+                <span className="text-sm font-medium">{noveltyThreshold.toFixed(2)}</span>
+              </div>
+              <Slider
+                value={noveltyThreshold}
+                onValueChange={(v) => setNoveltyThreshold(v)}
+                min={0.1}
+                max={0.9}
+                step={0.05}
+              />
+              <p className="text-xs text-muted-foreground">
+                Max correlation to be considered novel
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex justify-between">
+                <Label>Min Improvement</Label>
+                <span className="text-sm font-medium">{minImprovement.toFixed(0)}%</span>
+              </div>
+              <Slider
+                value={minImprovement}
+                onValueChange={(v) => setMinImprovement(v)}
+                min={0}
+                max={50}
+                step={1}
+              />
+              <p className="text-xs text-muted-foreground">
+                Minimum improvement over benchmark average
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-4">
+            <Switch
+              checked={config?.auto_run_on_evaluation ?? true}
+              onCheckedChange={(v) => updateConfig({ auto_run_on_evaluation: v })}
+              disabled={saving}
+            />
+            <Label>Auto-run on Factor Evaluation</Label>
+          </div>
+
+          <div className="flex gap-4">
+            <Button
+              onClick={() => updateConfig({
+                novelty_threshold: noveltyThreshold,
+                min_improvement_pct: minImprovement,
+              })}
+              disabled={saving}
+            >
+              {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Save Config
+            </Button>
+            <Button variant="outline" onClick={() => runBenchmark()} disabled={running}>
+              {running && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              Run Benchmark
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Benchmark Results */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Benchmark Results</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {resultsLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-6 w-6 animate-spin" />
+            </div>
+          ) : results.length === 0 ? (
+            <p className="text-center text-muted-foreground py-8">
+              No benchmark results yet. Run a benchmark to see comparisons.
+            </p>
+          ) : (
+            <div className="space-y-4">
+              <div className="border rounded-lg overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-muted">
+                    <tr>
+                      <th className="text-left p-2">Factor</th>
+                      <th className="text-left p-2">IC</th>
+                      <th className="text-left p-2">IR</th>
+                      <th className="text-left p-2">IC Improvement</th>
+                      <th className="text-left p-2">Rank</th>
+                      <th className="text-left p-2">Novel</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {results.map((result) => (
+                      <tr key={result.result_id} className="border-t">
+                        <td className="p-2 font-medium">{result.factor_name}</td>
+                        <td className="p-2">{result.factor_ic.toFixed(4)}</td>
+                        <td className="p-2">{result.factor_ir.toFixed(2)}</td>
+                        <td className="p-2">
+                          <span className={result.ic_improvement > 0 ? 'text-green-600' : 'text-red-600'}>
+                            {result.ic_improvement > 0 ? '+' : ''}{result.ic_improvement.toFixed(1)}%
+                          </span>
+                        </td>
+                        <td className="p-2">{result.rank}/{result.total_factors}</td>
+                        <td className="p-2">
+                          {result.is_novel ? (
+                            <Badge variant="default">Novel</Badge>
+                          ) : (
+                            <Badge variant="secondary">Duplicate</Badge>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {total > 20 && (
+                <div className="flex justify-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage(page - 1)}
+                    disabled={page === 1}
+                  >
+                    Previous
+                  </Button>
+                  <span className="py-2 px-3 text-sm">
+                    Page {page} of {Math.ceil(total / 20)}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage(page + 1)}
+                    disabled={page >= Math.ceil(total / 20)}
+                  >
+                    Next
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
   )
 }
 

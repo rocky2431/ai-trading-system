@@ -347,3 +347,109 @@ async def broadcast_evaluation_complete(
         },
     )
     await manager.broadcast(message)
+
+
+# ============== Review Events ==============
+
+
+async def broadcast_review_request_created(
+    request_id: str,
+    factor_name: str,
+    code_summary: str,
+    priority: int = 0,
+) -> None:
+    """Broadcast a new review request event.
+
+    Args:
+        request_id: Review request identifier
+        factor_name: Name of the factor being reviewed
+        code_summary: Summary of the code
+        priority: Request priority
+    """
+    message = WebSocketMessage(
+        type="review_request_created",
+        data={
+            "request_id": request_id,
+            "factor_name": factor_name,
+            "code_summary": code_summary,
+            "priority": priority,
+        },
+    )
+    await manager.broadcast(message)
+
+
+async def broadcast_review_decision(
+    request_id: str,
+    approved: bool,
+    reviewer: str,
+    factor_name: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """Broadcast a review decision event.
+
+    Args:
+        request_id: Review request identifier
+        approved: Whether the request was approved
+        reviewer: Who made the decision
+        factor_name: Name of the factor
+        reason: Reason for decision
+    """
+    message = WebSocketMessage(
+        type="review_decision",
+        data={
+            "request_id": request_id,
+            "approved": approved,
+            "reviewer": reviewer,
+            "factor_name": factor_name,
+            "reason": reason,
+            "status": "approved" if approved else "rejected",
+        },
+    )
+    await manager.broadcast(message)
+
+
+async def broadcast_review_timeout(
+    request_id: str,
+    factor_name: Optional[str] = None,
+) -> None:
+    """Broadcast a review timeout event.
+
+    Args:
+        request_id: Review request identifier
+        factor_name: Name of the factor
+    """
+    message = WebSocketMessage(
+        type="review_timeout",
+        data={
+            "request_id": request_id,
+            "factor_name": factor_name,
+            "status": "timeout",
+        },
+    )
+    await manager.broadcast(message)
+
+
+async def broadcast_review_stats_update(
+    pending_count: int,
+    approved_count: int,
+    rejected_count: int,
+    timeout_count: int,
+) -> None:
+    """Broadcast review queue statistics update.
+
+    Args:
+        pending_count: Number of pending reviews
+        approved_count: Number of approved reviews
+        rejected_count: Number of rejected reviews
+        timeout_count: Number of timed out reviews
+    """
+    message = WebSocketMessage(
+        type="review_stats_update",
+        data={
+            "pending_count": pending_count,
+            "approved_count": approved_count,
+            "rejected_count": rejected_count,
+            "timeout_count": timeout_count,
+        },
+    )
+    await manager.broadcast(message)

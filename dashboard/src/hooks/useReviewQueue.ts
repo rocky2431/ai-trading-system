@@ -1,10 +1,10 @@
 /**
  * useReviewQueue - 审核队列 Hook
  *
- * 提供审核队列数据和操作方法
+ * 提供审核队列数据和操作方法，支持 WebSocket 实时更新
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   reviewApi,
   ReviewRequest,
@@ -12,6 +12,26 @@ import {
   ReviewQueueStats,
   ReviewConfig,
 } from '@/api/review'
+
+// WebSocket 消息类型
+interface ReviewWebSocketMessage {
+  type: 'review_request_created' | 'review_decision' | 'review_timeout' | 'review_stats_update'
+  data: {
+    request_id?: string
+    factor_name?: string
+    code_summary?: string
+    priority?: number
+    approved?: boolean
+    reviewer?: string
+    reason?: string
+    status?: string
+    pending_count?: number
+    approved_count?: number
+    rejected_count?: number
+    timeout_count?: number
+  }
+  timestamp: string
+}
 
 interface UseReviewQueueResult {
   // 数据
@@ -31,6 +51,10 @@ interface UseReviewQueueResult {
   // 状态
   loading: boolean
   error: Error | null
+
+  // WebSocket 状态
+  wsConnected: boolean
+  lastEvent: ReviewWebSocketMessage | null
 
   // 操作
   refresh: () => Promise<void>
@@ -56,6 +80,12 @@ export function useReviewQueue(): UseReviewQueueResult {
   // 加载状态
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<Error | null>(null)
+
+  // WebSocket 状态
+  const [wsConnected, setWsConnected] = useState(false)
+  const [lastEvent, setLastEvent] = useState<ReviewWebSocketMessage | null>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null)
 
   // 刷新所有数据
   const refresh = useCallback(async () => {
@@ -115,6 +145,102 @@ export function useReviewQueue(): UseReviewQueueResult {
     return result.timed_out_count
   }, [refresh])
 
+  // WebSocket 消息处理
+  const handleWebSocketMessage = useCallback((event: MessageEvent) => {
+    try {
+      const message = JSON.parse(event.data) as ReviewWebSocketMessage
+
+      // 只处理审核相关消息
+      if (!message.type.startsWith('review_')) {
+        return
+      }
+
+      setLastEvent(message)
+
+      switch (message.type) {
+        case 'review_request_created':
+          // 新审核请求 - 刷新待审核列表
+          refresh()
+          break
+
+        case 'review_decision':
+          // 审核决策 - 刷新所有数据
+          refresh()
+          break
+
+        case 'review_timeout':
+          // 超时 - 刷新数据
+          refresh()
+          break
+
+        case 'review_stats_update':
+          // 统计更新 - 直接更新 stats 状态
+          if (message.data) {
+            setStats((prev) => ({
+              pending_count: message.data.pending_count ?? prev?.pending_count ?? 0,
+              approved_count: message.data.approved_count ?? prev?.approved_count ?? 0,
+              rejected_count: message.data.rejected_count ?? prev?.rejected_count ?? 0,
+              timeout_count: message.data.timeout_count ?? prev?.timeout_count ?? 0,
+              average_review_time_seconds: prev?.average_review_time_seconds ?? null,
+              oldest_pending_age_seconds: prev?.oldest_pending_age_seconds ?? null,
+            }))
+          }
+          break
+      }
+    } catch (err) {
+      console.error('Failed to parse WebSocket message:', err)
+    }
+  }, [refresh])
+
+  // WebSocket 连接管理
+  useEffect(() => {
+    const connectWebSocket = () => {
+      // 使用系统 WebSocket 端点
+      const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const wsHost = window.location.host
+      const wsUrl = `${wsProtocol}//${wsHost}/api/v1/system/ws`
+
+      try {
+        wsRef.current = new WebSocket(wsUrl)
+
+        wsRef.current.onopen = () => {
+          setWsConnected(true)
+          console.log('Review WebSocket connected')
+        }
+
+        wsRef.current.onclose = () => {
+          setWsConnected(false)
+          console.log('Review WebSocket disconnected')
+
+          // 5秒后尝试重连
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connectWebSocket()
+          }, 5000)
+        }
+
+        wsRef.current.onerror = (error) => {
+          console.error('Review WebSocket error:', error)
+        }
+
+        wsRef.current.onmessage = handleWebSocketMessage
+      } catch (err) {
+        console.error('Failed to connect WebSocket:', err)
+      }
+    }
+
+    connectWebSocket()
+
+    // 清理
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current)
+      }
+      if (wsRef.current) {
+        wsRef.current.close()
+      }
+    }
+  }, [handleWebSocketMessage])
+
   return {
     pendingRequests,
     decisionHistory,
@@ -128,6 +254,8 @@ export function useReviewQueue(): UseReviewQueueResult {
     historyTotal,
     loading,
     error,
+    wsConnected,
+    lastEvent,
     refresh,
     approve,
     reject,

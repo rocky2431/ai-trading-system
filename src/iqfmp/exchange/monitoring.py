@@ -7,6 +7,8 @@ Provides real-time position and PnL monitoring:
 - RealtimeUpdater: WebSocket-based real-time updates
 """
 
+import asyncio
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -15,6 +17,8 @@ from typing import Any, Callable, Optional
 import uuid
 
 from iqfmp.exchange.adapter import ExchangeAdapter
+
+logger = logging.getLogger(__name__)
 
 
 # ==================== Enums ====================
@@ -511,17 +515,54 @@ class MarginMonitor:
 
 
 class RealtimeUpdater:
-    """Handle real-time updates via WebSocket."""
+    """Handle real-time updates via WebSocket.
 
-    def __init__(self, adapter: ExchangeAdapter) -> None:
+    Provides streaming updates for:
+    - Price/ticker updates
+    - Position changes
+    - Balance/margin updates
+    - PnL calculations
+
+    Uses exchange WebSocket APIs for low-latency updates.
+    """
+
+    def __init__(
+        self,
+        adapter: ExchangeAdapter,
+        symbols: Optional[list[str]] = None,
+        update_interval_ms: int = 1000,
+    ) -> None:
         """Initialize realtime updater.
 
         Args:
             adapter: Exchange adapter
+            symbols: List of symbols to monitor (optional)
+            update_interval_ms: Minimum interval between updates in ms
         """
         self._adapter = adapter
+        self._symbols: set[str] = set(symbols) if symbols else set()
+        self._update_interval_ms = update_interval_ms
         self._subscribers: dict[str, tuple[UpdateType, Callable]] = {}
         self._running = False
+        self._tasks: list[asyncio.Task] = []
+        self._last_prices: dict[str, Decimal] = {}
+        self._reconnect_delay = 5.0  # seconds
+
+    def add_symbol(self, symbol: str) -> None:
+        """Add a symbol to monitor.
+
+        Args:
+            symbol: Trading pair symbol
+        """
+        self._symbols.add(symbol)
+
+    def remove_symbol(self, symbol: str) -> None:
+        """Remove a symbol from monitoring.
+
+        Args:
+            symbol: Trading pair symbol
+        """
+        self._symbols.discard(symbol)
 
     def subscribe(
         self,
@@ -568,12 +609,12 @@ class RealtimeUpdater:
         Args:
             event: Update event
         """
-        for sub_id, (update_type, callback) in self._subscribers.items():
+        for _, (update_type, callback) in self._subscribers.items():
             if update_type == event.type:
                 try:
                     callback(event)
-                except Exception:
-                    pass  # Don't let subscriber errors crash the updater
+                except Exception as e:
+                    logger.warning(f"Subscriber callback error: {e}")
 
     @property
     def is_running(self) -> bool:
@@ -581,22 +622,251 @@ class RealtimeUpdater:
         return self._running
 
     async def start(self) -> None:
-        """Start WebSocket stream."""
+        """Start WebSocket streams for real-time monitoring.
+
+        Launches background tasks for:
+        - Price/ticker streaming (if symbols are configured)
+        - Position monitoring
+        - Balance/margin monitoring
+        """
+        if self._running:
+            logger.warning("RealtimeUpdater already running")
+            return
+
         self._running = True
-        # In production, this would start the WebSocket connection
-        # and call _handle_message for each incoming message
+        logger.info(f"Starting RealtimeUpdater for symbols: {self._symbols}")
+
+        # Start ticker stream for price updates
+        if self._symbols:
+            ticker_task = asyncio.create_task(
+                self._ticker_stream_loop(),
+                name="ticker_stream"
+            )
+            self._tasks.append(ticker_task)
+
+        # Start position monitoring
+        position_task = asyncio.create_task(
+            self._position_monitor_loop(),
+            name="position_monitor"
+        )
+        self._tasks.append(position_task)
+
+        # Start balance monitoring
+        balance_task = asyncio.create_task(
+            self._balance_monitor_loop(),
+            name="balance_monitor"
+        )
+        self._tasks.append(balance_task)
+
+        logger.info(f"Started {len(self._tasks)} monitoring tasks")
 
     async def stop(self) -> None:
-        """Stop WebSocket stream."""
+        """Stop all WebSocket streams gracefully."""
+        if not self._running:
+            return
+
         self._running = False
+        logger.info("Stopping RealtimeUpdater...")
+
+        # Cancel all tasks
+        for task in self._tasks:
+            if not task.done():
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=2.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+
+        self._tasks.clear()
+        logger.info("RealtimeUpdater stopped")
+
+    async def _ticker_stream_loop(self) -> None:
+        """Stream ticker/price updates for monitored symbols."""
+        while self._running:
+            try:
+                for symbol in list(self._symbols):
+                    if not self._running:
+                        break
+
+                    try:
+                        ticker = await self._adapter.fetch_ticker(symbol)
+                        current_price = Decimal(str(ticker.last))
+
+                        # Emit PnL update with price change
+                        self.emit(
+                            UpdateEvent(
+                                type=UpdateType.PNL,
+                                symbol=symbol,
+                                data={
+                                    "price": float(current_price),
+                                    "bid": ticker.bid,
+                                    "ask": ticker.ask,
+                                    "volume": ticker.volume,
+                                    "spread": ticker.spread,
+                                },
+                                timestamp=ticker.timestamp or datetime.now(),
+                            )
+                        )
+
+                        self._last_prices[symbol] = current_price
+
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch ticker for {symbol}: {e}")
+
+                # Rate limit: wait between full cycles
+                await asyncio.sleep(self._update_interval_ms / 1000)
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Ticker stream error: {e}")
+                await asyncio.sleep(self._reconnect_delay)
+
+    async def _position_monitor_loop(self) -> None:
+        """Monitor position changes."""
+        last_positions: dict[str, dict] = {}
+
+        while self._running:
+            try:
+                # Fetch current positions
+                positions = await self._adapter.fetch_positions()
+
+                for pos in positions:
+                    symbol = pos.get("symbol", "")
+                    pos_key = f"{symbol}:{pos.get('side', 'long')}"
+
+                    # Check for changes
+                    old_pos = last_positions.get(pos_key)
+                    if old_pos != pos:
+                        self.emit(
+                            UpdateEvent(
+                                type=UpdateType.POSITION,
+                                symbol=symbol,
+                                data={
+                                    "side": pos.get("side"),
+                                    "contracts": pos.get("contracts"),
+                                    "entryPrice": pos.get("entryPrice"),
+                                    "markPrice": pos.get("markPrice"),
+                                    "unrealizedPnl": pos.get("unrealizedPnl"),
+                                    "leverage": pos.get("leverage"),
+                                    "liquidationPrice": pos.get("liquidationPrice"),
+                                },
+                                timestamp=datetime.now(),
+                            )
+                        )
+                        last_positions[pos_key] = pos
+
+                # Check for closed positions
+                current_keys = {f"{p.get('symbol', '')}:{p.get('side', 'long')}" for p in positions}
+                for old_key in list(last_positions.keys()):
+                    if old_key not in current_keys:
+                        symbol = old_key.split(":")[0]
+                        self.emit(
+                            UpdateEvent(
+                                type=UpdateType.POSITION,
+                                symbol=symbol,
+                                data={"closed": True, "contracts": 0},
+                                timestamp=datetime.now(),
+                            )
+                        )
+                        del last_positions[old_key]
+
+                await asyncio.sleep(2.0)  # Position updates every 2 seconds
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Position monitor error: {e}")
+                await asyncio.sleep(self._reconnect_delay)
+
+    async def _balance_monitor_loop(self) -> None:
+        """Monitor balance and margin changes."""
+        last_balance: Optional[dict] = None
+
+        while self._running:
+            try:
+                # Fetch current balance
+                balances = await self._adapter.fetch_balance()
+
+                # Focus on USDT balance for futures
+                usdt_balance = balances.get("USDT")
+                if usdt_balance:
+                    current = {
+                        "total": usdt_balance.total,
+                        "free": usdt_balance.free,
+                        "used": usdt_balance.used,
+                    }
+
+                    # Check for changes (with tolerance for floating point)
+                    if last_balance is None or self._balance_changed(last_balance, current):
+                        self.emit(
+                            UpdateEvent(
+                                type=UpdateType.BALANCE,
+                                symbol="USDT",
+                                data=current,
+                                timestamp=datetime.now(),
+                            )
+                        )
+
+                        # Also emit margin update
+                        if current["total"] > 0:
+                            margin_usage = current["used"] / current["total"]
+                            self.emit(
+                                UpdateEvent(
+                                    type=UpdateType.MARGIN,
+                                    symbol="",
+                                    data={
+                                        "totalBalance": current["total"],
+                                        "availableBalance": current["free"],
+                                        "usedMargin": current["used"],
+                                        "marginUsage": margin_usage,
+                                    },
+                                    timestamp=datetime.now(),
+                                )
+                            )
+
+                        last_balance = current
+
+                await asyncio.sleep(5.0)  # Balance updates every 5 seconds
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Balance monitor error: {e}")
+                await asyncio.sleep(self._reconnect_delay)
+
+    def _balance_changed(
+        self,
+        old: dict[str, float],
+        new: dict[str, float],
+        tolerance: float = 0.0001,
+    ) -> bool:
+        """Check if balance changed significantly.
+
+        Args:
+            old: Old balance
+            new: New balance
+            tolerance: Change tolerance
+
+        Returns:
+            True if changed significantly
+        """
+        for key in ["total", "free", "used"]:
+            old_val = old.get(key, 0)
+            new_val = new.get(key, 0)
+            if old_val == 0:
+                if new_val != 0:
+                    return True
+            elif abs(new_val - old_val) / abs(old_val) > tolerance:
+                return True
+        return False
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         """Handle incoming WebSocket message.
 
         Args:
-            message: Raw message
+            message: Raw message from WebSocket
         """
-        # Parse message and emit appropriate event
         event_type = message.get("type", "")
 
         if event_type == "position":
@@ -613,6 +883,15 @@ class RealtimeUpdater:
                 UpdateEvent(
                     type=UpdateType.BALANCE,
                     symbol="",
+                    data=message.get("data", {}),
+                    timestamp=datetime.now(),
+                )
+            )
+        elif event_type == "ticker":
+            self.emit(
+                UpdateEvent(
+                    type=UpdateType.PNL,
+                    symbol=message.get("symbol", ""),
                     data=message.get("data", {}),
                     timestamp=datetime.now(),
                 )

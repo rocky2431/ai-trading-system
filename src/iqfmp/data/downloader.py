@@ -16,13 +16,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from iqfmp.db.models import (
+    AggregatedTradeORM,
     DataDownloadTaskORM,
     FundingRateORM,
     LiquidationORM,
     LongShortRatioORM,
     OHLCVDataORM,
     OpenInterestORM,
+    OrderBookSnapshotORM,
     SymbolInfoORM,
+    TickTradeORM,
 )
 
 logger = logging.getLogger(__name__)
@@ -635,6 +638,316 @@ class CCXTDownloader:
 
         return total_rows
 
+    async def download_aggregated_trades(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        session: AsyncSession,
+        progress_callback: Optional[Callable[[float, int], Any]] = None,
+        batch_size: int = 1000,
+    ) -> int:
+        """Download aggregated trades using Binance HTTP endpoint.
+
+        Aggregated trades combine multiple trades at the same price into one record.
+        """
+        if self.exchange_id != "binance":
+            raise NotImplementedError("Aggregated trades download currently implemented for Binance only")
+
+        symbol_param = symbol.replace("/", "")
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(end_date.timestamp() * 1000)
+        total_rows = 0
+
+        # Select correct API base URL based on market type
+        if self.market_type == "futures":
+            base_url = "https://fapi.binance.com/fapi/v1/aggTrades"
+        else:
+            base_url = "https://api.binance.com/api/v3/aggTrades"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            current_ts = start_ts
+            while current_ts < end_ts:
+                params = {
+                    "symbol": symbol_param,
+                    "startTime": current_ts,
+                    "endTime": min(current_ts + 3600000, end_ts),  # 1 hour chunks
+                    "limit": batch_size,
+                }
+                try:
+                    resp = await client.get(base_url, params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    if not data:
+                        current_ts += 3600000
+                        await asyncio.sleep(self.rate_limit_delay)
+                        continue
+
+                    for item in data:
+                        agg_trade_id = item.get("a")
+                        ts_ms = item.get("T")
+                        if agg_trade_id is None or ts_ms is None:
+                            continue
+                        ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+                        # Check if exists
+                        exists = await session.execute(
+                            select(AggregatedTradeORM).where(
+                                AggregatedTradeORM.agg_trade_id == agg_trade_id,
+                                AggregatedTradeORM.symbol == symbol,
+                                AggregatedTradeORM.exchange == self.exchange_id,
+                            )
+                        )
+                        if exists.scalar_one_or_none():
+                            continue
+
+                        record = AggregatedTradeORM(
+                            agg_trade_id=agg_trade_id,
+                            symbol=symbol,
+                            exchange=self.exchange_id,
+                            price=float(item.get("p", 0)),
+                            quantity=float(item.get("q", 0)),
+                            first_trade_id=item.get("f"),
+                            last_trade_id=item.get("l"),
+                            is_buyer_maker=item.get("m", False),
+                            timestamp=ts,
+                        )
+                        session.add(record)
+                        total_rows += 1
+
+                    await session.commit()
+
+                    if progress_callback and end_ts > start_ts:
+                        progress = min(100.0, (current_ts - start_ts) / (end_ts - start_ts) * 100)
+                        await progress_callback(progress, total_rows)
+
+                    # Move forward based on last trade time
+                    if data:
+                        last_ts = data[-1].get("T", current_ts)
+                        current_ts = last_ts + 1
+                    else:
+                        current_ts += 3600000
+
+                    await asyncio.sleep(self.rate_limit_delay)
+
+                except Exception as e:
+                    logger.error(f"Error downloading aggregated trades: {e}")
+                    current_ts += 3600000
+                    await asyncio.sleep(self.rate_limit_delay)
+
+        return total_rows
+
+    async def download_tick_trades(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        session: AsyncSession,
+        progress_callback: Optional[Callable[[float, int], Any]] = None,
+        batch_size: int = 1000,
+    ) -> int:
+        """Download individual tick trades using Binance HTTP endpoint.
+
+        Each trade is recorded separately with its unique trade ID.
+        """
+        if self.exchange_id != "binance":
+            raise NotImplementedError("Tick trades download currently implemented for Binance only")
+
+        symbol_param = symbol.replace("/", "")
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(end_date.timestamp() * 1000)
+        total_rows = 0
+
+        # Select correct API based on market type
+        if self.market_type == "futures":
+            base_url = "https://fapi.binance.com/fapi/v1/trades"
+        else:
+            base_url = "https://api.binance.com/api/v3/trades"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            current_ts = start_ts
+            last_trade_id = None
+
+            while current_ts < end_ts:
+                params = {
+                    "symbol": symbol_param,
+                    "limit": batch_size,
+                }
+                # Use fromId for pagination if we have a last trade ID
+                if last_trade_id is not None:
+                    params["fromId"] = last_trade_id + 1
+                else:
+                    # For initial request, we need to get historical trades
+                    # Binance /trades only returns recent trades without fromId
+                    # Use historicalTrades endpoint (requires API key in production)
+                    pass
+
+                try:
+                    resp = await client.get(base_url, params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    if not data:
+                        break  # No more trades
+
+                    for item in data:
+                        trade_id = item.get("id")
+                        ts_ms = item.get("time")
+                        if trade_id is None or ts_ms is None:
+                            continue
+
+                        ts = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
+
+                        # Skip if outside date range
+                        if ts_ms < start_ts:
+                            continue
+                        if ts_ms > end_ts:
+                            break
+
+                        # Check if exists
+                        exists = await session.execute(
+                            select(TickTradeORM).where(
+                                TickTradeORM.trade_id == trade_id,
+                                TickTradeORM.symbol == symbol,
+                                TickTradeORM.exchange == self.exchange_id,
+                            )
+                        )
+                        if exists.scalar_one_or_none():
+                            continue
+
+                        price = float(item.get("price", 0))
+                        qty = float(item.get("qty", 0))
+
+                        record = TickTradeORM(
+                            trade_id=trade_id,
+                            symbol=symbol,
+                            exchange=self.exchange_id,
+                            price=price,
+                            quantity=qty,
+                            quote_quantity=price * qty,
+                            is_buyer_maker=item.get("isBuyerMaker", False),
+                            is_best_match=item.get("isBestMatch", True),
+                            timestamp=ts,
+                        )
+                        session.add(record)
+                        total_rows += 1
+                        last_trade_id = trade_id
+
+                    await session.commit()
+
+                    if progress_callback and end_ts > start_ts:
+                        progress = min(100.0, (current_ts - start_ts) / (end_ts - start_ts) * 100)
+                        await progress_callback(progress, total_rows)
+
+                    # Update current_ts based on last trade
+                    if data:
+                        current_ts = data[-1].get("time", current_ts)
+
+                    await asyncio.sleep(self.rate_limit_delay)
+
+                except Exception as e:
+                    logger.error(f"Error downloading tick trades: {e}")
+                    await asyncio.sleep(self.rate_limit_delay)
+                    break
+
+        return total_rows
+
+    async def download_orderbook_snapshots(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        session: AsyncSession,
+        progress_callback: Optional[Callable[[float, int], Any]] = None,
+        depth_limit: int = 100,
+        snapshot_interval_seconds: int = 60,
+    ) -> int:
+        """Download order book snapshots at regular intervals.
+
+        Note: This captures point-in-time snapshots, not historical order book data.
+        For historical data, consider using Binance data archives.
+        """
+        if self.exchange_id != "binance":
+            raise NotImplementedError("Order book download currently implemented for Binance only")
+
+        symbol_param = symbol.replace("/", "")
+        start_ts = int(start_date.timestamp() * 1000)
+        end_ts = int(end_date.timestamp() * 1000)
+        total_rows = 0
+
+        # Select correct API based on market type
+        if self.market_type == "futures":
+            base_url = "https://fapi.binance.com/fapi/v1/depth"
+        else:
+            base_url = "https://api.binance.com/api/v3/depth"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            current_ts = start_ts
+            interval_ms = snapshot_interval_seconds * 1000
+
+            while current_ts < end_ts:
+                params = {
+                    "symbol": symbol_param,
+                    "limit": depth_limit,
+                }
+                try:
+                    resp = await client.get(base_url, params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+
+                    if not data:
+                        current_ts += interval_ms
+                        await asyncio.sleep(self.rate_limit_delay)
+                        continue
+
+                    ts = datetime.fromtimestamp(current_ts / 1000, tz=timezone.utc)
+
+                    # Extract bid/ask data
+                    bids = data.get("bids", [])
+                    asks = data.get("asks", [])
+
+                    # Calculate metrics
+                    best_bid = float(bids[0][0]) if bids else 0.0
+                    best_ask = float(asks[0][0]) if asks else 0.0
+                    spread = best_ask - best_bid if best_bid > 0 and best_ask > 0 else 0.0
+                    mid_price = (best_bid + best_ask) / 2 if best_bid > 0 and best_ask > 0 else 0.0
+
+                    # Calculate depth (sum of quantities)
+                    bid_depth = sum(float(b[1]) for b in bids)
+                    ask_depth = sum(float(a[1]) for a in asks)
+
+                    record = OrderBookSnapshotORM(
+                        symbol=symbol,
+                        exchange=self.exchange_id,
+                        bids=[[float(b[0]), float(b[1])] for b in bids],
+                        asks=[[float(a[0]), float(a[1])] for a in asks],
+                        bid_depth=bid_depth,
+                        ask_depth=ask_depth,
+                        spread=spread,
+                        mid_price=mid_price,
+                        last_update_id=data.get("lastUpdateId"),
+                        timestamp=ts,
+                    )
+                    session.add(record)
+                    total_rows += 1
+
+                    await session.commit()
+
+                    if progress_callback and end_ts > start_ts:
+                        progress = min(100.0, (current_ts - start_ts) / (end_ts - start_ts) * 100)
+                        await progress_callback(progress, total_rows)
+
+                    current_ts += interval_ms
+                    await asyncio.sleep(max(self.rate_limit_delay, snapshot_interval_seconds))
+
+                except Exception as e:
+                    logger.error(f"Error downloading order book: {e}")
+                    current_ts += interval_ms
+                    await asyncio.sleep(self.rate_limit_delay)
+
+        return total_rows
+
 
 async def execute_download_task(
     task_id: str,
@@ -717,6 +1030,30 @@ async def execute_download_task(
             )
         elif data_type == "liquidation":
             total_rows = await downloader.download_liquidations(
+                symbol=task.symbol,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        elif data_type == "agg_trades":
+            total_rows = await downloader.download_aggregated_trades(
+                symbol=task.symbol,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        elif data_type == "trades":
+            total_rows = await downloader.download_tick_trades(
+                symbol=task.symbol,
+                start_date=task.start_date,
+                end_date=task.end_date,
+                session=session,
+                progress_callback=update_progress,
+            )
+        elif data_type == "depth":
+            total_rows = await downloader.download_orderbook_snapshots(
                 symbol=task.symbol,
                 start_date=task.start_date,
                 end_date=task.end_date,

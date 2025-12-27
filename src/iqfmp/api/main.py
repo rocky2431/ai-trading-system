@@ -25,6 +25,7 @@ from iqfmp.api.review.router import router as review_router
 from iqfmp.api.rl.router import router as rl_router
 from iqfmp.api.strategies.router import router as strategies_router
 from iqfmp.api.system.router import router as system_router
+from iqfmp.api.trading.router import router as trading_router
 from iqfmp.db.database import init_db, close_db
 
 logger = logging.getLogger(__name__)
@@ -189,6 +190,9 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         system_router, prefix="/api/v1/system", dependencies=auth_dependency
+    )
+    app.include_router(
+        trading_router, prefix="/api/v1/trading", dependencies=auth_dependency
     )
 
     @app.get("/health")

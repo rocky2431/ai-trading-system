@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     DateTime,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     func,
@@ -813,6 +815,88 @@ class TakerBuySellORM(Base):
     __table_args__ = (
         Index("ix_taker_buy_sell_symbol_timestamp", "symbol", "timestamp"),
         Index("ix_taker_buy_sell_timeframe", "timeframe"),
+    )
+
+
+class AggregatedTradeORM(Base):
+    """Aggregated trade data - trades aggregated by price level."""
+
+    __tablename__ = "aggregated_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    agg_trade_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance")
+
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    first_trade_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    last_trade_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    is_buyer_maker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_agg_trades_symbol_timestamp", "symbol", "timestamp"),
+        Index("ix_agg_trades_agg_id", "symbol", "agg_trade_id"),
+    )
+
+
+class TickTradeORM(Base):
+    """Individual tick-by-tick trade data."""
+
+    __tablename__ = "tick_trades"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance")
+
+    price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    quote_quantity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    is_buyer_maker: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_best_match: Mapped[bool] = mapped_column(Boolean, nullable=True)
+
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_tick_trades_symbol_timestamp", "symbol", "timestamp"),
+        Index("ix_tick_trades_trade_id", "symbol", "trade_id"),
+    )
+
+
+class OrderBookSnapshotORM(Base):
+    """Order book depth snapshot at a point in time."""
+
+    __tablename__ = "orderbook_snapshots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    exchange: Mapped[str] = mapped_column(String(20), nullable=False, default="binance")
+
+    # Store as JSON arrays for flexibility
+    bids: Mapped[dict] = mapped_column(JSON, nullable=False)  # [[price, qty], ...]
+    asks: Mapped[dict] = mapped_column(JSON, nullable=False)  # [[price, qty], ...]
+
+    # Summary metrics
+    bid_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ask_depth: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    spread: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mid_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    last_update_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+
+    __table_args__ = (
+        Index("ix_orderbook_symbol_timestamp", "symbol", "timestamp"),
     )
 
 

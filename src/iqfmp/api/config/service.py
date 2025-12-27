@@ -31,6 +31,34 @@ from iqfmp.api.config.schemas import (
     SetRiskControlConfigRequest,
     TestExchangeResponse,
     TestLLMResponse,
+    # P3: Sandbox/Security
+    SandboxConfigResponse,
+    SandboxConfigUpdate,
+    ExecutionLogEntry,
+    ExecutionLogResponse,
+    SecurityConfigResponse,
+    SecurityConfigUpdate,
+    # P3: LLM Advanced
+    RateLimitConfigResponse,
+    FallbackChainConfig,
+    LLMAdvancedConfigResponse,
+    LLMAdvancedConfigUpdate,
+    LLMTraceEntry,
+    LLMTraceResponse,
+    LLMCostSummary,
+    # P3: Derivative Data
+    DerivativeDataConfigResponse,
+    DerivativeDataConfigUpdate,
+    # P3: Checkpoints
+    CheckpointThreadInfo,
+    CheckpointInfo,
+    CheckpointListResponse,
+    CheckpointStateResponse,
+    # P3: Alpha Benchmark
+    BenchmarkConfigResponse,
+    BenchmarkConfigUpdate,
+    BenchmarkResultEntry,
+    BenchmarkResultsResponse,
 )
 
 
@@ -907,6 +935,601 @@ class ConfigService:
             success=True,
             message=f"Risk control configuration updated: {', '.join(updated)}",
         )
+
+    # ============== P3: Sandbox Configuration ==============
+
+    def get_sandbox_config(self) -> SandboxConfigResponse:
+        """Get sandbox execution configuration."""
+        sandbox_config = self._config.get("sandbox", {})
+        return SandboxConfigResponse(
+            timeout_seconds=sandbox_config.get("timeout_seconds", 60),
+            max_memory_mb=sandbox_config.get("max_memory_mb", 512),
+            max_cpu_seconds=sandbox_config.get("max_cpu_seconds", 30),
+            use_subprocess=sandbox_config.get("use_subprocess", True),
+            allowed_modules=sandbox_config.get("allowed_modules", [
+                "numpy", "pandas", "scipy", "sklearn", "talib", "qlib"
+            ]),
+        )
+
+    def update_sandbox_config(self, request: SandboxConfigUpdate) -> SetAPIKeysResponse:
+        """Update sandbox execution configuration."""
+        if "sandbox" not in self._config:
+            self._config["sandbox"] = {}
+
+        updated = []
+        for field in ["timeout_seconds", "max_memory_mb", "max_cpu_seconds",
+                      "use_subprocess", "allowed_modules"]:
+            value = getattr(request, field, None)
+            if value is not None:
+                self._config["sandbox"][field] = value
+                updated.append(field)
+
+        self._save_config()
+        return SetAPIKeysResponse(
+            success=True,
+            message=f"Sandbox configuration updated: {', '.join(updated)}",
+        )
+
+    async def get_execution_logs(
+        self, page: int, page_size: int, status: str | None
+    ) -> ExecutionLogResponse:
+        """Get sandbox execution logs with pagination."""
+        try:
+            # Try to fetch from database
+            from iqfmp.storage.database import get_db_session
+            from sqlalchemy import text
+
+            async with get_db_session() as session:
+                # Build query
+                query = "SELECT * FROM execution_logs"
+                params = {}
+                if status:
+                    query += " WHERE status = :status"
+                    params["status"] = status
+                query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
+                params["limit"] = page_size
+                params["offset"] = (page - 1) * page_size
+
+                result = await session.execute(text(query), params)
+                rows = result.fetchall()
+
+                # Count total
+                count_query = "SELECT COUNT(*) FROM execution_logs"
+                if status:
+                    count_query += " WHERE status = :status"
+                count_result = await session.execute(
+                    text(count_query), {"status": status} if status else {}
+                )
+                total = count_result.scalar() or 0
+
+                items = [
+                    ExecutionLogEntry(
+                        execution_id=row.execution_id,
+                        factor_name=row.factor_name,
+                        status=row.status,
+                        execution_time=row.execution_time,
+                        memory_used_mb=row.memory_used_mb,
+                        error_message=row.error_message,
+                        created_at=row.created_at.isoformat() if row.created_at else "",
+                    )
+                    for row in rows
+                ]
+
+                return ExecutionLogResponse(
+                    items=items,
+                    total=total,
+                    page=page,
+                    page_size=page_size,
+                    has_next=page * page_size < total,
+                )
+        except Exception:
+            # Return empty response if database unavailable
+            return ExecutionLogResponse(
+                items=[], total=0, page=page, page_size=page_size, has_next=False
+            )
+
+    # ============== P3: Security Configuration ==============
+
+    def get_security_config(self) -> SecurityConfigResponse:
+        """Get security configuration settings."""
+        security_config = self._config.get("security", {})
+        return SecurityConfigResponse(
+            research_ledger_strict=security_config.get("research_ledger_strict", True),
+            vector_strict_mode=security_config.get("vector_strict_mode", True),
+            human_review_enabled=security_config.get("human_review_enabled", True),
+            ast_security_check=security_config.get("ast_security_check", True),
+            sandbox_enabled=security_config.get("sandbox_enabled", True),
+        )
+
+    def update_security_config(self, request: SecurityConfigUpdate) -> SetAPIKeysResponse:
+        """Update security configuration settings."""
+        if "security" not in self._config:
+            self._config["security"] = {}
+
+        updated = []
+        for field in ["research_ledger_strict", "vector_strict_mode",
+                      "human_review_enabled", "ast_security_check", "sandbox_enabled"]:
+            value = getattr(request, field, None)
+            if value is not None:
+                self._config["security"][field] = value
+                updated.append(field)
+
+        self._save_config()
+        return SetAPIKeysResponse(
+            success=True,
+            message=f"Security configuration updated: {', '.join(updated)}",
+        )
+
+    # ============== P3: LLM Advanced Configuration ==============
+
+    async def get_llm_advanced_config(self) -> LLMAdvancedConfigResponse:
+        """Get LLM provider advanced configuration."""
+        llm_config = self._config.get("llm_advanced", {})
+
+        # Get usage stats from tracker if available
+        total_requests = 0
+        total_tokens = 0
+        total_cost = 0.0
+        cache_hit_rate = 0.0
+
+        try:
+            from iqfmp.api.system.service import get_system_service
+            system_service = get_system_service()
+            metrics = await system_service.get_llm_metrics()
+            total_requests = metrics.total_requests
+            total_tokens = metrics.total_tokens
+            total_cost = metrics.total_cost
+            cache_hit_rate = metrics.cache_hit_rate
+        except Exception:
+            pass
+
+        # Get available models
+        available_models = []
+        try:
+            models = self._fetch_openrouter_models()
+            available_models = [m.id for m in models]
+        except Exception:
+            available_models = [a["default_model"] for a in self.AGENTS]
+
+        return LLMAdvancedConfigResponse(
+            default_model=self._config.get("model", "deepseek/deepseek-v3.2-speciale"),
+            available_models=available_models,
+            rate_limit=RateLimitConfigResponse(
+                requests_per_minute=llm_config.get("requests_per_minute", 60),
+                tokens_per_minute=llm_config.get("tokens_per_minute", 100000),
+            ),
+            fallback_chain=FallbackChainConfig(
+                models=llm_config.get("fallback_models", [
+                    "deepseek/deepseek-v3.2-speciale",
+                    "anthropic/claude-sonnet-4",
+                    "openai/gpt-4o",
+                ]),
+                max_retries=llm_config.get("max_retries", 3),
+            ),
+            cache_enabled=llm_config.get("cache_enabled", True),
+            cache_ttl=llm_config.get("cache_ttl", 3600),
+            total_requests=total_requests,
+            total_tokens=total_tokens,
+            total_cost=total_cost,
+            cache_hit_rate=cache_hit_rate,
+        )
+
+    def update_llm_advanced_config(self, request: LLMAdvancedConfigUpdate) -> SetAPIKeysResponse:
+        """Update LLM advanced configuration."""
+        if "llm_advanced" not in self._config:
+            self._config["llm_advanced"] = {}
+
+        updated = []
+
+        if request.rate_limit is not None:
+            self._config["llm_advanced"]["requests_per_minute"] = request.rate_limit.requests_per_minute
+            self._config["llm_advanced"]["tokens_per_minute"] = request.rate_limit.tokens_per_minute
+            updated.append("rate_limit")
+
+        if request.fallback_chain is not None:
+            self._config["llm_advanced"]["fallback_models"] = request.fallback_chain.models
+            self._config["llm_advanced"]["max_retries"] = request.fallback_chain.max_retries
+            updated.append("fallback_chain")
+
+        if request.cache_enabled is not None:
+            self._config["llm_advanced"]["cache_enabled"] = request.cache_enabled
+            updated.append("cache_enabled")
+
+        if request.cache_ttl is not None:
+            self._config["llm_advanced"]["cache_ttl"] = request.cache_ttl
+            updated.append("cache_ttl")
+
+        self._save_config()
+        return SetAPIKeysResponse(
+            success=True,
+            message=f"LLM advanced configuration updated: {', '.join(updated)}",
+        )
+
+    async def get_llm_traces(
+        self, page: int, page_size: int, agent: str | None, model: str | None
+    ) -> LLMTraceResponse:
+        """Get LLM API call traces (audit log)."""
+        try:
+            from iqfmp.storage.database import get_db_session
+            from sqlalchemy import text
+
+            async with get_db_session() as session:
+                # Build query
+                conditions = []
+                params = {}
+                if agent:
+                    conditions.append("agent = :agent")
+                    params["agent"] = agent
+                if model:
+                    conditions.append("model = :model")
+                    params["model"] = model
+
+                where_clause = " AND ".join(conditions) if conditions else "1=1"
+                query = f"""
+                    SELECT * FROM llm_traces
+                    WHERE {where_clause}
+                    ORDER BY created_at DESC
+                    LIMIT :limit OFFSET :offset
+                """
+                params["limit"] = page_size
+                params["offset"] = (page - 1) * page_size
+
+                result = await session.execute(text(query), params)
+                rows = result.fetchall()
+
+                # Count total
+                count_query = f"SELECT COUNT(*) FROM llm_traces WHERE {where_clause}"
+                count_result = await session.execute(text(count_query), params)
+                total = count_result.scalar() or 0
+
+                items = [
+                    LLMTraceEntry(
+                        trace_id=row.trace_id,
+                        execution_id=row.execution_id,
+                        conversation_id=row.conversation_id,
+                        agent=row.agent,
+                        model=row.model,
+                        prompt_id=row.prompt_id,
+                        prompt_version=row.prompt_version,
+                        prompt_tokens=row.prompt_tokens,
+                        completion_tokens=row.completion_tokens,
+                        total_tokens=row.total_tokens,
+                        cost_estimate=row.cost_estimate,
+                        latency_ms=row.latency_ms,
+                        cached=row.cached,
+                        created_at=row.created_at.isoformat() if row.created_at else "",
+                    )
+                    for row in rows
+                ]
+
+                return LLMTraceResponse(
+                    items=items,
+                    total=total,
+                    page=page,
+                    page_size=page_size,
+                    has_next=page * page_size < total,
+                )
+        except Exception:
+            return LLMTraceResponse(
+                items=[], total=0, page=page, page_size=page_size, has_next=False
+            )
+
+    async def get_llm_costs(self, hours: int) -> LLMCostSummary:
+        """Get LLM cost summary for the specified time period."""
+        try:
+            from iqfmp.storage.database import get_db_session
+            from sqlalchemy import text
+
+            async with get_db_session() as session:
+                cutoff = datetime.now() - timedelta(hours=hours)
+
+                # Total stats
+                stats_query = """
+                    SELECT
+                        SUM(cost_estimate) as total_cost,
+                        SUM(total_tokens) as total_tokens,
+                        COUNT(*) as total_requests,
+                        SUM(CASE WHEN cached THEN 1 ELSE 0 END)::float / NULLIF(COUNT(*), 0) as cache_hit_rate
+                    FROM llm_traces
+                    WHERE created_at >= :cutoff
+                """
+                result = await session.execute(text(stats_query), {"cutoff": cutoff})
+                row = result.fetchone()
+
+                # By agent
+                by_agent_query = """
+                    SELECT agent, SUM(cost_estimate) as cost
+                    FROM llm_traces
+                    WHERE created_at >= :cutoff
+                    GROUP BY agent
+                """
+                agent_result = await session.execute(text(by_agent_query), {"cutoff": cutoff})
+                by_agent = {r.agent: r.cost for r in agent_result.fetchall()}
+
+                # By model
+                by_model_query = """
+                    SELECT model, SUM(cost_estimate) as cost
+                    FROM llm_traces
+                    WHERE created_at >= :cutoff
+                    GROUP BY model
+                """
+                model_result = await session.execute(text(by_model_query), {"cutoff": cutoff})
+                by_model = {r.model: r.cost for r in model_result.fetchall()}
+
+                # Hourly costs (last 24 hours)
+                hourly_query = """
+                    SELECT date_trunc('hour', created_at) as hour, SUM(cost_estimate) as cost
+                    FROM llm_traces
+                    WHERE created_at >= :cutoff
+                    GROUP BY date_trunc('hour', created_at)
+                    ORDER BY hour
+                """
+                hourly_result = await session.execute(text(hourly_query), {"cutoff": cutoff})
+                hourly_costs = [r.cost for r in hourly_result.fetchall()]
+
+                return LLMCostSummary(
+                    total_cost=row.total_cost or 0.0,
+                    total_tokens=row.total_tokens or 0,
+                    total_requests=row.total_requests or 0,
+                    cache_hit_rate=row.cache_hit_rate or 0.0,
+                    by_agent=by_agent,
+                    by_model=by_model,
+                    hourly_costs=hourly_costs,
+                )
+        except Exception:
+            return LLMCostSummary(
+                total_cost=0.0,
+                total_tokens=0,
+                total_requests=0,
+                cache_hit_rate=0.0,
+                by_agent={},
+                by_model={},
+                hourly_costs=[],
+            )
+
+    # ============== P3: Derivative Data Configuration ==============
+
+    def get_derivative_data_config(self) -> DerivativeDataConfigResponse:
+        """Get derivative data download configuration."""
+        deriv_config = self._config.get("derivative_data", {})
+        return DerivativeDataConfigResponse(
+            funding_rate_enabled=deriv_config.get("funding_rate_enabled", True),
+            open_interest_enabled=deriv_config.get("open_interest_enabled", True),
+            liquidation_enabled=deriv_config.get("liquidation_enabled", True),
+            long_short_ratio_enabled=deriv_config.get("long_short_ratio_enabled", True),
+            mark_price_enabled=deriv_config.get("mark_price_enabled", False),
+            taker_buy_sell_enabled=deriv_config.get("taker_buy_sell_enabled", False),
+            data_source=deriv_config.get("data_source", "timescale"),
+            exchanges=deriv_config.get("exchanges", ["binance"]),
+        )
+
+    def update_derivative_data_config(self, request: DerivativeDataConfigUpdate) -> SetAPIKeysResponse:
+        """Update derivative data configuration."""
+        if "derivative_data" not in self._config:
+            self._config["derivative_data"] = {}
+
+        updated = []
+        for field in ["funding_rate_enabled", "open_interest_enabled", "liquidation_enabled",
+                      "long_short_ratio_enabled", "mark_price_enabled", "taker_buy_sell_enabled",
+                      "data_source", "exchanges"]:
+            value = getattr(request, field, None)
+            if value is not None:
+                self._config["derivative_data"][field] = value
+                updated.append(field)
+
+        self._save_config()
+        return SetAPIKeysResponse(
+            success=True,
+            message=f"Derivative data configuration updated: {', '.join(updated)}",
+        )
+
+    # ============== P3: Checkpoint Management ==============
+
+    async def list_checkpoint_threads(self, limit: int) -> list[CheckpointThreadInfo]:
+        """List all checkpoint threads."""
+        try:
+            from iqfmp.agents.langgraph_orchestrator import get_checkpoint_manager
+
+            manager = await get_checkpoint_manager()
+            threads = await manager.list_threads(limit=limit)
+
+            return [
+                CheckpointThreadInfo(
+                    thread_id=t["thread_id"],
+                    name=t.get("name"),
+                    created_at=t.get("created_at", ""),
+                    last_updated=t.get("last_updated", ""),
+                    checkpoint_count=t.get("checkpoint_count", 0),
+                    current_phase=t.get("current_phase"),
+                )
+                for t in threads
+            ]
+        except Exception:
+            return []
+
+    async def list_checkpoints(self, thread_id: str) -> CheckpointListResponse:
+        """List checkpoints for a specific thread."""
+        try:
+            from iqfmp.agents.langgraph_orchestrator import get_checkpoint_manager
+
+            manager = await get_checkpoint_manager()
+            checkpoints = await manager.list_checkpoints(thread_id)
+
+            items = [
+                CheckpointInfo(
+                    checkpoint_id=cp["checkpoint_id"],
+                    thread_id=thread_id,
+                    phase=cp.get("phase", "unknown"),
+                    created_at=cp.get("created_at", ""),
+                    metadata=cp.get("metadata", {}),
+                )
+                for cp in checkpoints
+            ]
+
+            return CheckpointListResponse(
+                thread_id=thread_id,
+                checkpoints=items,
+                total=len(items),
+            )
+        except Exception:
+            return CheckpointListResponse(thread_id=thread_id, checkpoints=[], total=0)
+
+    async def get_checkpoint_state(self, thread_id: str, checkpoint_id: str) -> CheckpointStateResponse:
+        """Get full state of a specific checkpoint."""
+        try:
+            from iqfmp.agents.langgraph_orchestrator import get_checkpoint_manager
+
+            manager = await get_checkpoint_manager()
+            state = await manager.get_checkpoint(thread_id, checkpoint_id)
+
+            return CheckpointStateResponse(
+                checkpoint_id=checkpoint_id,
+                thread_id=thread_id,
+                phase=state.get("current_phase", "unknown"),
+                hypothesis=state.get("hypothesis"),
+                factors=state.get("factors", []),
+                evaluation_results=state.get("evaluation_results", {}),
+                strategy=state.get("strategy"),
+                backtest_results=state.get("backtest_results"),
+                messages=state.get("messages", []),
+                created_at=state.get("created_at", ""),
+            )
+        except Exception as e:
+            return CheckpointStateResponse(
+                checkpoint_id=checkpoint_id,
+                thread_id=thread_id,
+                phase="error",
+                factors=[],
+                evaluation_results={"error": str(e)},
+                messages=[],
+                created_at="",
+            )
+
+    async def restore_checkpoint(self, thread_id: str, checkpoint_id: str) -> SetAPIKeysResponse:
+        """Restore pipeline to a specific checkpoint (time travel)."""
+        try:
+            from iqfmp.agents.langgraph_orchestrator import get_checkpoint_manager
+
+            manager = await get_checkpoint_manager()
+            await manager.restore_checkpoint(thread_id, checkpoint_id)
+
+            return SetAPIKeysResponse(
+                success=True,
+                message=f"Pipeline restored to checkpoint {checkpoint_id}",
+            )
+        except Exception as e:
+            return SetAPIKeysResponse(
+                success=False,
+                message=f"Failed to restore checkpoint: {str(e)}",
+            )
+
+    # ============== P3: Alpha Benchmark Configuration ==============
+
+    def get_benchmark_config(self) -> BenchmarkConfigResponse:
+        """Get alpha benchmark configuration."""
+        benchmark_config = self._config.get("benchmark", {})
+        return BenchmarkConfigResponse(
+            benchmark_type=benchmark_config.get("benchmark_type", "alpha158"),
+            enabled=benchmark_config.get("enabled", True),
+            auto_run_on_evaluation=benchmark_config.get("auto_run_on_evaluation", True),
+            novelty_threshold=benchmark_config.get("novelty_threshold", 0.3),
+            min_improvement_pct=benchmark_config.get("min_improvement_pct", 5.0),
+        )
+
+    def update_benchmark_config(self, request: BenchmarkConfigUpdate) -> SetAPIKeysResponse:
+        """Update alpha benchmark configuration."""
+        if "benchmark" not in self._config:
+            self._config["benchmark"] = {}
+
+        updated = []
+        for field in ["benchmark_type", "enabled", "auto_run_on_evaluation",
+                      "novelty_threshold", "min_improvement_pct"]:
+            value = getattr(request, field, None)
+            if value is not None:
+                self._config["benchmark"][field] = value
+                updated.append(field)
+
+        self._save_config()
+        return SetAPIKeysResponse(
+            success=True,
+            message=f"Benchmark configuration updated: {', '.join(updated)}",
+        )
+
+    async def get_benchmark_results(
+        self, page: int, page_size: int, novel_only: bool
+    ) -> BenchmarkResultsResponse:
+        """Get benchmark results with pagination."""
+        try:
+            from iqfmp.storage.database import get_db_session
+            from sqlalchemy import text
+
+            async with get_db_session() as session:
+                # Build query
+                where_clause = "is_novel = true" if novel_only else "1=1"
+                query = f"""
+                    SELECT * FROM benchmark_results
+                    WHERE {where_clause}
+                    ORDER BY created_at DESC
+                    LIMIT :limit OFFSET :offset
+                """
+                params = {"limit": page_size, "offset": (page - 1) * page_size}
+
+                result = await session.execute(text(query), params)
+                rows = result.fetchall()
+
+                # Count total
+                count_query = f"SELECT COUNT(*) FROM benchmark_results WHERE {where_clause}"
+                count_result = await session.execute(text(count_query), {})
+                total = count_result.scalar() or 0
+
+                items = [
+                    BenchmarkResultEntry(
+                        result_id=row.result_id,
+                        factor_name=row.factor_name,
+                        factor_ic=row.factor_ic,
+                        factor_ir=row.factor_ir,
+                        factor_sharpe=row.factor_sharpe,
+                        benchmark_avg_ic=row.benchmark_avg_ic,
+                        benchmark_avg_ir=row.benchmark_avg_ir,
+                        ic_improvement=row.ic_improvement,
+                        ir_improvement=row.ir_improvement,
+                        rank=row.rank,
+                        total_factors=row.total_factors,
+                        is_novel=row.is_novel,
+                        created_at=row.created_at.isoformat() if row.created_at else "",
+                    )
+                    for row in rows
+                ]
+
+                return BenchmarkResultsResponse(
+                    items=items,
+                    total=total,
+                    page=page,
+                    page_size=page_size,
+                    has_next=page * page_size < total,
+                )
+        except Exception:
+            return BenchmarkResultsResponse(
+                items=[], total=0, page=page, page_size=page_size, has_next=False
+            )
+
+    async def run_benchmark(self, factor_names: list[str] | None) -> SetAPIKeysResponse:
+        """Run alpha benchmark on specified factors."""
+        try:
+            from iqfmp.evaluation.alpha_benchmark import run_benchmark_task
+
+            # Submit as Celery task
+            task = run_benchmark_task.delay(factor_names)
+
+            return SetAPIKeysResponse(
+                success=True,
+                message=f"Benchmark task submitted: {task.id}",
+            )
+        except Exception as e:
+            return SetAPIKeysResponse(
+                success=False,
+                message=f"Failed to submit benchmark task: {str(e)}",
+            )
 
 
 # Singleton instance

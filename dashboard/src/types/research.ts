@@ -35,6 +35,31 @@ export interface ThresholdHistory {
   threshold: number
 }
 
+export interface ThresholdConfig {
+  baseSharpeThreshold: number
+  confidenceLevel: number
+  minTrialsForAdjustment: number
+}
+
+export interface ThresholdFormula {
+  name: string
+  description: string
+  reference: string
+  equation: string
+  components: {
+    expectedMax: string
+    confidenceMultiplier: string
+    adjustment: string
+  }
+}
+
+export interface ThresholdDetails {
+  currentThreshold: number
+  nTrials: number
+  config: ThresholdConfig
+  formula: ThresholdFormula
+}
+
 export interface ResearchStats {
   totalTrials: number
   passedTrials: number
@@ -61,9 +86,21 @@ export interface OverfittingRisk {
   recommendation: string
 }
 
+export interface ApprovalRecord {
+  requestId: string
+  factorName: string
+  status: 'approved' | 'rejected' | 'pending' | 'timeout'
+  reviewer: string | null
+  reason: string | null
+  decidedAt: string | null
+  createdAt: string
+}
+
 export interface ResearchLedgerData {
   trials: Trial[]
   stats: ResearchStats
   thresholdHistory: ThresholdHistory[]
+  thresholdDetails: ThresholdDetails
   overfittingRisk: OverfittingRisk
+  approvalRecords: ApprovalRecord[]
 }

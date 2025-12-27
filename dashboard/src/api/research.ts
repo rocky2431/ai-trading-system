@@ -57,6 +57,23 @@ export interface ThresholdResponse {
   threshold_history: ThresholdHistoryItem[]
 }
 
+// Extended threshold details for UI
+export interface ThresholdDetails {
+  currentThreshold: number
+  nTrials: number
+  config: {
+    baseSharpeThreshold: number
+    confidenceLevel: number
+    minTrialsForAdjustment: number
+  }
+  formula: {
+    name: string
+    description: string
+    reference: string
+    equation: string
+  }
+}
+
 export interface LedgerListParams {
   page?: number
   page_size?: number

@@ -885,16 +885,15 @@ class BacktestOptimizationAgent:
 
         # =====================================================================
         # ACTION 2: Initialize Research Ledger for trial tracking
+        # P3.1 FIX: Use PostgresStorage by default (production persistence)
         # =====================================================================
         self.research_ledger: Optional[ResearchLedger] = None
         if RESEARCH_LEDGER_AVAILABLE and self.config.enable_dynamic_threshold:
-            from pathlib import Path
-            ledger_path = Path(self.config.ledger_path)
-            ledger_path.parent.mkdir(parents=True, exist_ok=True)
-            storage = FileStorage(ledger_path)
-            self.research_ledger = ResearchLedger(storage=storage)
+            # P3.1 FIX: Use default PostgresStorage instead of FileStorage
+            # ResearchLedger._get_default_storage() handles Postgres/fallback logic
+            self.research_ledger = ResearchLedger()
             logger.info(
-                f"BacktestOptimizationAgent: ResearchLedger initialized "
+                f"BacktestOptimizationAgent: ResearchLedger initialized with PostgresStorage "
                 f"({self.research_ledger.get_trial_count()} existing trials, "
                 f"current threshold={self.research_ledger.get_current_threshold():.2f})"
             )

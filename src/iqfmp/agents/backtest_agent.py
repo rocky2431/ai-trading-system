@@ -26,6 +26,14 @@ import pandas as pd
 
 from iqfmp.agents.orchestrator import AgentState
 
+# P0 Security: Import HumanReviewGate for manual approval
+from iqfmp.core.review import (
+    HumanReviewGate,
+    ReviewRequest,
+    ReviewConfig,
+    ReviewStatus,
+)
+
 # ============================================================================
 # ACTION 2: Connect Research Ledger for dynamic thresholds
 # ============================================================================
@@ -300,6 +308,11 @@ class BacktestConfig:
     enable_dynamic_threshold: bool = True  # Adjust threshold based on trials
     ledger_path: str = ".ultra/research_ledger.json"  # Where to store trials
 
+    # P0 Security: Human Review Gate - REQUIRED for production
+    # When enabled, strategy must be approved before backtest execution
+    human_review_enabled: bool = True  # ON by default for safety
+    human_review_timeout_seconds: int = 3600  # 1 hour default timeout
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -329,6 +342,9 @@ class BacktestConfig:
             "enable_overfit_gatekeeper": self.enable_overfit_gatekeeper,
             "enable_dynamic_threshold": self.enable_dynamic_threshold,
             "ledger_path": self.ledger_path,
+            # P0 Security: Human review settings
+            "human_review_enabled": self.human_review_enabled,
+            "human_review_timeout_seconds": self.human_review_timeout_seconds,
         }
 
 
@@ -931,6 +947,19 @@ class BacktestOptimizationAgent:
                 "Install iqfmp.evaluation.quality_gate module."
             )
 
+        # P0 Security: Initialize HumanReviewGate for manual approval
+        self._review_gate: Optional[HumanReviewGate] = None
+        if self.config.human_review_enabled:
+            review_config = ReviewConfig(
+                timeout_seconds=self.config.human_review_timeout_seconds,
+                auto_reject_on_timeout=True,
+            )
+            self._review_gate = HumanReviewGate(config=review_config)
+            logger.info(
+                f"BacktestOptimizationAgent HumanReviewGate enabled: "
+                f"timeout={self.config.human_review_timeout_seconds}s"
+            )
+
     async def optimize(self, state: AgentState) -> AgentState:
         """Run backtest optimization on strategy.
 
@@ -998,6 +1027,47 @@ class BacktestOptimizationAgent:
         if len(price_data) < self.config.min_train_periods:
             raise InsufficientDataError(
                 f"Insufficient data: {len(price_data)} < {self.config.min_train_periods}"
+            )
+
+        # ====================================================================
+        # P0 Security: HumanReviewGate - MUST approve before backtest
+        # ====================================================================
+        if self._review_gate and strategy_result:
+            strategy_summary = str(strategy_result)[:500]  # Truncate for readability
+            review_request = ReviewRequest(
+                code=strategy_summary,
+                code_summary=f"Backtest Strategy\nData points: {len(price_data)}",
+                factor_name="backtest_strategy",
+                metadata={
+                    "stage": "backtest",
+                    "data_points": len(price_data),
+                    "min_train_periods": self.config.min_train_periods,
+                    "optimization_method": self.config.optimization_method.value,
+                },
+            )
+            request_id = await self._review_gate.submit(review_request)
+            logger.info(f"Submitted strategy for backtest review: {request_id}")
+
+            decision = await self._review_gate.wait_for_decision(
+                request_id,
+                timeout=self.config.human_review_timeout_seconds,
+            )
+
+            if decision.status == ReviewStatus.REJECTED:
+                raise BacktestAgentError(
+                    f"Strategy rejected for backtest: {decision.reason}"
+                )
+            elif decision.status == ReviewStatus.TIMEOUT:
+                raise BacktestAgentError(
+                    "Strategy timed out waiting for backtest approval"
+                )
+            elif decision.status != ReviewStatus.APPROVED:
+                raise BacktestAgentError(
+                    f"Strategy not approved for backtest: status={decision.status}"
+                )
+
+            logger.info(
+                f"Strategy approved for backtest by {decision.reviewer or 'system'}"
             )
 
         # Define parameter space

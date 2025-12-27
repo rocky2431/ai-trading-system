@@ -1602,3 +1602,76 @@ def _execute_mining_task(
         "failed_count": failed_count,
         "cancelled": False,
     }
+
+
+# =============================================================================
+# P1.2 FIX: LangGraph Pipeline Celery Task
+# =============================================================================
+
+@celery_app.task(
+    bind=True,
+    name="iqfmp.celery_app.tasks.run_langgraph_pipeline",
+    max_retries=3,
+    default_retry_delay=60,
+    autoretry_for=(RetryableError,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+    retry_jitter=True,
+    acks_late=True,
+    track_started=True,
+    priority=5,  # High priority for pipeline execution
+)
+def run_langgraph_pipeline(
+    self,
+    run_id: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run a LangGraph factor mining pipeline.
+
+    P1.2 FIX: Celery task that executes the LangGraph pipeline,
+    connecting the API layer to actual pipeline execution.
+
+    Args:
+        run_id: Pipeline run ID (used as thread_id)
+        config: Pipeline configuration including:
+            - hypothesis: Factor hypothesis to explore
+            - enable_human_review: Enable human approval gates
+            - price_data: Historical price data (optional)
+            - evaluation_data: Data for factor evaluation (optional)
+
+    Returns:
+        Pipeline execution result with:
+            - factors: Generated factors
+            - evaluation_results: Evaluation metrics
+            - strategy: Generated strategy
+            - backtest_results: Backtest performance
+            - risk_assessment: Risk metrics
+    """
+    import asyncio
+
+    logger.info(f"LangGraph pipeline task started: {run_id}")
+
+    try:
+        # Get pipeline service and execute
+        from iqfmp.api.pipeline.service import get_pipeline_service
+        service = get_pipeline_service()
+
+        # Run the async pipeline in event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(
+                service.execute_langgraph_pipeline(run_id, config)
+            )
+        finally:
+            loop.close()
+
+        logger.info(f"LangGraph pipeline completed: {run_id}")
+        return result
+
+    except Exception as e:
+        logger.error(f"LangGraph pipeline failed: {run_id} - {e}")
+        # Let Celery retry if it's a retryable error
+        if isinstance(e, (ConnectionError, TimeoutError)):
+            raise RetryableError(str(e)) from e
+        raise TaskError(f"Pipeline failed: {e}") from e

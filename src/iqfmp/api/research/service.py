@@ -22,25 +22,40 @@ from iqfmp.evaluation.research_ledger import (
 class ResearchService:
     """Service for research ledger management with PostgreSQL persistence."""
 
-    def __init__(self, use_postgres: bool = False) -> None:
+    def __init__(self, use_postgres: bool = True) -> None:
         """Initialize research service.
+
+        P4 ARCHITECTURE FIX: Default to PostgreSQL (production-grade).
+        Respects RESEARCH_LEDGER_STRICT env var for strict mode enforcement.
 
         Args:
             use_postgres: Whether to use PostgreSQL storage (default True).
-                         Falls back to memory storage if DB is unavailable.
+                         In strict mode, raises error if DB is unavailable.
         """
         self._use_postgres = use_postgres
         self._postgres_storage: Optional[PostgresStorage] = None
+        strict_mode = os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true"
 
-        # Try PostgreSQL first, fall back to memory
+        # P4 FIX: Production-grade persistence - PostgreSQL required
         if use_postgres:
             try:
                 self._postgres_storage = PostgresStorage()
                 self._ledger = ResearchLedger(storage=self._postgres_storage)
             except Exception as e:
+                if strict_mode:
+                    raise RuntimeError(
+                        f"P4 STRICT MODE: PostgresStorage required but initialization failed: {e}. "
+                        "Set RESEARCH_LEDGER_STRICT=false to allow MemoryStorage fallback."
+                    )
                 print(f"Warning: PostgreSQL unavailable, using memory storage: {e}")
                 self._ledger = ResearchLedger(storage=MemoryStorage())
         else:
+            # Non-postgres mode still respects strict mode
+            if strict_mode:
+                raise RuntimeError(
+                    "P4 STRICT MODE: use_postgres=False not allowed in strict mode. "
+                    "PostgreSQL is required for production-grade persistence."
+                )
             self._ledger = ResearchLedger(storage=MemoryStorage())
 
         self._threshold_config = ThresholdConfig()

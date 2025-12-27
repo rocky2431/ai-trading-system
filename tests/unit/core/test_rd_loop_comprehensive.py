@@ -1,6 +1,8 @@
 """Comprehensive tests for RD Loop (Research-Development Loop).
 
 Tests use real implementations - NO MOCKS per user requirement.
+Tests use dependency injection for ResearchLedger with MemoryStorage
+(production code requires PostgresStorage via DATABASE_URL).
 """
 
 from __future__ import annotations
@@ -20,11 +22,25 @@ from iqfmp.core.rd_loop import (
     LoopState,
     RDLoop,
 )
+from iqfmp.evaluation.research_ledger import (
+    ResearchLedger,
+    MemoryStorage,
+)
 
 
 # =============================================================================
 # Test Fixtures
 # =============================================================================
+
+@pytest.fixture
+def test_ledger() -> ResearchLedger:
+    """Create a ResearchLedger with MemoryStorage for tests.
+
+    P4 Architecture: Production code requires PostgresStorage via DATABASE_URL.
+    Tests use dependency injection with MemoryStorage (real implementation, not mock).
+    """
+    return ResearchLedger(storage=MemoryStorage())
+
 
 @pytest.fixture
 def sample_ohlcv_df() -> pd.DataFrame:
@@ -277,9 +293,9 @@ class TestLoopState:
 class TestRDLoopInitialization:
     """Tests for RDLoop initialization."""
 
-    def test_default_initialization(self):
-        """Test RDLoop with default config."""
-        loop = RDLoop()
+    def test_default_initialization(self, test_ledger: ResearchLedger):
+        """Test RDLoop with default config (injected ledger for tests)."""
+        loop = RDLoop(ledger=test_ledger)
 
         assert loop.config is not None
         assert loop.state.phase == LoopPhase.INITIALIZING
@@ -287,16 +303,16 @@ class TestRDLoopInitialization:
         assert loop.benchmarker is not None
         assert loop.ledger is not None
 
-    def test_custom_config(self, loop_config: LoopConfig):
+    def test_custom_config(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test RDLoop with custom config."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
 
         assert loop.config.max_iterations == 10
         assert loop.config.ic_threshold == 0.02
 
-    def test_initial_state(self):
+    def test_initial_state(self, test_ledger: ResearchLedger):
         """Test initial state of RDLoop."""
-        loop = RDLoop()
+        loop = RDLoop(ledger=test_ledger)
 
         assert loop._df is None
         assert loop._factor_engine is None
@@ -309,25 +325,25 @@ class TestRDLoopInitialization:
 class TestRDLoopDataLoading:
     """Tests for RDLoop data loading."""
 
-    def test_load_dataframe(self, sample_ohlcv_df: pd.DataFrame):
+    def test_load_dataframe(self, sample_ohlcv_df: pd.DataFrame, test_ledger: ResearchLedger):
         """Test loading data from DataFrame."""
-        loop = RDLoop()
+        loop = RDLoop(ledger=test_ledger)
         loop.load_data(sample_ohlcv_df)
 
         assert loop._df is not None
         assert len(loop._df) == len(sample_ohlcv_df)
 
-    def test_load_data_creates_engines(self, sample_ohlcv_df: pd.DataFrame):
+    def test_load_data_creates_engines(self, sample_ohlcv_df: pd.DataFrame, test_ledger: ResearchLedger):
         """Test that loading data creates factor engine and evaluator."""
-        loop = RDLoop()
+        loop = RDLoop(ledger=test_ledger)
         loop.load_data(sample_ohlcv_df)
 
         assert loop._factor_engine is not None
         assert loop._factor_evaluator is not None
 
-    def test_load_data_calculates_returns(self, sample_ohlcv_df: pd.DataFrame):
+    def test_load_data_calculates_returns(self, sample_ohlcv_df: pd.DataFrame, test_ledger: ResearchLedger):
         """Test that loading data calculates forward returns."""
-        loop = RDLoop()
+        loop = RDLoop(ledger=test_ledger)
         loop.load_data(sample_ohlcv_df)
 
         assert loop._forward_returns is not None
@@ -337,25 +353,25 @@ class TestRDLoopDataLoading:
 class TestRDLoopState:
     """Tests for RDLoop state management."""
 
-    def test_state_access(self, loop_config: LoopConfig):
+    def test_state_access(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test accessing loop state directly."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
 
         assert isinstance(loop.state, LoopState)
         assert loop.state.phase == LoopPhase.INITIALIZING
 
-    def test_state_to_dict(self, loop_config: LoopConfig):
+    def test_state_to_dict(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test converting state to dictionary."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
         state_dict = loop.state.to_dict()
 
         assert isinstance(state_dict, dict)
         assert "phase" in state_dict
         assert "iteration" in state_dict
 
-    def test_stop_request(self, loop_config: LoopConfig):
+    def test_stop_request(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test stop request."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
         loop.stop()
 
         assert loop.state.stop_requested is True
@@ -364,24 +380,24 @@ class TestRDLoopState:
 class TestRDLoopCoreFunctions:
     """Tests for core RDLoop functions."""
 
-    def test_get_core_factors_empty(self, loop_config: LoopConfig):
+    def test_get_core_factors_empty(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test getting core factors when empty."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
         factors = loop.get_core_factors()
 
         assert isinstance(factors, list)
         assert len(factors) == 0
 
-    def test_get_statistics(self, loop_config: LoopConfig):
+    def test_get_statistics(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test getting statistics."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
         stats = loop.get_statistics()
 
         assert isinstance(stats, dict)
 
-    def test_should_continue_initially(self, loop_config: LoopConfig):
+    def test_should_continue_initially(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test _should_continue initially returns True."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
 
         # Should continue initially (no iterations run)
         result = loop._should_continue()
@@ -395,9 +411,9 @@ class TestRDLoopCoreFunctions:
 class TestRDLoopEdgeCases:
     """Edge case tests for RDLoop."""
 
-    def test_empty_dataframe(self):
+    def test_empty_dataframe(self, test_ledger: ResearchLedger):
         """Test loading empty DataFrame."""
-        loop = RDLoop()
+        loop = RDLoop(ledger=test_ledger)
         empty_df = pd.DataFrame()
 
         # Should handle empty DataFrame gracefully
@@ -406,17 +422,17 @@ class TestRDLoopEdgeCases:
         except (ValueError, KeyError):
             pass  # Expected for invalid data
 
-    def test_missing_columns(self):
+    def test_missing_columns(self, test_ledger: ResearchLedger):
         """Test loading DataFrame with missing columns."""
-        loop = RDLoop()
+        loop = RDLoop(ledger=test_ledger)
         invalid_df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
 
         with pytest.raises((ValueError, KeyError)):
             loop.load_data(invalid_df)
 
-    def test_nan_handling(self, sample_ohlcv_df: pd.DataFrame):
+    def test_nan_handling(self, sample_ohlcv_df: pd.DataFrame, test_ledger: ResearchLedger):
         """Test handling of NaN values in data."""
-        loop = RDLoop()
+        loop = RDLoop(ledger=test_ledger)
 
         # Add some NaN values
         df_with_nan = sample_ohlcv_df.copy()
@@ -434,9 +450,9 @@ class TestRDLoopEdgeCases:
 class TestRDLoopIntegration:
     """Integration tests for RDLoop with real components."""
 
-    def test_full_workflow_setup(self, sample_ohlcv_df: pd.DataFrame, loop_config: LoopConfig):
+    def test_full_workflow_setup(self, sample_ohlcv_df: pd.DataFrame, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test full workflow setup without running the loop."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
         loop.load_data(sample_ohlcv_df)
 
         # Verify all components are ready
@@ -448,9 +464,9 @@ class TestRDLoopIntegration:
         # Verify state
         assert loop.state.phase == LoopPhase.INITIALIZING or loop.state.phase == LoopPhase.HYPOTHESIS_GENERATION
 
-    def test_ledger_integration(self, loop_config: LoopConfig):
+    def test_ledger_integration(self, loop_config: LoopConfig, test_ledger: ResearchLedger):
         """Test that ledger is properly integrated."""
-        loop = RDLoop(config=loop_config)
+        loop = RDLoop(config=loop_config, ledger=test_ledger)
 
         # Ledger should be initialized
         assert loop.ledger is not None

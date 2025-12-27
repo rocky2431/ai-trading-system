@@ -11,6 +11,7 @@ import { ResearchLedgerPage } from '@/pages/ResearchLedgerPage'
 import { ReviewQueuePage } from '@/pages/ReviewQueuePage'
 import { RLTrainingPage } from '@/pages/RLTrainingPage'
 import { PromptsPage } from '@/pages/PromptsPage'
+import { CheckpointPage } from '@/pages/CheckpointPage'
 // DISABLED: Live trading uses mock data, backend API not implemented
 // import { LiveTradingPage } from '@/pages/LiveTradingPage'
 import { PipelinePage } from '@/pages/PipelinePage'
@@ -33,6 +34,7 @@ function App() {
           <Route path="review" element={<ReviewQueuePage />} />
           <Route path="rl-training" element={<RLTrainingPage />} />
           <Route path="prompts" element={<PromptsPage />} />
+          <Route path="checkpoints" element={<CheckpointPage />} />
           {/* DISABLED: Live trading route - uses mock data, backend not implemented */}
           {/* <Route path="trading" element={<LiveTradingPage />} /> */}
           <Route path="pipeline" element={<PipelinePage />} />

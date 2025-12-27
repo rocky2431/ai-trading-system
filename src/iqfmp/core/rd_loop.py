@@ -37,6 +37,7 @@ from iqfmp.evaluation.research_ledger import (
     TrialRecord,
     MemoryStorage,
     PostgresStorage,
+    validate_production_storage,  # P4.2 FIX: Import strict mode validator
 )
 from iqfmp.models.factor_combiner import (
     FactorCombiner,
@@ -198,12 +199,21 @@ class RDLoop:
     def _create_ledger_with_storage(self) -> ResearchLedger:
         """Create ResearchLedger with appropriate storage backend.
 
-        Tries PostgresStorage first, falls back to MemoryStorage if DB is unavailable.
+        P4.2 FIX: Respects RESEARCH_LEDGER_STRICT environment variable.
+        In strict mode, will raise error if PostgresStorage is unavailable.
+
+        Tries PostgresStorage first, falls back to MemoryStorage if DB is unavailable
+        and strict mode is not enabled.
 
         Returns:
             ResearchLedger with storage backend
+
+        Raises:
+            RuntimeError: If strict mode enabled and PostgresStorage unavailable
         """
         import os
+
+        strict_mode = os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true"
 
         # Check if DATABASE_URL is configured
         if os.environ.get("DATABASE_URL"):
@@ -212,10 +222,25 @@ class RDLoop:
                 logger.info("RDLoop using PostgresStorage for persistence")
                 return ResearchLedger(storage=storage)
             except Exception as e:
+                if strict_mode:
+                    raise RuntimeError(
+                        f"P4.2 STRICT MODE: PostgresStorage required but initialization failed: {e}. "
+                        "Set RESEARCH_LEDGER_STRICT=false to allow MemoryStorage fallback."
+                    )
                 logger.warning(f"PostgresStorage initialization failed: {e}, falling back to MemoryStorage")
 
+        # No DATABASE_URL configured
+        if strict_mode:
+            raise RuntimeError(
+                "P4.2 STRICT MODE: DATABASE_URL required for PostgresStorage but not configured. "
+                "Set RESEARCH_LEDGER_STRICT=false to allow MemoryStorage fallback."
+            )
+
         logger.info("RDLoop using MemoryStorage (no DB configured)")
-        return ResearchLedger(storage=MemoryStorage())
+        storage = MemoryStorage()
+        # P4.2 FIX: Validate storage in production
+        validate_production_storage(storage)
+        return ResearchLedger(storage=storage)
 
     def load_data(
         self,

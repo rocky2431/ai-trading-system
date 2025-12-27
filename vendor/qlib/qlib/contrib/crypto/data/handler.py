@@ -67,6 +67,21 @@ class CryptoField(str, Enum):
     TRADES = "trades"
     TAKER_BUY_VOLUME = "taker_buy_volume"
 
+    # P4.3: Order Book / Microstructure Fields
+    BID_PRICE = "bid_price"  # Best bid price (L1)
+    ASK_PRICE = "ask_price"  # Best ask price (L1)
+    BID_SIZE = "bid_size"  # Best bid quantity
+    ASK_SIZE = "ask_size"  # Best ask quantity
+    MID_PRICE = "mid_price"  # (bid + ask) / 2
+    SPREAD = "spread"  # ask - bid
+    SPREAD_BPS = "spread_bps"  # Spread in basis points
+    ORDER_BOOK_IMBALANCE = "order_book_imbalance"  # (bid_size - ask_size) / (bid_size + ask_size)
+    DEPTH_BID_5 = "depth_bid_5"  # Sum of top 5 bid quantities
+    DEPTH_ASK_5 = "depth_ask_5"  # Sum of top 5 ask quantities
+    DEPTH_IMBALANCE_5 = "depth_imbalance_5"  # Imbalance at 5 levels
+    VWAP_BID_5 = "vwap_bid_5"  # Volume-weighted avg bid price (5 levels)
+    VWAP_ASK_5 = "vwap_ask_5"  # Volume-weighted avg ask price (5 levels)
+
 
 class Exchange(str, Enum):
     """Supported cryptocurrency exchanges."""
@@ -554,6 +569,271 @@ def _create_crypto_data_handler():
                 return oi * close
             else:
                 raise ValueError(f"Unknown OI normalization method: {method}")
+
+        # === P4.3: Order Book / Microstructure Methods ===
+
+        def calculate_spread(self, method: str = "absolute") -> Optional[pd.Series]:
+            """Calculate bid-ask spread from L1 order book data.
+
+            Args:
+                method: Calculation method:
+                    - "absolute": ask_price - bid_price
+                    - "percentage": (ask - bid) / mid_price * 100
+                    - "bps": (ask - bid) / mid_price * 10000 (basis points)
+
+            Returns:
+                Series with spread values, or None if bid/ask prices unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            bid = self.get_field(CryptoField.BID_PRICE)
+            ask = self.get_field(CryptoField.ASK_PRICE)
+
+            if bid is None or ask is None:
+                return None
+
+            spread = ask - bid
+
+            if method == "absolute":
+                return spread
+            elif method == "percentage":
+                mid = (bid + ask) / 2
+                return (spread / mid) * 100
+            elif method == "bps":
+                mid = (bid + ask) / 2
+                return (spread / mid) * 10000
+            else:
+                raise ValueError(f"Unknown spread calculation method: {method}")
+
+        def calculate_mid_price(self) -> Optional[pd.Series]:
+            """Calculate mid price from L1 order book data.
+
+            Returns:
+                Series with mid prices, or None if bid/ask unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            bid = self.get_field(CryptoField.BID_PRICE)
+            ask = self.get_field(CryptoField.ASK_PRICE)
+
+            if bid is None or ask is None:
+                return None
+
+            return (bid + ask) / 2
+
+        def calculate_order_book_imbalance(self) -> Optional[pd.Series]:
+            """Calculate L1 order book imbalance.
+
+            Formula: (bid_size - ask_size) / (bid_size + ask_size)
+            Range: -1 (all ask) to +1 (all bid)
+            Positive values indicate buying pressure.
+
+            Returns:
+                Series with imbalance values, or None if sizes unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            bid_size = self.get_field(CryptoField.BID_SIZE)
+            ask_size = self.get_field(CryptoField.ASK_SIZE)
+
+            if bid_size is None or ask_size is None:
+                return None
+
+            total = bid_size + ask_size
+            # Handle division by zero
+            imbalance = (bid_size - ask_size) / total.replace(0, np.nan)
+            return imbalance
+
+        def calculate_depth_imbalance(self, levels: int = 5) -> Optional[pd.Series]:
+            """Calculate order book depth imbalance at specified levels.
+
+            Uses pre-aggregated depth fields (depth_bid_5, depth_ask_5).
+
+            Args:
+                levels: Number of order book levels (default 5).
+
+            Returns:
+                Series with depth imbalance values, or None if unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            if levels == 5:
+                bid_depth = self.get_field(CryptoField.DEPTH_BID_5)
+                ask_depth = self.get_field(CryptoField.DEPTH_ASK_5)
+            else:
+                # For other levels, try generic column names
+                bid_col = f"depth_bid_{levels}"
+                ask_col = f"depth_ask_{levels}"
+                bid_depth = self._crypto_data.get(bid_col)
+                ask_depth = self._crypto_data.get(ask_col)
+
+            if bid_depth is None or ask_depth is None:
+                return None
+
+            total = bid_depth + ask_depth
+            imbalance = (bid_depth - ask_depth) / total.replace(0, np.nan)
+            return imbalance
+
+        def calculate_microprice(self) -> Optional[pd.Series]:
+            """Calculate microprice (volume-weighted mid price).
+
+            Formula: (bid_price * ask_size + ask_price * bid_size) / (bid_size + ask_size)
+            More accurate than simple mid price for predicting short-term direction.
+
+            Returns:
+                Series with microprice values, or None if L1 data unavailable.
+            """
+            if self._crypto_data is None:
+                return None
+
+            bid = self.get_field(CryptoField.BID_PRICE)
+            ask = self.get_field(CryptoField.ASK_PRICE)
+            bid_size = self.get_field(CryptoField.BID_SIZE)
+            ask_size = self.get_field(CryptoField.ASK_SIZE)
+
+            if any(x is None for x in [bid, ask, bid_size, ask_size]):
+                return None
+
+            total_size = bid_size + ask_size
+            microprice = (bid * ask_size + ask * bid_size) / total_size.replace(0, np.nan)
+            return microprice
+
+        def calculate_effective_spread(
+            self,
+            trade_price: Optional[pd.Series] = None,
+        ) -> Optional[pd.Series]:
+            """Calculate effective spread from trade execution prices.
+
+            Formula: 2 * |trade_price - mid_price|
+            Measures actual execution cost vs theoretical cost.
+
+            Args:
+                trade_price: Series of actual trade prices.
+                    If None, uses close price as proxy.
+
+            Returns:
+                Series with effective spread values.
+            """
+            if self._crypto_data is None:
+                return None
+
+            mid = self.calculate_mid_price()
+            if mid is None:
+                return None
+
+            if trade_price is None:
+                trade_price = self.get_field(CryptoField.CLOSE)
+
+            if trade_price is None:
+                return None
+
+            return 2 * (trade_price - mid).abs()
+
+        def load_orderbook_snapshot(
+            self,
+            bids: list[tuple[float, float]],
+            asks: list[tuple[float, float]],
+            timestamp: Optional[pd.Timestamp] = None,
+            levels: int = 5,
+        ) -> dict[str, float]:
+            """Process a single order book snapshot into aggregated features.
+
+            Args:
+                bids: List of (price, quantity) tuples for bid side, sorted best first.
+                asks: List of (price, quantity) tuples for ask side, sorted best first.
+                timestamp: Optional timestamp for this snapshot.
+                levels: Number of levels to process (default 5).
+
+            Returns:
+                Dictionary with calculated order book features.
+            """
+            features: dict[str, float] = {}
+
+            if timestamp:
+                features["datetime"] = timestamp
+
+            # L1 data
+            if bids:
+                features["bid_price"] = bids[0][0]
+                features["bid_size"] = bids[0][1]
+            if asks:
+                features["ask_price"] = asks[0][0]
+                features["ask_size"] = asks[0][1]
+
+            # Mid price and spread
+            if bids and asks:
+                mid = (bids[0][0] + asks[0][0]) / 2
+                spread = asks[0][0] - bids[0][0]
+                features["mid_price"] = mid
+                features["spread"] = spread
+                features["spread_bps"] = (spread / mid) * 10000 if mid > 0 else 0
+
+                # L1 imbalance
+                total_l1 = bids[0][1] + asks[0][1]
+                if total_l1 > 0:
+                    features["order_book_imbalance"] = (
+                        bids[0][1] - asks[0][1]
+                    ) / total_l1
+
+            # Depth aggregation
+            bid_depth = sum(qty for _, qty in bids[:levels])
+            ask_depth = sum(qty for _, qty in asks[:levels])
+            features[f"depth_bid_{levels}"] = bid_depth
+            features[f"depth_ask_{levels}"] = ask_depth
+
+            total_depth = bid_depth + ask_depth
+            if total_depth > 0:
+                features[f"depth_imbalance_{levels}"] = (
+                    bid_depth - ask_depth
+                ) / total_depth
+
+            # VWAP calculation
+            if bids:
+                bid_value = sum(p * q for p, q in bids[:levels])
+                bid_vol = sum(q for _, q in bids[:levels])
+                if bid_vol > 0:
+                    features[f"vwap_bid_{levels}"] = bid_value / bid_vol
+
+            if asks:
+                ask_value = sum(p * q for p, q in asks[:levels])
+                ask_vol = sum(q for _, q in asks[:levels])
+                if ask_vol > 0:
+                    features[f"vwap_ask_{levels}"] = ask_value / ask_vol
+
+            return features
+
+        def process_orderbook_stream(
+            self,
+            snapshots: list[dict[str, Any]],
+            levels: int = 5,
+        ) -> pd.DataFrame:
+            """Process a stream of order book snapshots into a DataFrame.
+
+            Args:
+                snapshots: List of order book snapshots, each with:
+                    - "bids": List of (price, qty) tuples
+                    - "asks": List of (price, qty) tuples
+                    - "timestamp": Optional timestamp
+                levels: Number of levels to process.
+
+            Returns:
+                DataFrame with aggregated order book features.
+            """
+            processed = []
+            for snapshot in snapshots:
+                bids = snapshot.get("bids", [])
+                asks = snapshot.get("asks", [])
+                timestamp = snapshot.get("timestamp")
+                if isinstance(timestamp, str):
+                    timestamp = pd.Timestamp(timestamp)
+                features = self.load_orderbook_snapshot(bids, asks, timestamp, levels)
+                processed.append(features)
+
+            return pd.DataFrame(processed)
 
         # === Exchange Detection Methods ===
 

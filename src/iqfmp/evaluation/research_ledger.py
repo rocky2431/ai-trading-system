@@ -720,15 +720,27 @@ class LedgerStatistics:
     median_sharpe: float = 0.0
 
 
-def _get_default_storage() -> "LedgerStorage":
+def _get_default_storage(strict_mode: bool = False) -> "LedgerStorage":
     """Get the default storage backend with PostgreSQL preference.
 
     P1-2 FIX: Production systems MUST use PostgresStorage to persist
     research trials. MemoryStorage loses all data on restart.
 
+    P3.1 FIX: Added strict_mode to block fallback to MemoryStorage in production.
+
+    Args:
+        strict_mode: If True, raise error instead of falling back to MemoryStorage.
+                     Set via RESEARCH_LEDGER_STRICT=true environment variable.
+
     Returns:
-        PostgresStorage if database is available, MemoryStorage with warning otherwise.
+        PostgresStorage if database is available.
+
+    Raises:
+        RuntimeError: If strict_mode=True and PostgresStorage is unavailable.
     """
+    import os
+    strict_mode = strict_mode or os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true"
+
     try:
         storage = PostgresStorage()
         # Test that we can actually load (validates DB connection)
@@ -736,11 +748,39 @@ def _get_default_storage() -> "LedgerStorage":
         logger.info("ResearchLedger using PostgresStorage (production mode)")
         return storage
     except Exception as e:
+        if strict_mode:
+            raise RuntimeError(
+                f"PostgresStorage unavailable ({e}). "
+                "STRICT MODE: MemoryStorage/FileStorage are FORBIDDEN in production. "
+                "Configure DATABASE_URL or set RESEARCH_LEDGER_STRICT=false for development."
+            )
         logger.warning(
             f"PostgresStorage unavailable ({e}), falling back to MemoryStorage. "
-            "WARNING: Research trials will NOT persist across restarts!"
+            "WARNING: Research trials will NOT persist across restarts! "
+            "Set RESEARCH_LEDGER_STRICT=true to enforce production persistence."
         )
         return MemoryStorage()
+
+
+def validate_production_storage(storage: "LedgerStorage") -> None:
+    """Validate that storage backend is suitable for production.
+
+    P3.1 FIX: Explicitly block MemoryStorage/FileStorage in production environments.
+
+    Args:
+        storage: The storage backend to validate.
+
+    Raises:
+        RuntimeError: If storage is not PostgresStorage and strict mode is enabled.
+    """
+    import os
+    if os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true":
+        if isinstance(storage, (MemoryStorage, FileStorage)):
+            raise RuntimeError(
+                f"PRODUCTION ERROR: {type(storage).__name__} is not allowed. "
+                "Use PostgresStorage for production persistence. "
+                "Set RESEARCH_LEDGER_STRICT=false for development."
+            )
 
 
 class ResearchLedger:

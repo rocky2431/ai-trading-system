@@ -24,6 +24,15 @@ from .decision import Order
 from .exchange import Exchange
 from .utils import CommonInfrastructure
 
+# P3.3 FIX: Add crypto-specific executor for cryptocurrency backtesting
+from .crypto_executor import (
+    CryptoExecutor,
+    CryptoExecutorConfig,
+    FundingPayment,
+    LiquidationEvent,
+    create_crypto_executor,
+)
+
 # make import more user-friendly by adding `from qlib.backtest import STH`
 
 

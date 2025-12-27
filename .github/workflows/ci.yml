@@ -154,6 +154,106 @@ jobs:
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
 
+  # ==================== Security Tests (P3.6) ====================
+  security-tests:
+    name: Security Layer Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Verify RestrictedPython installation
+        run: |
+          python -c "
+          from RestrictedPython import compile_restricted
+          from RestrictedPython.Guards import safe_builtins, guarded_iter_unpack_sequence
+          print('✅ RestrictedPython installed and importable')
+
+          # Test basic restriction works
+          code = 'x = 1 + 2'
+          byte_code = compile_restricted(code, '<string>', 'exec')
+          assert byte_code is not None
+          print('✅ RestrictedPython compile_restricted works')
+          "
+
+      - name: Verify resource module (Linux)
+        run: |
+          python -c "
+          import resource
+          import sys
+
+          # Get current limits
+          soft, hard = resource.getrlimit(resource.RLIMIT_CPU)
+          print(f'CPU limit: soft={soft}, hard={hard}')
+
+          # Test we can set limits
+          resource.setrlimit(resource.RLIMIT_CPU, (10, hard))
+          new_soft, _ = resource.getrlimit(resource.RLIMIT_CPU)
+          assert new_soft == 10
+          print('✅ Resource limits can be set on Linux')
+
+          # Test memory limit
+          mem_soft, mem_hard = resource.getrlimit(resource.RLIMIT_AS)
+          print(f'Memory limit: soft={mem_soft}, hard={mem_hard}')
+          print('✅ Resource module fully functional')
+          "
+
+      - name: Run security unit tests
+        run: |
+          pytest tests/unit/core/test_security.py -v --tb=short
+        env:
+          PYTHONPATH: src
+
+      - name: Run sandbox unit tests
+        run: |
+          pytest tests/unit/core/test_sandbox.py -v --tb=short
+        env:
+          PYTHONPATH: src
+
+      - name: Verify sandbox blocks dangerous operations
+        run: |
+          python -c "
+          from iqfmp.core.sandbox import SandboxExecutor, ExecutionStatus
+
+          executor = SandboxExecutor()
+
+          # Test 1: Block os import
+          result = executor.execute('import os')
+          assert result.status == ExecutionStatus.SECURITY_VIOLATION, 'Should block os import'
+          print('✅ Blocks os import')
+
+          # Test 2: Block eval
+          result = executor.execute('eval(\"1+1\")')
+          assert result.status == ExecutionStatus.SECURITY_VIOLATION, 'Should block eval'
+          print('✅ Blocks eval')
+
+          # Test 3: Block file access
+          result = executor.execute('open(\"/etc/passwd\")')
+          assert result.status == ExecutionStatus.SECURITY_VIOLATION, 'Should block open'
+          print('✅ Blocks file access')
+
+          # Test 4: Allow safe pandas/numpy
+          result = executor.execute('import numpy as np; result = np.mean([1,2,3])')
+          assert result.status == ExecutionStatus.SUCCESS, 'Should allow numpy'
+          print('✅ Allows safe numpy operations')
+
+          print('✅ All sandbox security checks passed!')
+          "
+        env:
+          PYTHONPATH: src
+
   # ==================== Code Quality ====================
   code-quality:
     name: Code Quality
@@ -184,7 +284,7 @@ jobs:
   # ==================== Summary ====================
   ci-success:
     name: CI Success
-    needs: [python-test, frontend-test, security-scan, code-quality]
+    needs: [python-test, frontend-test, security-scan, security-tests, code-quality]
     runs-on: ubuntu-latest
     if: always()
 
@@ -197,6 +297,10 @@ jobs:
           fi
           if [[ "${{ needs.frontend-test.result }}" == "failure" ]]; then
             echo "Frontend tests failed"
+            exit 1
+          fi
+          if [[ "${{ needs.security-tests.result }}" == "failure" ]]; then
+            echo "Security layer tests failed"
             exit 1
           fi
           echo "All CI checks passed!"

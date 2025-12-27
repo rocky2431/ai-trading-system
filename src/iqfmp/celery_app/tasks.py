@@ -1675,3 +1675,257 @@ def run_langgraph_pipeline(
         if isinstance(e, (ConnectionError, TimeoutError)):
             raise RetryableError(str(e)) from e
         raise TaskError(f"Pipeline failed: {e}") from e
+
+
+# =============================================================================
+# P3.4 FIX: Qlib RL Native Training Celery Task
+# =============================================================================
+
+@celery_app.task(
+    bind=True,
+    name="iqfmp.celery_app.tasks.run_qlib_rl_training",
+    max_retries=2,
+    default_retry_delay=120,
+    autoretry_for=(RetryableError,),
+    retry_backoff=True,
+    retry_backoff_max=600,
+    acks_late=True,
+    track_started=True,
+    time_limit=7200,  # 2 hour max for RL training
+    soft_time_limit=6600,  # 1h50m soft limit
+    priority=3,  # Lower priority than pipeline execution
+)
+def run_qlib_rl_training(
+    self,
+    task_id: str,
+    train_data_path: str,
+    test_data_path: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run Qlib native RL training for order execution optimization.
+
+    P3.4 FIX: Celery task that executes Qlib RL training using the native
+    train_and_test function, integrating RL capabilities into the pipeline.
+
+    Args:
+        task_id: Unique task identifier
+        train_data_path: Path to training data (parquet/csv)
+        test_data_path: Path to test data (parquet/csv)
+        config: RL training configuration including:
+            - total_timesteps: Training timesteps (default 10000)
+            - learning_rate: PPO learning rate (default 3e-4)
+            - order_amount: Order amount for execution (default 1.0)
+            - time_per_step: Seconds per simulation step (default 60)
+            - save_model: Whether to save trained model (default True)
+            - model_path: Path to save model (optional)
+
+    Returns:
+        Training result with:
+            - status: "success" or "failed"
+            - method: "qlib_native" or "stable_baselines3_fallback"
+            - metrics: Training and backtest metrics
+            - model_path: Path to saved model (if save_model=True)
+    """
+    import pandas as pd
+
+    logger.info(f"Qlib RL training task started: {task_id}")
+
+    try:
+        # Load training and test data
+        train_data = pd.read_parquet(train_data_path)
+        test_data = pd.read_parquet(test_data_path)
+
+        logger.info(
+            f"Loaded data: train={len(train_data)} rows, test={len(test_data)} rows"
+        )
+
+        # Import RL training functions
+        from iqfmp.rl.qlib_rl_adapter import run_qlib_native_training
+
+        # Run training
+        result = run_qlib_native_training(
+            train_data=train_data,
+            test_data=test_data,
+            config=config,
+        )
+
+        # Save model if requested
+        if config.get("save_model", True) and result.get("policy"):
+            model_path = config.get("model_path", f".ultra/models/rl_policy_{task_id}.zip")
+            try:
+                result["policy"].save(model_path)
+                result["model_path"] = model_path
+                logger.info(f"Model saved to: {model_path}")
+            except Exception as save_error:
+                logger.warning(f"Failed to save model: {save_error}")
+
+        # Remove non-serializable policy from result
+        if "policy" in result:
+            del result["policy"]
+
+        result["task_id"] = task_id
+        logger.info(f"Qlib RL training completed: {task_id}")
+        return result
+
+    except FileNotFoundError as e:
+        logger.error(f"Data file not found: {e}")
+        raise TaskError(f"Data file not found: {e}") from e
+    except Exception as e:
+        logger.error(f"Qlib RL training failed: {task_id} - {e}")
+        if isinstance(e, (ConnectionError, TimeoutError)):
+            raise RetryableError(str(e)) from e
+        raise TaskError(f"RL training failed: {e}") from e
+
+
+@celery_app.task(
+    bind=True,
+    name="iqfmp.celery_app.tasks.run_qlib_rl_backtest",
+    max_retries=2,
+    default_retry_delay=60,
+    acks_late=True,
+    track_started=True,
+    time_limit=1800,  # 30 min max
+    priority=4,
+)
+def run_qlib_rl_backtest(
+    self,
+    task_id: str,
+    model_path: str,
+    data_path: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """Run Qlib RL backtest on trained policy.
+
+    P3.4 FIX: Celery task that evaluates a trained RL policy using
+    Qlib's native backtest infrastructure.
+
+    Args:
+        task_id: Unique task identifier
+        model_path: Path to trained policy model
+        data_path: Path to backtest data (parquet/csv)
+        config: Backtest configuration
+
+    Returns:
+        Backtest result with:
+            - status: "success" or "failed"
+            - metrics: SAOE metrics (slippage, execution cost, etc.)
+            - reward_stats: Reward statistics
+    """
+    import pandas as pd
+
+    logger.info(f"Qlib RL backtest task started: {task_id}")
+
+    try:
+        # Load backtest data
+        data = pd.read_parquet(data_path)
+
+        # Load trained policy
+        from stable_baselines3 import PPO
+        policy = PPO.load(model_path)
+
+        # Import backtest function
+        from iqfmp.rl.qlib_rl_adapter import run_qlib_backtest
+
+        # Run backtest
+        result = run_qlib_backtest(
+            policy=policy,
+            data=data,
+            config=config,
+        )
+
+        result["task_id"] = task_id
+        logger.info(f"Qlib RL backtest completed: {task_id}")
+        return result
+
+    except FileNotFoundError as e:
+        logger.error(f"File not found: {e}")
+        raise TaskError(f"File not found: {e}") from e
+    except Exception as e:
+        logger.error(f"Qlib RL backtest failed: {task_id} - {e}")
+        raise TaskError(f"RL backtest failed: {e}") from e
+
+
+# =============================================================================
+# P3.5 FIX: Alpha158/360 Benchmark Celery Task
+# =============================================================================
+
+@celery_app.task(
+    bind=True,
+    name="iqfmp.celery_app.tasks.run_alpha_benchmark",
+    max_retries=2,
+    default_retry_delay=60,
+    acks_late=True,
+    track_started=True,
+    time_limit=3600,  # 1 hour max
+    priority=4,
+)
+def run_alpha_benchmark(
+    self,
+    task_id: str,
+    data_path: str,
+    benchmark_type: str = "alpha158",
+    record_to_ledger: bool = True,
+) -> dict[str, Any]:
+    """Run Alpha158 or Alpha360 benchmark and record to ResearchLedger.
+
+    P3.5 FIX: Celery task that runs the complete Alpha benchmark workflow,
+    evaluating all factors and recording results to PostgresStorage.
+
+    Args:
+        task_id: Unique task identifier
+        data_path: Path to OHLCV data (parquet/csv)
+        benchmark_type: "alpha158" (default) or "alpha360"
+        record_to_ledger: Whether to record trials to ResearchLedger
+
+    Returns:
+        Benchmark result with:
+            - total_factors: Total evaluated
+            - passed_factors: Factors passing IC threshold
+            - top_factors: Top 10 by IC
+            - summary_stats: Aggregate statistics
+            - recorded_trials: Number of trials recorded
+    """
+    import pandas as pd
+
+    logger.info(f"Alpha benchmark task started: {task_id} ({benchmark_type})")
+
+    try:
+        # Load data
+        if data_path.endswith(".parquet"):
+            df = pd.read_parquet(data_path)
+        else:
+            df = pd.read_csv(data_path, parse_dates=["timestamp"])
+
+        logger.info(f"Loaded data: {len(df)} rows")
+
+        # Calculate forward returns (1-day)
+        close_col = df.get("close", df.get("$close"))
+        if close_col is None:
+            raise ValueError("Data must have 'close' or '$close' column")
+
+        forward_returns = close_col.shift(-1) / close_col - 1
+
+        # Run benchmark workflow
+        from iqfmp.evaluation.alpha_benchmark import run_alpha_benchmark_workflow
+
+        result = run_alpha_benchmark_workflow(
+            df=df,
+            forward_returns=forward_returns,
+            benchmark_type=benchmark_type,
+            record_to_ledger=record_to_ledger,
+            factor_family=f"{benchmark_type}_benchmark",
+        )
+
+        result["task_id"] = task_id
+        logger.info(
+            f"Alpha benchmark completed: {task_id} - "
+            f"{result['total_factors']} factors, {result['passed_factors']} passed"
+        )
+        return result
+
+    except FileNotFoundError as e:
+        logger.error(f"Data file not found: {e}")
+        raise TaskError(f"Data file not found: {e}") from e
+    except Exception as e:
+        logger.error(f"Alpha benchmark failed: {task_id} - {e}")
+        raise TaskError(f"Benchmark failed: {e}") from e

@@ -785,3 +785,153 @@ def get_combined_expressions() -> dict[str, str]:
     combined = dict(ALPHA158_EXPRESSIONS)
     combined.update(ALPHA360_EXPRESSIONS)  # Alpha360 overwrites overlapping names
     return combined
+
+
+# =============================================================================
+# P3.5 FIX: Alpha Benchmark Runner with Research Trial Recording
+# =============================================================================
+
+def run_alpha_benchmark_workflow(
+    df: pd.DataFrame,
+    forward_returns: pd.Series,
+    benchmark_type: str = "alpha158",
+    record_to_ledger: bool = True,
+    factor_family: str = "alpha_benchmark",
+) -> dict[str, Any]:
+    """Run Alpha158/360 benchmark workflow and record results to ResearchLedger.
+
+    P3.5 FIX: Complete benchmark workflow that:
+    1. Computes all Alpha158 or Alpha360 factors
+    2. Evaluates each factor against forward returns
+    3. Records trials to ResearchLedger (PostgresStorage)
+    4. Returns comprehensive benchmark statistics
+
+    Args:
+        df: OHLCV DataFrame with columns [open, high, low, close, volume]
+        forward_returns: Forward returns for IC calculation
+        benchmark_type: "alpha158" or "alpha360"
+        record_to_ledger: Whether to record trials to ResearchLedger
+        factor_family: Factor family name for trial records
+
+    Returns:
+        Dictionary with:
+            - total_factors: Total number of factors evaluated
+            - passed_factors: Factors that pass IC threshold
+            - top_factors: Top 10 factors by IC
+            - summary_stats: Aggregate statistics
+            - trial_ids: List of recorded trial IDs (if record_to_ledger=True)
+    """
+    from iqfmp.evaluation.research_ledger import ResearchLedger, TrialRecord
+
+    logger.info(f"Starting {benchmark_type} benchmark workflow")
+
+    # Create benchmarker
+    benchmarker = create_alpha_benchmarker(benchmark_type=benchmark_type)
+
+    # Compute and evaluate all benchmark factors
+    benchmarker.compute_benchmark_factors(df)
+    metrics = benchmarker.evaluate_benchmark_factors(df, forward_returns)
+
+    logger.info(f"Evaluated {len(metrics)} factors")
+
+    # Initialize ledger for recording (if enabled)
+    ledger: Optional[ResearchLedger] = None
+    trial_ids: list[str] = []
+
+    if record_to_ledger:
+        ledger = ResearchLedger()  # Uses PostgresStorage by default
+        logger.info("Recording benchmark trials to ResearchLedger")
+
+    # Process each factor
+    passed_count = 0
+    ic_threshold = 0.03  # 3% IC threshold for "passing"
+
+    for factor_name, factor_metrics in metrics.items():
+        ic = factor_metrics.get("ic", 0.0)
+        ir = factor_metrics.get("ir", 0.0)
+        sharpe = factor_metrics.get("sharpe", 0.0)
+
+        passes = abs(ic) >= ic_threshold
+        if passes:
+            passed_count += 1
+
+        # Record trial to ledger
+        if ledger is not None:
+            try:
+                trial = TrialRecord(
+                    factor_name=factor_name,
+                    factor_family=factor_family,
+                    sharpe_ratio=sharpe,
+                    ic_mean=ic,
+                    ir=ir,
+                    metadata={
+                        "benchmark_type": benchmark_type,
+                        "passed_threshold": passes,
+                        "ic_threshold": ic_threshold,
+                    },
+                )
+                trial_id = ledger.record(trial)
+                trial_ids.append(trial_id)
+            except Exception as e:
+                logger.warning(f"Failed to record trial for {factor_name}: {e}")
+
+    # Get top factors
+    top_factors = benchmarker.get_top_factors(n=10, sort_by="ic")
+
+    # Calculate summary statistics
+    all_ics = [abs(m.get("ic", 0)) for m in metrics.values()]
+    all_irs = [m.get("ir", 0) for m in metrics.values()]
+    all_sharpes = [m.get("sharpe", 0) for m in metrics.values()]
+
+    summary_stats = {
+        "mean_ic": float(np.mean(all_ics)) if all_ics else 0.0,
+        "median_ic": float(np.median(all_ics)) if all_ics else 0.0,
+        "max_ic": float(max(all_ics)) if all_ics else 0.0,
+        "mean_ir": float(np.mean(all_irs)) if all_irs else 0.0,
+        "mean_sharpe": float(np.mean(all_sharpes)) if all_sharpes else 0.0,
+        "pass_rate": passed_count / len(metrics) if metrics else 0.0,
+    }
+
+    result = {
+        "benchmark_type": benchmark_type,
+        "total_factors": len(metrics),
+        "passed_factors": passed_count,
+        "top_factors": [
+            {"name": name, **m} for name, m in top_factors
+        ],
+        "summary_stats": summary_stats,
+        "trial_ids": trial_ids,
+        "recorded_trials": len(trial_ids),
+    }
+
+    logger.info(
+        f"Benchmark complete: {len(metrics)} factors, "
+        f"{passed_count} passed ({summary_stats['pass_rate']:.1%}), "
+        f"mean IC={summary_stats['mean_ic']:.4f}"
+    )
+
+    return result
+
+
+async def run_alpha_benchmark_async(
+    df: pd.DataFrame,
+    forward_returns: pd.Series,
+    benchmark_type: str = "alpha158",
+) -> dict[str, Any]:
+    """Async wrapper for alpha benchmark workflow.
+
+    Args:
+        df: OHLCV DataFrame
+        forward_returns: Forward returns for IC calculation
+        benchmark_type: "alpha158" or "alpha360"
+
+    Returns:
+        Benchmark result dictionary
+    """
+    import asyncio
+    return await asyncio.to_thread(
+        run_alpha_benchmark_workflow,
+        df,
+        forward_returns,
+        benchmark_type,
+    )

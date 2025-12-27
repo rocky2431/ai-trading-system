@@ -224,7 +224,9 @@ class FactorEvaluationAgent:
             llm_provider: LLM provider for AI-powered analysis
         """
         self.config = config or EvaluationAgentConfig()
-        self.ledger = ledger or ResearchLedger(storage=MemoryStorage())
+        # P3.1 FIX: Use default PostgresStorage (production persistence)
+        # No longer explicitly pass MemoryStorage - let ResearchLedger use _get_default_storage()
+        self.ledger = ledger or ResearchLedger()
         self.llm_provider = llm_provider
         # Qlib expression engine for factor_value computation (expression-only by default).
         from iqfmp.core.qlib_crypto import QlibExpressionEngine

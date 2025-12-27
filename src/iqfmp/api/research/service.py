@@ -11,52 +11,51 @@ from typing import Any, Optional
 from iqfmp.evaluation.research_ledger import (
     DynamicThreshold,
     LedgerStatistics,
-    MemoryStorage,
     PostgresStorage,
     ResearchLedger,
     ThresholdConfig,
     TrialRecord,
+    # P4 FIX: Removed MemoryStorage - no fallbacks allowed
 )
 
 
 class ResearchService:
     """Service for research ledger management with PostgreSQL persistence."""
 
-    def __init__(self, use_postgres: bool = True) -> None:
+    def __init__(
+        self,
+        ledger: Optional[ResearchLedger] = None,
+    ) -> None:
         """Initialize research service.
 
-        P4 ARCHITECTURE FIX: Default to PostgreSQL (production-grade).
-        Respects RESEARCH_LEDGER_STRICT env var for strict mode enforcement.
+        P4 ARCHITECTURE FIX: Production-grade only, no MemoryStorage fallback.
+        "一切以生产级别为主 没有所有的测试环境生产环境的差别 一切以最严苛的环境为基准"
 
         Args:
-            use_postgres: Whether to use PostgreSQL storage (default True).
-                         In strict mode, raises error if DB is unavailable.
-        """
-        self._use_postgres = use_postgres
-        self._postgres_storage: Optional[PostgresStorage] = None
-        strict_mode = os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true"
+            ledger: Optional ResearchLedger for dependency injection.
+                   If None, creates PostgresStorage-backed ledger (production mode).
+                   For tests, inject ResearchLedger(storage=MemoryStorage()).
 
-        # P4 FIX: Production-grade persistence - PostgreSQL required
-        if use_postgres:
+        Raises:
+            RuntimeError: If PostgreSQL initialization fails (when ledger is None).
+        """
+        self._postgres_storage: Optional[PostgresStorage] = None
+
+        # P4 ARCHITECTURE FIX: No MemoryStorage fallback - production-grade only
+        # Support dependency injection for tests
+        if ledger is not None:
+            self._ledger = ledger
+        else:
+            # Production mode: PostgreSQL required
             try:
                 self._postgres_storage = PostgresStorage()
                 self._ledger = ResearchLedger(storage=self._postgres_storage)
             except Exception as e:
-                if strict_mode:
-                    raise RuntimeError(
-                        f"P4 STRICT MODE: PostgresStorage required but initialization failed: {e}. "
-                        "Set RESEARCH_LEDGER_STRICT=false to allow MemoryStorage fallback."
-                    )
-                print(f"Warning: PostgreSQL unavailable, using memory storage: {e}")
-                self._ledger = ResearchLedger(storage=MemoryStorage())
-        else:
-            # Non-postgres mode still respects strict mode
-            if strict_mode:
                 raise RuntimeError(
-                    "P4 STRICT MODE: use_postgres=False not allowed in strict mode. "
-                    "PostgreSQL is required for production-grade persistence."
+                    f"P4 PRODUCTION MODE: PostgresStorage initialization failed: {e}. "
+                    "All environments require PostgreSQL/TimescaleDB for full traceability. "
+                    "For tests, inject ResearchLedger via constructor."
                 )
-            self._ledger = ResearchLedger(storage=MemoryStorage())
 
         self._threshold_config = ThresholdConfig()
 
@@ -258,13 +257,18 @@ class ResearchService:
         }
 
 
-# Singleton instance
-_research_service = ResearchService(
-    use_postgres=os.environ.get("IQFMP_RESEARCH_USE_POSTGRES", "").lower()
-    in {"1", "true", "yes"}
-)
+# Singleton instance - P4 Architecture: PostgreSQL required
+# Lazy initialization to avoid startup errors when DATABASE_URL not configured
+_research_service: Optional[ResearchService] = None
 
 
 def get_research_service() -> ResearchService:
-    """Get research service instance."""
+    """Get research service instance (lazy initialization).
+
+    P4 Architecture: Creates PostgresStorage-backed service on first call.
+    Raises RuntimeError if DATABASE_URL not configured.
+    """
+    global _research_service
+    if _research_service is None:
+        _research_service = ResearchService()
     return _research_service

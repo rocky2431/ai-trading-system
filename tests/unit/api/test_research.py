@@ -188,10 +188,16 @@ class TestResearchService:
 
     @pytest.fixture
     def research_service(self):
-        """Create research service."""
-        from iqfmp.api.research.service import ResearchService
+        """Create research service with injected MemoryStorage ledger for tests.
 
-        return ResearchService()
+        P4 Architecture: Production code requires PostgresStorage via DATABASE_URL.
+        Tests use dependency injection with MemoryStorage (real implementation, not mock).
+        """
+        from iqfmp.api.research.service import ResearchService
+        from iqfmp.evaluation.research_ledger import ResearchLedger, MemoryStorage
+
+        test_ledger = ResearchLedger(storage=MemoryStorage())
+        return ResearchService(ledger=test_ledger)
 
     def test_list_trials_empty(self, research_service):
         """Test listing trials when empty."""

@@ -7,7 +7,6 @@
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import type { ApprovalRecord } from '@/types/research'
 import {
   CheckCircle,
@@ -101,7 +100,7 @@ export function ApprovalHistoryCard({ records, limit = 10 }: ApprovalHistoryCard
         </div>
 
         {/* Records List */}
-        <ScrollArea className="h-[280px]">
+        <div className="h-[280px] overflow-y-auto">
           <div className="space-y-2">
             {displayRecords.length === 0 ? (
               <div className="text-center py-8 text-muted-foreground">
@@ -174,7 +173,7 @@ export function ApprovalHistoryCard({ records, limit = 10 }: ApprovalHistoryCard
               })
             )}
           </div>
-        </ScrollArea>
+        </div>
 
         {records.length > limit && (
           <div className="mt-4 text-center">

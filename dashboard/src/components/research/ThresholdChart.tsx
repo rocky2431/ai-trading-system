@@ -11,10 +11,9 @@ import { Button } from '@/components/ui/button'
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
+  DialogBody,
 } from '@/components/ui/dialog'
 import type { ThresholdHistory, ThresholdDetails, ResearchStats } from '@/types/research'
 import { TrendingUp, Target, Info, Calculator, BookOpen, Settings2 } from 'lucide-react'
@@ -45,25 +44,24 @@ export function ThresholdChart({ history, stats, details }: ThresholdChartProps)
             </CardDescription>
           </div>
           {details && (
-            <Dialog open={showDetails} onOpenChange={setShowDetails}>
-              <DialogTrigger asChild>
-                <Button variant="outline" size="sm">
-                  <Info className="h-4 w-4 mr-1" />
-                  Details
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="max-w-2xl">
-                <DialogHeader>
-                  <DialogTitle className="flex items-center gap-2">
-                    <Calculator className="h-5 w-5" />
-                    Threshold Calculation Details
-                  </DialogTitle>
-                  <DialogDescription>
+            <>
+              <Button variant="outline" size="sm" onClick={() => setShowDetails(true)}>
+                <Info className="h-4 w-4 mr-1" />
+                Details
+              </Button>
+              <Dialog open={showDetails} onOpenChange={setShowDetails}>
+                <DialogContent className="max-w-2xl">
+                  <DialogHeader onClose={() => setShowDetails(false)}>
+                    <DialogTitle className="flex items-center gap-2">
+                      <Calculator className="h-5 w-5" />
+                      Threshold Calculation Details
+                    </DialogTitle>
+                  </DialogHeader>
+                  <div className="px-6 py-2 text-sm text-muted-foreground">
                     {details.formula.name} methodology
-                  </DialogDescription>
-                </DialogHeader>
+                  </div>
 
-                <div className="space-y-6">
+                  <DialogBody className="space-y-6">
                   {/* Formula Section */}
                   <div className="rounded-lg border p-4">
                     <h4 className="font-medium flex items-center gap-2 mb-3">
@@ -139,9 +137,10 @@ export function ThresholdChart({ history, stats, details }: ThresholdChartProps)
                       <div className="text-3xl font-bold">{details.nTrials}</div>
                     </div>
                   </div>
-                </div>
+                </DialogBody>
               </DialogContent>
             </Dialog>
+            </>
           )}
         </div>
       </CardHeader>

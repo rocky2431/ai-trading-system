@@ -19,7 +19,7 @@ import pandas as pd
 from iqfmp.evaluation.research_ledger import (
     ResearchLedger,
     TrialRecord,
-    MemoryStorage,
+    # P4.1 FIX: Removed MemoryStorage import - use default PostgresStorage
 )
 from iqfmp.evaluation.stability_analyzer import (
     StabilityAnalyzer,
@@ -595,8 +595,13 @@ class FactorEvaluator:
         ledger: Optional[ResearchLedger] = None,
         config: Optional[EvaluationConfig] = None,
     ) -> None:
-        """Initialize evaluator with Qlib backend."""
-        self.ledger = ledger or ResearchLedger(storage=MemoryStorage())
+        """Initialize evaluator with Qlib backend.
+
+        P4.1 FIX: Default to PostgresStorage via ResearchLedger._get_default_storage()
+        instead of hardcoded MemoryStorage. Respects RESEARCH_LEDGER_STRICT env var.
+        """
+        # P4.1 FIX: Use default ResearchLedger (PostgresStorage) for production persistence
+        self.ledger = ledger or ResearchLedger()
         self.config = config or EvaluationConfig()
 
         # Initialize Qlib-native calculator

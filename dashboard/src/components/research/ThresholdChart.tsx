@@ -1,18 +1,32 @@
 /**
  * 动态阈值图表组件
  * 展示随试验次数增加的动态阈值变化
+ *
+ * P2 增强：添加 DSR 公式详情和配置参数
  */
 
+import { useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import type { ThresholdHistory, ResearchStats } from '@/types/research'
-import { TrendingUp, Target } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog'
+import type { ThresholdHistory, ThresholdDetails, ResearchStats } from '@/types/research'
+import { TrendingUp, Target, Info, Calculator, BookOpen, Settings2 } from 'lucide-react'
 
 interface ThresholdChartProps {
   history: ThresholdHistory[]
   stats: ResearchStats
+  details?: ThresholdDetails
 }
 
-export function ThresholdChart({ history, stats }: ThresholdChartProps) {
+export function ThresholdChart({ history, stats, details }: ThresholdChartProps) {
+  const [showDetails, setShowDetails] = useState(false)
   const maxThreshold = Math.max(...history.map(h => h.threshold))
   const minThreshold = Math.min(...history.map(h => h.threshold))
   const range = maxThreshold - minThreshold || 1
@@ -20,13 +34,116 @@ export function ThresholdChart({ history, stats }: ThresholdChartProps) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Target className="h-5 w-5" />
-          Dynamic Threshold
-        </CardTitle>
-        <CardDescription>
-          Threshold increases with trial count to prevent overfitting
-        </CardDescription>
+        <div className="flex items-center justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2">
+              <Target className="h-5 w-5" />
+              Dynamic Threshold
+            </CardTitle>
+            <CardDescription>
+              Threshold increases with trial count to prevent overfitting
+            </CardDescription>
+          </div>
+          {details && (
+            <Dialog open={showDetails} onOpenChange={setShowDetails}>
+              <DialogTrigger asChild>
+                <Button variant="outline" size="sm">
+                  <Info className="h-4 w-4 mr-1" />
+                  Details
+                </Button>
+              </DialogTrigger>
+              <DialogContent className="max-w-2xl">
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Calculator className="h-5 w-5" />
+                    Threshold Calculation Details
+                  </DialogTitle>
+                  <DialogDescription>
+                    {details.formula.name} methodology
+                  </DialogDescription>
+                </DialogHeader>
+
+                <div className="space-y-6">
+                  {/* Formula Section */}
+                  <div className="rounded-lg border p-4">
+                    <h4 className="font-medium flex items-center gap-2 mb-3">
+                      <BookOpen className="h-4 w-4" />
+                      Mathematical Formula
+                    </h4>
+                    <div className="bg-muted p-3 rounded font-mono text-sm mb-3">
+                      {details.formula.equation}
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {details.formula.description}
+                    </p>
+                    <div className="mt-3 text-xs text-muted-foreground italic">
+                      Reference: {details.formula.reference}
+                    </div>
+                  </div>
+
+                  {/* Components Breakdown */}
+                  <div className="rounded-lg border p-4">
+                    <h4 className="font-medium mb-3">Component Breakdown</h4>
+                    <div className="space-y-2 text-sm">
+                      <div className="flex justify-between items-center p-2 bg-muted/50 rounded">
+                        <span className="text-muted-foreground">Expected Maximum:</span>
+                        <code className="text-xs">{details.formula.components.expectedMax}</code>
+                      </div>
+                      <div className="flex justify-between items-center p-2 bg-muted/50 rounded">
+                        <span className="text-muted-foreground">Confidence Multiplier:</span>
+                        <code className="text-xs">{details.formula.components.confidenceMultiplier}</code>
+                      </div>
+                      <div className="flex justify-between items-center p-2 bg-muted/50 rounded">
+                        <span className="text-muted-foreground">Adjustment Factor:</span>
+                        <code className="text-xs">{details.formula.components.adjustment}</code>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Configuration */}
+                  <div className="rounded-lg border p-4">
+                    <h4 className="font-medium flex items-center gap-2 mb-3">
+                      <Settings2 className="h-4 w-4" />
+                      Current Configuration
+                    </h4>
+                    <div className="grid grid-cols-3 gap-4">
+                      <div className="text-center p-3 bg-blue-500/10 rounded-lg">
+                        <div className="text-2xl font-bold text-blue-600">
+                          {details.config.baseSharpeThreshold}
+                        </div>
+                        <div className="text-xs text-muted-foreground">Base Threshold</div>
+                      </div>
+                      <div className="text-center p-3 bg-green-500/10 rounded-lg">
+                        <div className="text-2xl font-bold text-green-600">
+                          {(details.config.confidenceLevel * 100).toFixed(0)}%
+                        </div>
+                        <div className="text-xs text-muted-foreground">Confidence Level</div>
+                      </div>
+                      <div className="text-center p-3 bg-purple-500/10 rounded-lg">
+                        <div className="text-2xl font-bold text-purple-600">
+                          {details.config.minTrialsForAdjustment}
+                        </div>
+                        <div className="text-xs text-muted-foreground">Min Trials</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Current State */}
+                  <div className="flex items-center justify-between p-4 bg-muted rounded-lg">
+                    <div>
+                      <div className="text-sm text-muted-foreground">Current Threshold</div>
+                      <div className="text-3xl font-bold">{details.currentThreshold.toFixed(3)}</div>
+                    </div>
+                    <div className="text-right">
+                      <div className="text-sm text-muted-foreground">Total Trials</div>
+                      <div className="text-3xl font-bold">{details.nTrials}</div>
+                    </div>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          )}
+        </div>
       </CardHeader>
       <CardContent>
         {/* Current Threshold */}
@@ -138,11 +255,16 @@ export function ThresholdChart({ history, stats }: ThresholdChartProps) {
         <div className="mt-4 p-3 rounded-lg bg-gray-100 dark:bg-gray-800 text-sm">
           <div className="flex items-center gap-2 text-gray-500 dark:text-gray-400 mb-1">
             <TrendingUp className="h-4 w-4" />
-            Deflated Sharpe Ratio Formula
+            {details?.formula.name || 'Deflated Sharpe Ratio Formula'}
           </div>
           <code className="text-xs">
-            threshold = 1.0 + 0.015 × N (trials)
+            {details?.formula.equation || 'T = T₀ × (1 + E[max(Z₁,...,Zₙ)] × α × 0.15)'}
           </code>
+          {details && (
+            <div className="mt-2 text-xs text-muted-foreground">
+              {details.formula.reference}
+            </div>
+          )}
         </div>
       </CardContent>
     </Card>

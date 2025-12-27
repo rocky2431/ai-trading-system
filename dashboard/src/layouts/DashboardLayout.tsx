@@ -18,6 +18,9 @@ import {
   Wrench,
   FlaskConical,
   Gauge,
+  ClipboardCheck,
+  Brain,
+  FileCode,
 } from 'lucide-react'
 
 const navigation = [
@@ -30,6 +33,9 @@ const navigation = [
   { name: 'Strategies', href: '/strategies', icon: Wrench },
   { name: 'Backtest', href: '/backtest', icon: FlaskConical },
   { name: 'Research', href: '/research', icon: Beaker },
+  { name: 'Review', href: '/review', icon: ClipboardCheck },
+  { name: 'RL Training', href: '/rl-training', icon: Brain },
+  { name: 'Prompts', href: '/prompts', icon: FileCode },
   // DISABLED: Live trading uses mock data, backend API not implemented
   // { name: 'Trading', href: '/trading', icon: Zap },
   { name: 'Pipeline', href: '/pipeline', icon: Activity },

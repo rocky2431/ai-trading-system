@@ -8,6 +8,9 @@ import { FactorMiningPage } from '@/pages/FactorMiningPage'
 import { StrategyWorkshopPage } from '@/pages/StrategyWorkshopPage'
 import { BacktestCenterPage } from '@/pages/BacktestCenterPage'
 import { ResearchLedgerPage } from '@/pages/ResearchLedgerPage'
+import { ReviewQueuePage } from '@/pages/ReviewQueuePage'
+import { RLTrainingPage } from '@/pages/RLTrainingPage'
+import { PromptsPage } from '@/pages/PromptsPage'
 // DISABLED: Live trading uses mock data, backend API not implemented
 // import { LiveTradingPage } from '@/pages/LiveTradingPage'
 import { PipelinePage } from '@/pages/PipelinePage'
@@ -27,6 +30,9 @@ function App() {
           <Route path="strategies" element={<StrategyWorkshopPage />} />
           <Route path="backtest" element={<BacktestCenterPage />} />
           <Route path="research" element={<ResearchLedgerPage />} />
+          <Route path="review" element={<ReviewQueuePage />} />
+          <Route path="rl-training" element={<RLTrainingPage />} />
+          <Route path="prompts" element={<PromptsPage />} />
           {/* DISABLED: Live trading route - uses mock data, backend not implemented */}
           {/* <Route path="trading" element={<LiveTradingPage />} /> */}
           <Route path="pipeline" element={<PipelinePage />} />

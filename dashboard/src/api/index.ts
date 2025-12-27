@@ -117,3 +117,18 @@ export type {
   BacktestTrade,
   GenericResponse,
 } from './backtest'
+
+// ============== Review API ==============
+export { reviewApi } from './review'
+export type {
+  ReviewStatus,
+  ReviewRequest,
+  ReviewDecision,
+  ReviewQueueStats,
+  ReviewConfig,
+  PaginatedReviewResponse,
+  PaginatedDecisionResponse,
+  ReviewRequestCreate,
+  ReviewDecisionRequest,
+  ReviewConfigUpdate,
+} from './review'

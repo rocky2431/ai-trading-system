@@ -1,12 +1,16 @@
 /**
  * Research Ledger 页面
  * 展示研究试验历史、动态阈值和过拟合风险
+ *
+ * P2 增强：添加阈值详情和审批记录
  */
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { TrialHistoryTable } from '@/components/research/TrialHistoryTable'
 import { ThresholdChart } from '@/components/research/ThresholdChart'
 import { OverfittingRiskCard } from '@/components/research/OverfittingRiskCard'
+import { ApprovalHistoryCard } from '@/components/research/ApprovalHistoryCard'
 import { useResearchLedger } from '@/hooks/useResearchLedger'
 import {
   Beaker,
@@ -16,6 +20,8 @@ import {
   TrendingUp,
   Percent,
   Loader2,
+  Shield,
+  History,
 } from 'lucide-react'
 
 export function ResearchLedgerPage() {
@@ -47,7 +53,7 @@ export function ResearchLedgerPage() {
     )
   }
 
-  const { trials, stats, thresholdHistory, overfittingRisk } = data
+  const { trials, stats, thresholdHistory, thresholdDetails, overfittingRisk, approvalRecords } = data
 
   return (
     <div className="space-y-6">
@@ -134,8 +140,8 @@ export function ResearchLedgerPage() {
 
       {/* Main Content Grid */}
       <div className="grid gap-6 lg:grid-cols-2">
-        {/* Threshold Chart */}
-        <ThresholdChart history={thresholdHistory} stats={stats} />
+        {/* Threshold Chart with Details */}
+        <ThresholdChart history={thresholdHistory} stats={stats} details={thresholdDetails} />
 
         {/* Overfitting Risk */}
         <OverfittingRiskCard risk={overfittingRisk} />
@@ -238,8 +244,32 @@ export function ResearchLedgerPage() {
         </div>
       )}
 
-      {/* Trial History */}
-      <TrialHistoryTable trials={trials} limit={15} />
+      {/* Trial History with Tabs */}
+      <Tabs defaultValue="trials" className="space-y-4">
+        <TabsList>
+          <TabsTrigger value="trials" className="flex items-center gap-2">
+            <History className="h-4 w-4" />
+            Trial History
+          </TabsTrigger>
+          <TabsTrigger value="approvals" className="flex items-center gap-2">
+            <Shield className="h-4 w-4" />
+            Review History
+            {approvalRecords.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 text-xs bg-primary/10 rounded-full">
+                {approvalRecords.length}
+              </span>
+            )}
+          </TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="trials">
+          <TrialHistoryTable trials={trials} limit={15} />
+        </TabsContent>
+
+        <TabsContent value="approvals">
+          <ApprovalHistoryCard records={approvalRecords} limit={20} />
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

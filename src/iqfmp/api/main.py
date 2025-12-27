@@ -19,7 +19,10 @@ from iqfmp.api.config.router import router as config_router
 from iqfmp.api.data.router import router as data_router
 from iqfmp.api.factors.router import router as factors_router
 from iqfmp.api.pipeline.router import router as pipeline_router
+from iqfmp.api.prompts.router import router as prompts_router
 from iqfmp.api.research.router import metrics_router, router as research_router
+from iqfmp.api.review.router import router as review_router
+from iqfmp.api.rl.router import router as rl_router
 from iqfmp.api.strategies.router import router as strategies_router
 from iqfmp.api.system.router import router as system_router
 from iqfmp.db.database import init_db, close_db
@@ -167,7 +170,16 @@ def create_app() -> FastAPI:
         pipeline_router, prefix="/api/v1/pipeline", dependencies=auth_dependency
     )
     app.include_router(
+        prompts_router, prefix="/api/v1/prompts", dependencies=auth_dependency
+    )
+    app.include_router(
         research_router, prefix="/api/v1/research", dependencies=auth_dependency
+    )
+    app.include_router(
+        review_router, prefix="/api/v1/review", dependencies=auth_dependency
+    )
+    app.include_router(
+        rl_router, prefix="/api/v1/rl", dependencies=auth_dependency
     )
     app.include_router(
         metrics_router, prefix="/api/v1/metrics", dependencies=auth_dependency

@@ -67,10 +67,17 @@ dashboard/build/
 secrets/
 credentials.json
 
-# Ultra Builder Pro
-.ultra/context-archive/session-*.md
-.ultra/backups/
-.ultra/changes/archive/
+# Ultra Builder Pro (complete exclusion)
+.ultra/
+
+# Claude Code
+.claude/
+
+# Documentation (local only)
+docs/
+
+# Fork project
+fork-project/
 
 # Ruff
 .ruff_cache/

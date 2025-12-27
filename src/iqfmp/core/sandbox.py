@@ -27,11 +27,12 @@ from enum import Enum
 from typing import Any, Optional
 
 # RestrictedPython imports - P0 Security Enhancement
-from RestrictedPython import compile_restricted, safe_builtins, limited_builtins
+from RestrictedPython import compile_restricted_exec, safe_builtins, limited_builtins
 from RestrictedPython.Guards import (
     safe_globals,
     guarded_iter_unpack_sequence,
     guarded_unpack_sequence,
+    full_write_guard,
 )
 from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getitem
 
@@ -162,9 +163,154 @@ def _set_resource_limits(max_memory_mb: int, max_cpu_seconds: int) -> None:
         logger.warning(f"Failed to set resource limits: {e}")
 
 
+def _subprocess_worker(
+    code: str,
+    result_queue: multiprocessing.Queue,
+    max_memory_mb: int,
+    max_cpu_seconds: int,
+    allowed_module_names: list[str],
+) -> None:
+    """Worker function that runs in subprocess.
+
+    Note: This is a module-level function so it can be pickled by multiprocessing.
+    """
+    try:
+        # Set resource limits in subprocess
+        _set_resource_limits(max_memory_mb, max_cpu_seconds)
+
+        # Compile with RestrictedPython
+        compiled = compile_restricted_exec(code)
+
+        if compiled.errors:
+            result_queue.put((
+                ExecutionStatus.SECURITY_VIOLATION,
+                {},
+                f"RestrictedPython compilation errors: {compiled.errors}"
+            ))
+            return
+
+        if compiled.code is None:
+            result_queue.put((
+                ExecutionStatus.ERROR,
+                {},
+                "Failed to compile code"
+            ))
+            return
+
+        # Import allowed modules in subprocess
+        exec_globals = _import_modules_for_subprocess(allowed_module_names)
+
+        # Create restricted execution environment
+        restricted_globals = _create_restricted_globals(exec_globals)
+        exec_locals: dict[str, Any] = {}
+
+        # Execute
+        exec(compiled.code, restricted_globals, exec_locals)
+
+        # Extract serializable output
+        output = _extract_serializable_output(exec_locals)
+        result_queue.put((ExecutionStatus.SUCCESS, output, ""))
+
+    except MemoryError:
+        result_queue.put((
+            ExecutionStatus.RESOURCE_EXCEEDED,
+            {},
+            "Memory limit exceeded"
+        ))
+    except Exception as e:
+        result_queue.put((
+            ExecutionStatus.ERROR,
+            {},
+            f"{type(e).__name__}: {str(e)}"
+        ))
+
+
+def _import_modules_for_subprocess(module_names: list[str]) -> dict[str, Any]:
+    """Import allowed modules in subprocess context."""
+    exec_globals: dict[str, Any] = {}
+
+    for module_name in module_names:
+        try:
+            if module_name == "pandas":
+                import pandas as pd
+                exec_globals["pandas"] = pd
+                exec_globals["pd"] = pd
+            elif module_name == "numpy":
+                import numpy as np
+                exec_globals["numpy"] = np
+                exec_globals["np"] = np
+            elif module_name == "iqfmp.evaluation.qlib_stats":
+                try:
+                    from iqfmp.evaluation import qlib_stats
+                    exec_globals["qlib_stats"] = qlib_stats
+                except ImportError:
+                    pass  # May not be available in subprocess
+            elif module_name == "math":
+                import math
+                exec_globals["math"] = math
+            elif module_name == "statistics":
+                import statistics
+                exec_globals["statistics"] = statistics
+            elif module_name == "datetime":
+                import datetime
+                exec_globals["datetime"] = datetime
+            elif module_name == "time":
+                import time as time_module
+                exec_globals["time"] = time_module
+            elif module_name == "collections":
+                import collections
+                exec_globals["collections"] = collections
+            elif module_name == "itertools":
+                import itertools
+                exec_globals["itertools"] = itertools
+            elif module_name == "functools":
+                import functools
+                exec_globals["functools"] = functools
+            elif module_name == "operator":
+                import operator
+                exec_globals["operator"] = operator
+            elif module_name == "typing":
+                import typing
+                exec_globals["typing"] = typing
+            elif module_name == "dataclasses":
+                import dataclasses
+                exec_globals["dataclasses"] = dataclasses
+            elif module_name == "enum":
+                import enum
+                exec_globals["enum"] = enum
+            elif module_name == "abc":
+                import abc
+                exec_globals["abc"] = abc
+            elif module_name == "copy":
+                import copy
+                exec_globals["copy"] = copy
+            elif module_name == "re":
+                import re
+                exec_globals["re"] = re
+            elif module_name == "json":
+                import json
+                exec_globals["json"] = json
+            elif module_name == "hashlib":
+                import hashlib
+                exec_globals["hashlib"] = hashlib
+            elif module_name == "base64":
+                import base64
+                exec_globals["base64"] = base64
+            elif module_name == "decimal":
+                import decimal
+                exec_globals["decimal"] = decimal
+            elif module_name == "fractions":
+                import fractions
+                exec_globals["fractions"] = fractions
+        except ImportError:
+            pass
+
+    return exec_globals
+
+
 def _execute_in_subprocess(
     code: str,
-    exec_globals: dict[str, Any],
+    allowed_module_names: list[str],
     timeout_seconds: int,
     max_memory_mb: int,
     max_cpu_seconds: int,
@@ -174,59 +320,13 @@ def _execute_in_subprocess(
     Returns:
         Tuple of (status, output_dict, error_message)
     """
-    def _worker(
-        code: str,
-        result_queue: multiprocessing.Queue,
-        max_memory_mb: int,
-        max_cpu_seconds: int,
-    ) -> None:
-        """Worker function that runs in subprocess."""
-        try:
-            # Set resource limits in subprocess
-            _set_resource_limits(max_memory_mb, max_cpu_seconds)
-
-            # Compile with RestrictedPython
-            compiled = compile_restricted(code, "<sandbox>", "exec")
-
-            if compiled.errors:
-                result_queue.put((
-                    ExecutionStatus.SECURITY_VIOLATION,
-                    {},
-                    f"RestrictedPython compilation errors: {compiled.errors}"
-                ))
-                return
-
-            # Create restricted execution environment
-            restricted_globals = _create_restricted_globals(exec_globals)
-            exec_locals: dict[str, Any] = {}
-
-            # Execute
-            exec(compiled.code, restricted_globals, exec_locals)
-
-            # Extract serializable output
-            output = _extract_serializable_output(exec_locals)
-            result_queue.put((ExecutionStatus.SUCCESS, output, ""))
-
-        except MemoryError:
-            result_queue.put((
-                ExecutionStatus.RESOURCE_EXCEEDED,
-                {},
-                "Memory limit exceeded"
-            ))
-        except Exception as e:
-            result_queue.put((
-                ExecutionStatus.ERROR,
-                {},
-                f"{type(e).__name__}: {str(e)}"
-            ))
-
     # Create queue for result communication
     result_queue = multiprocessing.Queue()
 
-    # Start subprocess
+    # Start subprocess with module-level worker function
     process = multiprocessing.Process(
-        target=_worker,
-        args=(code, result_queue, max_memory_mb, max_cpu_seconds),
+        target=_subprocess_worker,
+        args=(code, result_queue, max_memory_mb, max_cpu_seconds, allowed_module_names),
     )
     process.start()
     process.join(timeout=timeout_seconds)
@@ -249,11 +349,110 @@ def _execute_in_subprocess(
         return (ExecutionStatus.ERROR, {}, f"Failed to get result: {e}")
 
 
+def _create_safe_import(allowed_modules: dict[str, Any]) -> Any:
+    """Create a safe import function that only allows whitelisted modules.
+
+    Args:
+        allowed_modules: Dict of pre-imported allowed modules.
+
+    Returns:
+        Safe import function.
+    """
+    def safe_import(name: str, globals_: dict = None, locals_: dict = None,
+                    fromlist: tuple = (), level: int = 0) -> Any:
+        """Safe import that only allows whitelisted modules."""
+        # Check if module is in allowed list
+        module_aliases = {
+            "pandas": ["pandas", "pd"],
+            "numpy": ["numpy", "np"],
+            "math": ["math"],
+            "statistics": ["statistics"],
+            "datetime": ["datetime"],
+            "time": ["time"],
+            "collections": ["collections"],
+            "itertools": ["itertools"],
+            "functools": ["functools"],
+            "operator": ["operator"],
+            "typing": ["typing"],
+            "dataclasses": ["dataclasses"],
+            "enum": ["enum"],
+            "abc": ["abc"],
+            "copy": ["copy"],
+            "re": ["re"],
+            "json": ["json"],
+            "hashlib": ["hashlib"],
+            "base64": ["base64"],
+            "decimal": ["decimal"],
+            "fractions": ["fractions"],
+        }
+
+        # Check if module is allowed
+        for canonical_name, aliases in module_aliases.items():
+            if name in aliases or name == canonical_name:
+                # Return from pre-imported modules
+                if name in allowed_modules:
+                    return allowed_modules[name]
+                if canonical_name in allowed_modules:
+                    return allowed_modules[canonical_name]
+
+        # Module not allowed
+        raise ImportError(f"Import of '{name}' is not allowed in sandbox")
+
+    return safe_import
+
+
+def _guarded_getiter(obj: Any) -> Any:
+    """Guarded iterator that RestrictedPython uses for for-loops and comprehensions."""
+    return iter(obj)
+
+
+def _guarded_write(obj: Any) -> Any:
+    """Guarded write that allows attribute assignment on safe objects."""
+    return obj
+
+
+def _apply(func: Any, *args: Any, **kwargs: Any) -> Any:
+    """Apply function with args/kwargs - used for decorators."""
+    return func(*args, **kwargs)
+
+
+def _inplacevar(op: str, x: Any, y: Any) -> Any:
+    """Handle in-place operators like +=, -=, etc."""
+    if op == "+=":
+        return x + y
+    elif op == "-=":
+        return x - y
+    elif op == "*=":
+        return x * y
+    elif op == "/=":
+        return x / y
+    elif op == "//=":
+        return x // y
+    elif op == "%=":
+        return x % y
+    elif op == "**=":
+        return x ** y
+    elif op == "&=":
+        return x & y
+    elif op == "|=":
+        return x | y
+    elif op == "^=":
+        return x ^ y
+    elif op == ">>=":
+        return x >> y
+    elif op == "<<=":
+        return x << y
+    else:
+        raise ValueError(f"Unknown operator: {op}")
+
+
 def _create_restricted_globals(allowed_modules_globals: dict[str, Any]) -> dict[str, Any]:
     """Create RestrictedPython-compatible global namespace.
 
     Combines safe_builtins from RestrictedPython with allowed modules.
     """
+    import builtins
+
     # Start with RestrictedPython's safe globals
     restricted_globals = dict(safe_globals)
 
@@ -265,15 +464,50 @@ def _create_restricted_globals(allowed_modules_globals: dict[str, Any]) -> dict[
     restricted_builtins["_getitem_"] = default_guarded_getitem
     restricted_builtins["_iter_unpack_sequence_"] = guarded_iter_unpack_sequence
     restricted_builtins["_unpack_sequence_"] = guarded_unpack_sequence
+    restricted_builtins["_getiter_"] = _guarded_getiter
+    restricted_builtins["_write_"] = _guarded_write
+    restricted_builtins["_inplacevar_"] = _inplacevar
+    restricted_builtins["_apply_"] = _apply
 
-    # Add safe exception types for error handling
-    import builtins
-    for exc_name in [
+    # Add safe import function
+    restricted_builtins["__import__"] = _create_safe_import(allowed_modules_globals)
+
+    # Add common safe builtins that are missing from safe_builtins
+    safe_builtin_names = [
+        # Types and constructors
+        "list", "dict", "set", "frozenset", "tuple",
+        "int", "float", "str", "bytes", "bool",
+        "type", "object",
+        # Functions
+        "len", "range", "enumerate", "zip", "map", "filter",
+        "min", "max", "sum", "abs", "round", "pow",
+        "sorted", "reversed", "any", "all",
+        "iter", "next",
+        "print", "repr", "id", "hash",
+        "callable", "isinstance", "issubclass",
+        "hasattr", "getattr", "setattr", "delattr",
+        "dir", "vars",
+        "chr", "ord", "hex", "oct", "bin",
+        "format", "ascii",
+        # Exceptions
         "Exception", "ValueError", "TypeError", "KeyError",
         "IndexError", "AttributeError", "ZeroDivisionError",
-        "RuntimeError", "StopIteration",
-    ]:
-        restricted_builtins[exc_name] = getattr(builtins, exc_name)
+        "RuntimeError", "StopIteration", "NameError",
+        "ImportError", "OverflowError", "MemoryError",
+    ]
+
+    for name in safe_builtin_names:
+        if hasattr(builtins, name):
+            restricted_builtins[name] = getattr(builtins, name)
+
+    # Add None, True, False
+    restricted_builtins["None"] = None
+    restricted_builtins["True"] = True
+    restricted_builtins["False"] = False
+
+    # Add metaclass for class definitions
+    restricted_builtins["__metaclass__"] = type
+    restricted_builtins["__build_class__"] = builtins.__build_class__
 
     restricted_globals["__builtins__"] = restricted_builtins
     restricted_globals["__name__"] = "__sandbox__"
@@ -415,7 +649,7 @@ class SandboxExecutor:
             # Execute in subprocess for maximum isolation
             status, output, error = _execute_in_subprocess(
                 code=code,
-                exec_globals=self._allowed_modules_globals,
+                allowed_module_names=self.config.allowed_modules,
                 timeout_seconds=self.config.timeout_seconds,
                 max_memory_mb=self.config.max_memory_mb,
                 max_cpu_seconds=self.config.max_cpu_seconds,
@@ -448,12 +682,19 @@ class SandboxExecutor:
             )
 
             # Compile with RestrictedPython (P0 Enhancement)
-            compiled = compile_restricted(code, "<sandbox>", "exec")
+            compiled = compile_restricted_exec(code)
 
             if compiled.errors:
                 return ExecutionResult(
                     status=ExecutionStatus.SECURITY_VIOLATION,
                     error_message=f"RestrictedPython errors: {compiled.errors}",
+                    execution_time=time.time() - start_time,
+                )
+
+            if compiled.code is None:
+                return ExecutionResult(
+                    status=ExecutionStatus.ERROR,
+                    error_message="Failed to compile code",
                     execution_time=time.time() - start_time,
                 )
 

@@ -838,6 +838,9 @@ SELECT create_hypertable('long_short_ratios', 'timestamp', if_not_exists => TRUE
 SELECT create_hypertable('mark_prices', 'timestamp', if_not_exists => TRUE);
 SELECT create_hypertable('taker_buy_sell', 'timestamp', if_not_exists => TRUE);
 
+-- P1.1 FIX: Research trials hypertable (added per architecture-gap-fixes.md)
+SELECT create_hypertable('research_trials', 'created_at', if_not_exists => TRUE);
+
 -- Add compression policy (compress chunks older than 7 days)
 SELECT add_compression_policy('trades', INTERVAL '7 days', if_not_exists => TRUE);
 SELECT add_compression_policy('ohlcv_data', INTERVAL '7 days', if_not_exists => TRUE);
@@ -862,4 +865,9 @@ SELECT add_retention_policy('liquidations', INTERVAL '1 year', if_not_exists => 
 SELECT add_retention_policy('long_short_ratios', INTERVAL '2 years', if_not_exists => TRUE);
 SELECT add_retention_policy('mark_prices', INTERVAL '1 year', if_not_exists => TRUE);
 SELECT add_retention_policy('taker_buy_sell', INTERVAL '2 years', if_not_exists => TRUE);
+
+-- P1.1 FIX: Research trials - keep indefinitely (valuable historical data)
+-- No retention policy - research trials are never automatically dropped
+-- Note: Compression still applies to save space
+SELECT add_compression_policy('research_trials', INTERVAL '30 days', if_not_exists => TRUE);
 """

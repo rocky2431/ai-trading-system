@@ -2,8 +2,13 @@
 
 This module provides PostgreSQL-backed pipeline management,
 ensuring pipeline state persists across server restarts.
+
+P1.2 FIX: Now integrates with LangGraph orchestrator for actual
+pipeline execution (not just state management).
 """
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Optional
@@ -18,6 +23,8 @@ from iqfmp.api.pipeline.schemas import (
     PipelineType,
 )
 from iqfmp.db.models import PipelineRunORM
+
+logger = logging.getLogger(__name__)
 
 
 class PipelineNotFoundError(Exception):
@@ -477,6 +484,82 @@ class PipelineService:
         runs.extend([r for r in mem_runs if r.run_id not in mem_ids])
 
         return runs
+
+    # =========================================================================
+    # P1.2 FIX: LangGraph Pipeline Execution
+    # =========================================================================
+
+    async def execute_langgraph_pipeline(
+        self,
+        run_id: str,
+        config: dict[str, Any],
+        session: Optional[AsyncSession] = None,
+    ) -> dict[str, Any]:
+        """Execute a LangGraph pipeline.
+
+        P1.2 FIX: Actually runs the LangGraph pipeline instead of just
+        managing state. This is the missing link between API and execution.
+
+        Args:
+            run_id: Pipeline run ID (thread_id for LangGraph)
+            config: Pipeline configuration including hypothesis, data, etc.
+            session: Optional database session for state updates
+
+        Returns:
+            Pipeline execution result
+        """
+        from iqfmp.agents.langgraph_orchestrator import create_factor_pipeline
+
+        try:
+            # Update status to running
+            self.start_run(run_id)
+            logger.info(f"Starting LangGraph pipeline: {run_id}")
+
+            # Create pipeline
+            graph, checkpoint_manager = await create_factor_pipeline(
+                enable_checkpointing=True,
+                enable_human_review=config.get("enable_human_review", False),
+            )
+
+            # Prepare initial state
+            initial_state = {
+                "messages": [],
+                "thread_id": run_id,
+                "hypothesis": config.get("hypothesis", ""),
+                "factors": [],
+                "evaluation_results": {},
+                "strategy": None,
+                "backtest_results": None,
+                "risk_assessment": None,
+                "current_phase": "generate",
+                "error": None,
+                "metadata": config.get("metadata", {}),
+            }
+
+            # Add data if provided
+            if "price_data" in config:
+                initial_state["metadata"]["price_data"] = config["price_data"]
+            if "evaluation_data" in config:
+                initial_state["metadata"]["evaluation_data"] = config["evaluation_data"]
+
+            # Execute pipeline
+            result = await graph.ainvoke(
+                initial_state,
+                config={"configurable": {"thread_id": run_id}},
+            )
+
+            # Mark as completed
+            self.complete_run(run_id, result)
+            logger.info(f"LangGraph pipeline completed: {run_id}")
+
+            return result
+
+        except Exception as e:
+            # Mark as failed
+            error_msg = str(e)
+            self.fail_run(run_id, error_msg)
+            logger.error(f"LangGraph pipeline failed: {run_id} - {error_msg}")
+            raise
 
 
 # Singleton instance

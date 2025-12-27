@@ -132,81 +132,214 @@ class BenchmarkResult:
 
 # =============================================================================
 # Alpha158 Factor Definitions as Qlib Expressions
+# P2.2 FIX: Complete Alpha158 factor set aligned with Qlib official benchmark
 # These are passed to Qlib's expression engine for computation
+#
+# Reference: vendor/qlib/qlib/contrib/data/loader.py (Alpha158DL)
+# Total factors: ~158 (9 kbar + rolling operators across 5 windows)
 # =============================================================================
 
-ALPHA158_EXPRESSIONS: dict[str, str] = {
-    # K-line shape factors
-    "KMID": "($close - $low) / ($high - $low + 1e-10)",
-    "KLEN": "($high - $low) / $close",
-    "KMID2": "($close - $open) / ($high - $low + 1e-10)",
-    "KUP": "($high - Greater($open, $close)) / ($high - $low + 1e-10)",
-    "KUP2": "($high - $open) / ($high - $low + 1e-10)",
-    "KLOW": "(Less($open, $close) - $low) / ($high - $low + 1e-10)",
-    "KLOW2": "($open - $low) / ($high - $low + 1e-10)",
-    "KSFT": "(2 * $close - $high - $low) / ($high - $low + 1e-10)",
-    "KSFT2": "(2 * $close - $high - $low) / $close",
+# Default rolling windows matching Qlib Alpha158
+ALPHA158_WINDOWS = [5, 10, 20, 30, 60]
 
-    # Rate of Change (ROC) factors
-    "ROC5": "Ref($close, 5) / $close - 1",
-    "ROC10": "Ref($close, 10) / $close - 1",
-    "ROC20": "Ref($close, 20) / $close - 1",
 
-    # Moving Average deviation factors
-    "MA5_RATIO": "$close / Mean($close, 5) - 1",
-    "MA10_RATIO": "$close / Mean($close, 10) - 1",
-    "MA20_RATIO": "$close / Mean($close, 20) - 1",
+def _generate_alpha158_expressions() -> dict[str, str]:
+    """Generate complete Alpha158 factor expressions matching Qlib official.
 
-    # Volatility factors
-    "STD5": "Std(Ref($close, 1) / $close - 1, 5)",
-    "STD10": "Std(Ref($close, 1) / $close - 1, 10)",
-    "STD20": "Std(Ref($close, 1) / $close - 1, 20)",
+    Based on: qlib/contrib/data/loader.py::Alpha158DL.get_feature_config()
+    """
+    expressions: dict[str, str] = {}
 
-    # Beta and regression factors
-    "BETA5": "Slope($close, 5) / $close",
-    "RSQR5": "Rsquare($close, 5)",
-    "RESI5": "Resi($close, 5) / $close",
+    # =========================================================================
+    # 1. K-bar factors (9 factors) - Price pattern features
+    # =========================================================================
+    expressions.update({
+        "KMID": "($close - $open) / $open",
+        "KLEN": "($high - $low) / $open",
+        "KMID2": "($close - $open) / ($high - $low + 1e-12)",
+        "KUP": "($high - Greater($open, $close)) / $open",
+        "KUP2": "($high - Greater($open, $close)) / ($high - $low + 1e-12)",
+        "KLOW": "(Less($open, $close) - $low) / $open",
+        "KLOW2": "(Less($open, $close) - $low) / ($high - $low + 1e-12)",
+        "KSFT": "(2 * $close - $high - $low) / $open",
+        "KSFT2": "(2 * $close - $high - $low) / ($high - $low + 1e-12)",
+    })
 
-    # Extreme value factors
-    "MAX5": "Max(Ref($close, 1) / $close - 1, 5)",
-    "MIN5": "Min(Ref($close, 1) / $close - 1, 5)",
-    "QTLU5": "Quantile(Ref($close, 1) / $close - 1, 5, 0.8)",
-    "QTLD5": "Quantile(Ref($close, 1) / $close - 1, 5, 0.2)",
-    "RANK5": "Rank($close, 5)",
+    # =========================================================================
+    # 2. Price features (normalized by current close)
+    # =========================================================================
+    for field in ["OPEN", "HIGH", "LOW", "VWAP"]:
+        field_lower = field.lower()
+        expressions[f"{field}0"] = f"${field_lower} / $close"
 
-    # Stochastic factors
-    # RSV (Relative Strength Value) - Use Min/Max instead of TsMin/TsMax
-    "RSV5": "($close - Min($low, 5)) / (Max($high, 5) - Min($low, 5) + 1e-10)",
-    "RSV10": "($close - Min($low, 10)) / (Max($high, 10) - Min($low, 10) + 1e-10)",
-    "RSV20": "($close - Min($low, 20)) / (Max($high, 20) - Min($low, 20) + 1e-10)",
+    # =========================================================================
+    # 3. Rolling factors across all windows [5, 10, 20, 30, 60]
+    # =========================================================================
+    for d in ALPHA158_WINDOWS:
+        # ROC: Rate of Change - price change over d days
+        expressions[f"ROC{d}"] = f"Ref($close, {d}) / $close"
 
-    # Index of max/min factors
-    "IMAX5": "IdxMax($high, 5) / 5",
-    "IMIN5": "IdxMin($low, 5) / 5",
-    "IMXD5": "(IdxMax($high, 5) - IdxMin($low, 5)) / 5",
+        # MA: Simple Moving Average ratio
+        expressions[f"MA{d}"] = f"Mean($close, {d}) / $close"
 
-    # Volume factors
-    "VMA5": "Mean($volume, 5) / (Mean($volume, 20) + 1e-10) - 1",
-    "VMA10": "Mean($volume, 10) / (Mean($volume, 20) + 1e-10) - 1",
-    "VSTD5": "Std($volume, 5) / (Mean($volume, 20) + 1e-10)",
-    "VSTD10": "Std($volume, 10) / (Mean($volume, 20) + 1e-10)",
-    "WVMA5": "Std(Abs(Ref($close, 1) / $close - 1) * $volume, 5) / (Mean(Abs(Ref($close, 1) / $close - 1) * $volume, 20) + 1e-10)",
-    "TURN5": "Mean($volume, 5) / (Mean($volume, 20) + 1e-10) - 1",
+        # STD: Standard deviation of close price
+        expressions[f"STD{d}"] = f"Std($close, {d}) / $close"
 
-    # RSI factors
-    "RSI6": "100 - 100 / (1 + Mean(Greater(Ref($close, 1) / $close - 1, 0), 6) / (Mean(Abs(Less(Ref($close, 1) / $close - 1, 0)), 6) + 1e-10))",
-    "RSI14": "100 - 100 / (1 + Mean(Greater(Ref($close, 1) / $close - 1, 0), 14) / (Mean(Abs(Less(Ref($close, 1) / $close - 1, 0)), 14) + 1e-10))",
+        # BETA: Slope of price trend (regression coefficient)
+        expressions[f"BETA{d}"] = f"Slope($close, {d}) / $close"
 
-    # Correlation factors
-    "CORR5": "Corr(Ref($close, 1) / $close - 1, Ref($volume, 1) / $volume - 1, 5)",
-    "CORR10": "Corr(Ref($close, 1) / $close - 1, Ref($volume, 1) / $volume - 1, 10)",
-    "CORD5": "Corr(Rank(Ref($close, 1) / $close - 1, 5), Rank($volume, 5), 5)",
+        # RSQR: R-squared of linear regression (trend linearity)
+        expressions[f"RSQR{d}"] = f"Rsquare($close, {d})"
 
-    # Price level factors
-    "SUMP5": "Sum(Greater(Ref($close, 1) / $close - 1, 0), 5) / (Sum(Abs(Ref($close, 1) / $close - 1), 5) + 1e-10)",
-    "SUMN5": "Sum(Less(Ref($close, 1) / $close - 1, 0), 5) / (Sum(Abs(Ref($close, 1) / $close - 1), 5) + 1e-10)",
-    "SUMD5": "(Sum(Greater(Ref($close, 1) / $close - 1, 0), 5) - Sum(Less(Ref($close, 1) / $close - 1, 0), 5)) / (Sum(Abs(Ref($close, 1) / $close - 1), 5) + 1e-10)",
-}
+        # RESI: Residual of linear regression
+        expressions[f"RESI{d}"] = f"Resi($close, {d}) / $close"
+
+        # MAX: Maximum high price over d days
+        expressions[f"MAX{d}"] = f"Max($high, {d}) / $close"
+
+        # MIN: Minimum low price over d days
+        expressions[f"MIN{d}"] = f"Min($low, {d}) / $close"
+
+        # QTLU: 80% quantile of close price
+        expressions[f"QTLU{d}"] = f"Quantile($close, {d}, 0.8) / $close"
+
+        # QTLD: 20% quantile of close price
+        expressions[f"QTLD{d}"] = f"Quantile($close, {d}, 0.2) / $close"
+
+        # RANK: Percentile rank of current price in past d days
+        expressions[f"RANK{d}"] = f"Rank($close, {d})"
+
+        # RSV: Relative Strength Value (stochastic oscillator)
+        expressions[f"RSV{d}"] = (
+            f"($close - Min($low, {d})) / (Max($high, {d}) - Min($low, {d}) + 1e-12)"
+        )
+
+        # IMAX: Days since maximum high (Aroon indicator component)
+        expressions[f"IMAX{d}"] = f"IdxMax($high, {d}) / {d}"
+
+        # IMIN: Days since minimum low (Aroon indicator component)
+        expressions[f"IMIN{d}"] = f"IdxMin($low, {d}) / {d}"
+
+        # IMXD: Difference between IMAX and IMIN (momentum indicator)
+        expressions[f"IMXD{d}"] = f"(IdxMax($high, {d}) - IdxMin($low, {d})) / {d}"
+
+        # CORR: Correlation between price and log volume
+        expressions[f"CORR{d}"] = f"Corr($close, Log($volume + 1), {d})"
+
+        # CORD: Correlation between price change ratio and volume change ratio
+        expressions[f"CORD{d}"] = (
+            f"Corr($close / Ref($close, 1), Log($volume / Ref($volume, 1) + 1), {d})"
+        )
+
+        # CNTP: Percentage of up days in past d days
+        expressions[f"CNTP{d}"] = f"Mean($close > Ref($close, 1), {d})"
+
+        # CNTN: Percentage of down days in past d days
+        expressions[f"CNTN{d}"] = f"Mean($close < Ref($close, 1), {d})"
+
+        # CNTD: Difference between up and down day percentages
+        expressions[f"CNTD{d}"] = (
+            f"Mean($close > Ref($close, 1), {d}) - Mean($close < Ref($close, 1), {d})"
+        )
+
+        # SUMP: RSI-like - total gain ratio (similar to RSI)
+        expressions[f"SUMP{d}"] = (
+            f"Sum(Greater($close - Ref($close, 1), 0), {d}) / "
+            f"(Sum(Abs($close - Ref($close, 1)), {d}) + 1e-12)"
+        )
+
+        # SUMN: RSI-like - total loss ratio
+        expressions[f"SUMN{d}"] = (
+            f"Sum(Greater(Ref($close, 1) - $close, 0), {d}) / "
+            f"(Sum(Abs($close - Ref($close, 1)), {d}) + 1e-12)"
+        )
+
+        # SUMD: RSI-like - difference between gain and loss ratio
+        expressions[f"SUMD{d}"] = (
+            f"(Sum(Greater($close - Ref($close, 1), 0), {d}) - "
+            f"Sum(Greater(Ref($close, 1) - $close, 0), {d})) / "
+            f"(Sum(Abs($close - Ref($close, 1)), {d}) + 1e-12)"
+        )
+
+        # VMA: Volume moving average ratio
+        expressions[f"VMA{d}"] = f"Mean($volume, {d}) / ($volume + 1e-12)"
+
+        # VSTD: Volume standard deviation
+        expressions[f"VSTD{d}"] = f"Std($volume, {d}) / ($volume + 1e-12)"
+
+        # WVMA: Weighted volume moving average (price-weighted volatility)
+        expressions[f"WVMA{d}"] = (
+            f"Std(Abs($close / Ref($close, 1) - 1) * $volume, {d}) / "
+            f"(Mean(Abs($close / Ref($close, 1) - 1) * $volume, {d}) + 1e-12)"
+        )
+
+        # VSUMP: Volume RSI-like - volume increase ratio
+        expressions[f"VSUMP{d}"] = (
+            f"Sum(Greater($volume - Ref($volume, 1), 0), {d}) / "
+            f"(Sum(Abs($volume - Ref($volume, 1)), {d}) + 1e-12)"
+        )
+
+        # VSUMN: Volume RSI-like - volume decrease ratio
+        expressions[f"VSUMN{d}"] = (
+            f"Sum(Greater(Ref($volume, 1) - $volume, 0), {d}) / "
+            f"(Sum(Abs($volume - Ref($volume, 1)), {d}) + 1e-12)"
+        )
+
+        # VSUMD: Volume RSI-like - difference between increase and decrease
+        expressions[f"VSUMD{d}"] = (
+            f"(Sum(Greater($volume - Ref($volume, 1), 0), {d}) - "
+            f"Sum(Greater(Ref($volume, 1) - $volume, 0), {d})) / "
+            f"(Sum(Abs($volume - Ref($volume, 1)), {d}) + 1e-12)"
+        )
+
+    return expressions
+
+
+# Generate complete Alpha158 expressions
+ALPHA158_EXPRESSIONS: dict[str, str] = _generate_alpha158_expressions()
+
+
+# =============================================================================
+# Alpha360 Factor Definitions
+# P2.2 FIX: Add Alpha360 factor set for comprehensive benchmark coverage
+#
+# Reference: vendor/qlib/qlib/contrib/data/loader.py (Alpha360DL)
+# Total factors: 360 = 6 fields × 60 lookback days
+# Fields: CLOSE, OPEN, HIGH, LOW, VWAP, VOLUME (all normalized)
+# =============================================================================
+
+def _generate_alpha360_expressions() -> dict[str, str]:
+    """Generate complete Alpha360 factor expressions matching Qlib official.
+
+    Based on: qlib/contrib/data/loader.py::Alpha360DL.get_feature_config()
+
+    Alpha360 provides raw price data normalized by current close/volume,
+    capturing price patterns over the last 60 days.
+    """
+    expressions: dict[str, str] = {}
+
+    # Price fields normalized by current close
+    price_fields = ["close", "open", "high", "low", "vwap"]
+
+    for field in price_fields:
+        field_upper = field.upper()
+        # Current day (day 0)
+        expressions[f"{field_upper}0"] = f"${field} / $close"
+
+        # Historical days (day 1 to day 59)
+        for i in range(1, 60):
+            expressions[f"{field_upper}{i}"] = f"Ref(${field}, {i}) / $close"
+
+    # Volume normalized by current volume
+    expressions["VOLUME0"] = "$volume / ($volume + 1e-12)"
+    for i in range(1, 60):
+        expressions[f"VOLUME{i}"] = f"Ref($volume, {i}) / ($volume + 1e-12)"
+
+    return expressions
+
+
+# Generate complete Alpha360 expressions
+ALPHA360_EXPRESSIONS: dict[str, str] = _generate_alpha360_expressions()
 
 # Backward compatibility alias (deprecated - use ALPHA158_EXPRESSIONS)
 ALPHA158_FACTORS = ALPHA158_EXPRESSIONS
@@ -531,13 +664,43 @@ class AlphaBenchmarker:
 
 
 # =============================================================================
-# Factory function for easy integration
+# Factory functions for easy integration
+# P2.2 FIX: Support both Alpha158 and Alpha360 benchmarks
 # =============================================================================
 
 def create_alpha_benchmarker(
+    benchmark_type: str = "alpha158",
     include_volume_factors: bool = True,
 ) -> AlphaBenchmarker:
-    """Create an Alpha158 benchmarker using Qlib expressions.
+    """Create an Alpha benchmarker using Qlib expressions.
+
+    Args:
+        benchmark_type: "alpha158" (default) or "alpha360"
+        include_volume_factors: Whether to include volume-based factors
+
+    Returns:
+        Configured AlphaBenchmarker instance
+    """
+    if benchmark_type == "alpha360":
+        expressions = ALPHA360_EXPRESSIONS
+    else:
+        expressions = ALPHA158_EXPRESSIONS
+
+    if include_volume_factors:
+        return AlphaBenchmarker(expressions=expressions)
+
+    # Filter out volume factors
+    non_volume_expressions = {
+        k: v for k, v in expressions.items()
+        if "$volume" not in v.lower() and "volume" not in k.lower()
+    }
+    return AlphaBenchmarker(expressions=non_volume_expressions)
+
+
+def create_alpha158_benchmarker(
+    include_volume_factors: bool = True,
+) -> AlphaBenchmarker:
+    """Create an Alpha158 benchmarker (158 technical indicators).
 
     Args:
         include_volume_factors: Whether to include volume-based factors
@@ -545,29 +708,80 @@ def create_alpha_benchmarker(
     Returns:
         Configured AlphaBenchmarker instance
     """
-    if include_volume_factors:
-        return AlphaBenchmarker(expressions=ALPHA158_EXPRESSIONS)
-
-    # Filter out volume factors
-    non_volume_expressions = {
-        k: v for k, v in ALPHA158_EXPRESSIONS.items()
-        if "$volume" not in v.lower() and "volume" not in k.lower()
-    }
-    return AlphaBenchmarker(expressions=non_volume_expressions)
+    return create_alpha_benchmarker("alpha158", include_volume_factors)
 
 
-def get_available_factors() -> list[str]:
-    """Get list of available Alpha158 factor names."""
+def create_alpha360_benchmarker(
+    include_volume_factors: bool = True,
+) -> AlphaBenchmarker:
+    """Create an Alpha360 benchmarker (360 raw price features).
+
+    Alpha360 uses 60-day lookback for 6 price fields (CLOSE, OPEN, HIGH, LOW, VWAP, VOLUME),
+    providing raw normalized price data for ML models.
+
+    Args:
+        include_volume_factors: Whether to include volume-based factors
+
+    Returns:
+        Configured AlphaBenchmarker instance
+    """
+    return create_alpha_benchmarker("alpha360", include_volume_factors)
+
+
+def get_available_factors(benchmark_type: str = "alpha158") -> list[str]:
+    """Get list of available factor names.
+
+    Args:
+        benchmark_type: "alpha158" (default) or "alpha360"
+
+    Returns:
+        List of factor names
+    """
+    if benchmark_type == "alpha360":
+        return list(ALPHA360_EXPRESSIONS.keys())
     return list(ALPHA158_EXPRESSIONS.keys())
 
 
-def get_factor_expression(factor_name: str) -> Optional[str]:
+def get_factor_expression(
+    factor_name: str,
+    benchmark_type: str = "alpha158",
+) -> Optional[str]:
     """Get Qlib expression for a factor.
 
     Args:
         factor_name: Name of the factor
+        benchmark_type: "alpha158" (default) or "alpha360"
 
     Returns:
         Qlib expression string or None if not found
     """
+    if benchmark_type == "alpha360":
+        return ALPHA360_EXPRESSIONS.get(factor_name)
     return ALPHA158_EXPRESSIONS.get(factor_name)
+
+
+def get_factor_count() -> dict[str, int]:
+    """Get count of factors in each benchmark set.
+
+    Returns:
+        Dictionary with factor counts
+    """
+    return {
+        "alpha158": len(ALPHA158_EXPRESSIONS),
+        "alpha360": len(ALPHA360_EXPRESSIONS),
+        "total": len(ALPHA158_EXPRESSIONS) + len(ALPHA360_EXPRESSIONS),
+    }
+
+
+def get_combined_expressions() -> dict[str, str]:
+    """Get combined Alpha158 + Alpha360 expressions.
+
+    Note: Some factor names may overlap (e.g., CLOSE0, OPEN0).
+    Alpha360 versions take precedence in the combined set.
+
+    Returns:
+        Combined dictionary of all expressions
+    """
+    combined = dict(ALPHA158_EXPRESSIONS)
+    combined.update(ALPHA360_EXPRESSIONS)  # Alpha360 overwrites overlapping names
+    return combined

@@ -24,6 +24,12 @@ from iqfmp.llm.validation import (
     FieldSet,
 )
 from iqfmp.core.security import ASTSecurityChecker
+from iqfmp.core.review import (
+    HumanReviewGate,
+    ReviewRequest,
+    ReviewConfig,
+    ReviewStatus,
+)
 from iqfmp.agents.field_capability import (
     DataSourceType,
     DynamicCapability,
@@ -598,6 +604,10 @@ class FactorGenerationConfig:
     # 严格模式：如果 vector_dedup_enabled=True 但 Qdrant 不可用，抛出异常而非静默降级
     # 生产环境必须设置为 True，只有测试环境可以设置为 False
     vector_strict_mode: bool = True
+    # P0 Security: Human Review Gate - REQUIRED for production
+    # When enabled, generated factors must be approved before storage/execution
+    human_review_enabled: bool = True  # ON by default for safety
+    human_review_timeout_seconds: int = 3600  # 1 hour default timeout
 
 
 class FactorFieldValidator:
@@ -766,6 +776,18 @@ class FactorGenerationAgent:
                         "Agent will generate factors without memory. "
                         "Set vector_strict_mode=True in production!"
                     )
+
+        # P0 Security: Initialize HumanReviewGate for manual approval
+        self._review_gate: Optional[HumanReviewGate] = None
+        if self.config.human_review_enabled:
+            review_config = ReviewConfig(
+                timeout_seconds=self.config.human_review_timeout_seconds,
+                auto_reject_on_timeout=True,
+            )
+            self._review_gate = HumanReviewGate(config=review_config)
+            self._logger.info(
+                f"HumanReviewGate enabled: timeout={self.config.human_review_timeout_seconds}s"
+            )
 
     def _check_duplicate_factor(
         self,
@@ -1141,6 +1163,49 @@ class FactorGenerationAgent:
             family=family,
             metadata=metadata,
         )
+
+        # ================================================================
+        # P0 Security: HumanReviewGate - MUST approve before storage
+        # This is the third layer of security: manual approval
+        # ================================================================
+        if self._review_gate:
+            review_request = ReviewRequest(
+                code=refined_code,
+                code_summary=f"Factor: {name}\nFamily: {family}\nDescription: {description}",
+                factor_name=name,
+                metadata={
+                    "user_request": user_request,
+                    "is_python": refined_is_python,
+                    "security_checked": self.config.security_check_enabled,
+                },
+            )
+            request_id = await self._review_gate.submit(review_request)
+            self._logger.info(
+                f"Submitted factor '{name}' for human review: {request_id}"
+            )
+
+            # Wait for decision (blocking until approved/rejected/timeout)
+            decision = await self._review_gate.wait_for_decision(
+                request_id,
+                timeout=self.config.human_review_timeout_seconds,
+            )
+
+            if decision.status == ReviewStatus.REJECTED:
+                raise SecurityViolationError(
+                    f"Factor '{name}' rejected by human reviewer: {decision.reason}"
+                )
+            elif decision.status == ReviewStatus.TIMEOUT:
+                raise SecurityViolationError(
+                    f"Factor '{name}' timed out waiting for human review"
+                )
+            elif decision.status != ReviewStatus.APPROVED:
+                raise SecurityViolationError(
+                    f"Factor '{name}' not approved: status={decision.status}"
+                )
+
+            self._logger.info(
+                f"Factor '{name}' approved by {decision.reviewer or 'system'}"
+            )
 
         # ================================================================
         # Phase 2: Store generated factor for future dedup

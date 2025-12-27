@@ -29,6 +29,14 @@ import pandas as pd
 # P0 SECURITY: Import ASTSecurityChecker for mandatory code validation
 from iqfmp.core.security import ASTSecurityChecker
 
+# P0 Security: Import HumanReviewGate for manual approval
+from iqfmp.core.review import (
+    HumanReviewGate,
+    ReviewRequest,
+    ReviewConfig,
+    ReviewStatus,
+)
+
 # Module-level security checker instance (reused for performance)
 _security_checker = ASTSecurityChecker()
 
@@ -127,6 +135,11 @@ class EvaluationAgentConfig:
     # Security / execution mode
     allow_python_factors: bool = False  # Default: Qlib expression-only
 
+    # P0 Security: Human Review Gate - REQUIRED for production
+    # When enabled, factor code must be approved before evaluation
+    human_review_enabled: bool = True  # ON by default for safety
+    human_review_timeout_seconds: int = 3600  # 1 hour default timeout
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -140,6 +153,8 @@ class EvaluationAgentConfig:
             "generate_reports": self.generate_reports,
             "include_recommendations": self.include_recommendations,
             "allow_python_factors": self.allow_python_factors,
+            "human_review_enabled": self.human_review_enabled,
+            "human_review_timeout_seconds": self.human_review_timeout_seconds,
         }
 
 
@@ -225,6 +240,19 @@ class FactorEvaluationAgent:
         )
         self.evaluator = FactorEvaluator(ledger=self.ledger, config=eval_config)
         self.pipeline = EvaluationPipeline(ledger=self.ledger, config=eval_config)
+
+        # P0 Security: Initialize HumanReviewGate for manual approval
+        self._review_gate: Optional[HumanReviewGate] = None
+        if self.config.human_review_enabled:
+            review_config = ReviewConfig(
+                timeout_seconds=self.config.human_review_timeout_seconds,
+                auto_reject_on_timeout=True,
+            )
+            self._review_gate = HumanReviewGate(config=review_config)
+            logger.info(
+                f"EvaluationAgent HumanReviewGate enabled: "
+                f"timeout={self.config.human_review_timeout_seconds}s"
+            )
 
     async def generate_llm_insights(
         self,
@@ -418,6 +446,47 @@ Format as JSON:
             factor_code = factor_info.get("code", "")
 
             try:
+                # ============================================================
+                # P0 Security: HumanReviewGate - MUST approve before evaluation
+                # ============================================================
+                if self._review_gate and factor_code:
+                    review_request = ReviewRequest(
+                        code=factor_code,
+                        code_summary=f"Evaluation: {factor_name}\nFamily: {factor_family}",
+                        factor_name=factor_name,
+                        metadata={
+                            "stage": "evaluation",
+                            "factor_family": factor_family,
+                        },
+                    )
+                    request_id = await self._review_gate.submit(review_request)
+                    logger.info(
+                        f"Submitted factor '{factor_name}' for evaluation review: {request_id}"
+                    )
+
+                    decision = await self._review_gate.wait_for_decision(
+                        request_id,
+                        timeout=self.config.human_review_timeout_seconds,
+                    )
+
+                    if decision.status == ReviewStatus.REJECTED:
+                        raise EvaluationAgentError(
+                            f"Factor '{factor_name}' rejected for evaluation: {decision.reason}"
+                        )
+                    elif decision.status == ReviewStatus.TIMEOUT:
+                        raise EvaluationAgentError(
+                            f"Factor '{factor_name}' timed out waiting for evaluation approval"
+                        )
+                    elif decision.status != ReviewStatus.APPROVED:
+                        raise EvaluationAgentError(
+                            f"Factor '{factor_name}' not approved for evaluation"
+                        )
+
+                    logger.info(
+                        f"Factor '{factor_name}' approved for evaluation by "
+                        f"{decision.reviewer or 'system'}"
+                    )
+
                 # Prepare factor-specific data
                 factor_data = self._prepare_factor_data(
                     evaluation_data, factor_code, factor_name

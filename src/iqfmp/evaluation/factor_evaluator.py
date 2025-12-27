@@ -94,8 +94,9 @@ class EvaluationConfig:
     market_cap_column: str = "market_cap"
 
     # Evaluation options
-    use_cv_splits: bool = False
-    run_stability_analysis: bool = False
+    # P1.3 FIX: Enable CV and stability analysis by default for production
+    use_cv_splits: bool = True  # Changed from False - prevents overfitting
+    run_stability_analysis: bool = True  # Changed from False - ensures robustness
     min_periods: int = 20
 
     # Thresholds

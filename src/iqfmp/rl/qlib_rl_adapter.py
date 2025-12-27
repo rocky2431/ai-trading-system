@@ -483,3 +483,137 @@ def run_vwap(
         volume_profile=volume_profile,
     )
     return strategy.execute(prices)
+
+
+# =============================================================================
+# P2.1 FIX: Qlib Native RL Training Integration
+# =============================================================================
+
+
+def run_qlib_native_training(
+    train_data: pd.DataFrame,
+    test_data: pd.DataFrame,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run Qlib's native RL training with train_and_test.
+
+    P2.1 FIX: This function uses Qlib's native train_and_test function
+    instead of wrapping stable-baselines3 directly. Benefits:
+    - Integrated backtesting after training
+    - Qlib-native state adapters (SAOEStateAdapter)
+    - Proper SAOEMetrics tracking
+    - Trainer with checkpointing support
+
+    Args:
+        train_data: Training market data (OHLCV + features)
+        test_data: Test market data for backtesting
+        config: Training configuration
+
+    Returns:
+        Training and backtest results
+    """
+    if not QLIB_RL_AVAILABLE:
+        logger.warning("Qlib RL not available, falling back to stable-baselines3")
+        return run_rl_training(train_data, config)
+
+    rl_config = QlibRLConfig(**(config or {}))
+
+    try:
+        # Configure Qlib RL training
+        training_config = {
+            "env": {
+                "class": "SingleAssetOrderExecution",
+                "kwargs": {
+                    "order_dir": 1,
+                    "order_amount": rl_config.order_amount,
+                    "time_per_step": rl_config.time_per_step,
+                },
+            },
+            "policy": {
+                "class": "PPO",
+                "kwargs": {
+                    "learning_rate": rl_config.learning_rate,
+                    "batch_size": rl_config.batch_size,
+                    "gamma": rl_config.gamma,
+                    "gae_lambda": rl_config.gae_lambda,
+                },
+            },
+            "trainer": {
+                "total_timesteps": rl_config.total_timesteps,
+                "log_dir": rl_config.log_dir,
+            },
+        }
+
+        # Run Qlib native training with integrated backtest
+        logger.info("Starting Qlib native RL training with train_and_test")
+        result = train_and_test(
+            train_data=train_data,
+            test_data=test_data,
+            config=training_config,
+        )
+
+        return {
+            "status": "success",
+            "method": "qlib_native",
+            "training_result": result.get("training", {}),
+            "backtest_result": result.get("backtest", {}),
+            "metrics": result.get("metrics", {}),
+        }
+
+    except Exception as e:
+        logger.error(f"Qlib native training failed: {e}, falling back to SB3")
+        # Fallback to stable-baselines3 wrapper
+        return {
+            "status": "fallback",
+            "method": "stable_baselines3",
+            "error": str(e),
+            "result": run_rl_training(train_data, config),
+        }
+
+
+def run_qlib_backtest(
+    policy: Any,
+    data: pd.DataFrame,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Run Qlib native backtesting on trained policy.
+
+    P2.1 FIX: Uses Qlib's native backtest function for
+    order execution strategy evaluation.
+
+    Args:
+        policy: Trained RL policy
+        data: Market data for backtesting
+        config: Backtest configuration
+
+    Returns:
+        Backtest results with SAOEMetrics
+    """
+    if not QLIB_RL_AVAILABLE:
+        raise RuntimeError("Qlib RL required for native backtesting")
+
+    rl_config = QlibRLConfig(**(config or {}))
+
+    try:
+        # Run Qlib native backtest
+        result = backtest(
+            policy=policy,
+            data=data,
+            order_amount=rl_config.order_amount,
+            time_per_step=rl_config.time_per_step,
+        )
+
+        return {
+            "status": "success",
+            "total_reward": result.get("total_reward", 0),
+            "avg_slippage_bps": result.get("avg_slippage_bps", 0),
+            "execution_cost": result.get("execution_cost", 0),
+            "saoe_metrics": result.get("metrics", {}),
+        }
+
+    except Exception as e:
+        logger.error(f"Qlib backtest failed: {e}")
+        return {
+            "status": "failed",
+            "error": str(e),
+        }

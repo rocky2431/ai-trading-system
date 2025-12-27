@@ -21,6 +21,7 @@ import {
   ClipboardCheck,
   Brain,
   FileCode,
+  GitBranch,
 } from 'lucide-react'
 
 const navigation = [
@@ -36,6 +37,7 @@ const navigation = [
   { name: 'Review', href: '/review', icon: ClipboardCheck },
   { name: 'RL Training', href: '/rl-training', icon: Brain },
   { name: 'Prompts', href: '/prompts', icon: FileCode },
+  { name: 'Checkpoints', href: '/checkpoints', icon: GitBranch },
   // DISABLED: Live trading uses mock data, backend API not implemented
   // { name: 'Trading', href: '/trading', icon: Zap },
   { name: 'Pipeline', href: '/pipeline', icon: Activity },

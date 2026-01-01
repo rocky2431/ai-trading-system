@@ -132,25 +132,118 @@ class OrderTimeout:
     callback: Optional[Callable[[str], None]] = None
 
 
+# ==================== Idempotency Cache ====================
+
+
+@dataclass
+class IdempotencyCacheEntry:
+    """Cache entry for idempotent order execution."""
+
+    result: "ExecutionResult"
+    timestamp: datetime
+    request_hash: str
+
+
+class IdempotencyCache:
+    """Cache for preventing duplicate order execution.
+
+    Uses client_order_id as the idempotency key.
+    Entries expire after ttl_seconds.
+    """
+
+    def __init__(self, ttl_seconds: int = 3600) -> None:
+        """Initialize cache.
+
+        Args:
+            ttl_seconds: Time-to-live for cache entries (default: 1 hour)
+        """
+        self._cache: dict[str, IdempotencyCacheEntry] = {}
+        self._ttl = timedelta(seconds=ttl_seconds)
+
+    def _compute_hash(self, request: OrderRequest) -> str:
+        """Compute hash of request for validation."""
+        import hashlib
+        key = f"{request.symbol}:{request.side.value}:{request.order_type.value}:{request.quantity}:{request.price}"
+        return hashlib.md5(key.encode()).hexdigest()
+
+    def get(self, client_order_id: str, request: OrderRequest) -> Optional["ExecutionResult"]:
+        """Get cached result if exists and not expired.
+
+        Args:
+            client_order_id: Client-provided order ID
+            request: Current request (for validation)
+
+        Returns:
+            Cached result or None
+        """
+        if client_order_id not in self._cache:
+            return None
+
+        entry = self._cache[client_order_id]
+
+        # Check expiry
+        if datetime.now() - entry.timestamp > self._ttl:
+            del self._cache[client_order_id]
+            return None
+
+        # Validate request hash matches (prevent different orders with same ID)
+        if entry.request_hash != self._compute_hash(request):
+            return None
+
+        return entry.result
+
+    def set(self, client_order_id: str, request: OrderRequest, result: "ExecutionResult") -> None:
+        """Cache execution result.
+
+        Args:
+            client_order_id: Client-provided order ID
+            request: Original request
+            result: Execution result
+        """
+        self._cache[client_order_id] = IdempotencyCacheEntry(
+            result=result,
+            timestamp=datetime.now(),
+            request_hash=self._compute_hash(request),
+        )
+
+    def cleanup_expired(self) -> int:
+        """Remove expired entries from cache.
+
+        Returns:
+            Number of entries removed
+        """
+        now = datetime.now()
+        expired = [
+            key for key, entry in self._cache.items()
+            if now - entry.timestamp > self._ttl
+        ]
+        for key in expired:
+            del self._cache[key]
+        return len(expired)
+
+
 # ==================== OrderExecutor ====================
 
 
 class OrderExecutor:
-    """Execute orders on exchange."""
+    """Execute orders on exchange with idempotency support."""
 
     def __init__(
         self,
         adapter: ExchangeAdapter,
         default_timeout: int = 300,
+        idempotency_ttl: int = 3600,
     ) -> None:
         """Initialize order executor.
 
         Args:
             adapter: Exchange adapter
             default_timeout: Default order timeout in seconds
+            idempotency_ttl: TTL for idempotency cache entries in seconds
         """
         self._adapter = adapter
         self._default_timeout = default_timeout
+        self._idempotency_cache = IdempotencyCache(ttl_seconds=idempotency_ttl)
 
     def validate(self, request: OrderRequest) -> bool:
         """Validate order request.
@@ -176,15 +269,36 @@ class OrderExecutor:
         return True
 
     async def execute(self, request: OrderRequest) -> ExecutionResult:
-        """Execute an order.
+        """Execute an order with idempotency support.
 
         Args:
             request: Order request
 
         Returns:
             Execution result
+
+        Note:
+            - If client_order_id is provided, the request is idempotent.
+              Duplicate requests with the same client_order_id return cached results.
+            - If stop_loss_price or take_profit_price is set, this method will
+              create separate stop/TP orders after the main order succeeds.
         """
+        # Check idempotency cache if client_order_id is provided
+        if request.client_order_id:
+            cached_result = self._idempotency_cache.get(
+                request.client_order_id, request
+            )
+            if cached_result is not None:
+                return cached_result
+
         try:
+            # Build order params including reduce_only and post_only
+            order_params: dict[str, Any] = {}
+            if request.reduce_only:
+                order_params["reduceOnly"] = True
+            if request.post_only:
+                order_params["postOnly"] = True
+
             # Create order on exchange
             order = await self._adapter.create_order(
                 symbol=request.symbol,
@@ -192,6 +306,7 @@ class OrderExecutor:
                 order_type=request.order_type,
                 quantity=request.quantity,
                 price=request.price,
+                **order_params,
             )
 
             # Calculate remaining quantity
@@ -201,7 +316,7 @@ class OrderExecutor:
                 if remaining <= 0:
                     remaining = None
 
-            return ExecutionResult(
+            result = ExecutionResult(
                 success=True,
                 order_id=order.id,
                 filled_quantity=order.filled,
@@ -211,12 +326,99 @@ class OrderExecutor:
                 action=request.action,
             )
 
+            # Create stop loss order if specified and main order succeeded
+            if request.stop_loss_price is not None and result.success:
+                await self._create_stop_order(
+                    request, request.stop_loss_price, is_stop_loss=True
+                )
+
+            # Create take profit order if specified and main order succeeded
+            if request.take_profit_price is not None and result.success:
+                await self._create_stop_order(
+                    request, request.take_profit_price, is_stop_loss=False
+                )
+
+            # Cache result for idempotency
+            if request.client_order_id:
+                self._idempotency_cache.set(
+                    request.client_order_id, request, result
+                )
+
+            return result
+
         except Exception as e:
-            return ExecutionResult(
+            result = ExecutionResult(
                 success=False,
                 error=str(e),
                 status=OrderStatus.REJECTED,
             )
+            # Cache failed result too to prevent retry storms
+            if request.client_order_id:
+                self._idempotency_cache.set(
+                    request.client_order_id, request, result
+                )
+            return result
+
+    async def _create_stop_order(
+        self,
+        request: OrderRequest,
+        trigger_price: Decimal,
+        is_stop_loss: bool,
+    ) -> Optional[ExecutionResult]:
+        """Create a stop loss or take profit order.
+
+        Args:
+            request: Original order request
+            trigger_price: Stop/TP trigger price
+            is_stop_loss: True for stop loss, False for take profit
+
+        Returns:
+            Execution result for the stop order, or None if failed
+        """
+        try:
+            # Opposite side for closing order
+            stop_side = (
+                OrderSide.SELL
+                if request.side == OrderSide.BUY
+                else OrderSide.BUY
+            )
+
+            stop_request = OrderRequest(
+                symbol=request.symbol,
+                side=stop_side,
+                order_type=OrderType.STOP_MARKET,
+                quantity=request.quantity,
+                price=trigger_price,
+                action=(
+                    OrderAction.CLOSE_LONG
+                    if request.action == OrderAction.OPEN_LONG
+                    else OrderAction.CLOSE_SHORT
+                ),
+                reduce_only=True,
+                metadata={
+                    "parent_order_id": request.client_order_id,
+                    "order_type": "stop_loss" if is_stop_loss else "take_profit",
+                },
+            )
+
+            order = await self._adapter.create_order(
+                symbol=stop_request.symbol,
+                side=stop_request.side,
+                order_type=stop_request.order_type,
+                quantity=stop_request.quantity,
+                price=stop_request.price,
+                reduceOnly=True,
+            )
+
+            return ExecutionResult(
+                success=True,
+                order_id=order.id,
+                status=order.status,
+                action=stop_request.action,
+            )
+        except Exception:
+            # Log error but don't fail the main order
+            return None
 
     async def execute_with_stop_loss(
         self,
@@ -584,10 +786,12 @@ __all__ = [
     "OrderExecutionError",
     # Models
     "ExecutionResult",
+    "IdempotencyCacheEntry",
     "OrderRequest",
     "OrderTimeout",
     "PartialFill",
     # Classes
+    "IdempotencyCache",
     "OrderExecutor",
     "OrderManager",
     "PartialFillHandler",

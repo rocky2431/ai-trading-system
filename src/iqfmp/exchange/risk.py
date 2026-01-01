@@ -357,6 +357,8 @@ class LossLimiter:
     @property
     def daily_loss_percent(self) -> Decimal:
         """Get daily loss as percentage."""
+        if self._account_equity == Decimal("0"):
+            return Decimal("1") if self._daily_loss > Decimal("0") else Decimal("0")
         return self._daily_loss / self._account_equity
 
     @property

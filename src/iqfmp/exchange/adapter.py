@@ -12,6 +12,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
@@ -109,23 +110,23 @@ class Ticker:
     """Market ticker data."""
 
     symbol: str
-    bid: float
-    ask: float
-    last: float
-    volume: float = 0.0
+    bid: Decimal
+    ask: Decimal
+    last: Decimal
+    volume: Decimal = Decimal("0")
     timestamp: Optional[datetime] = None
 
     @property
-    def spread(self) -> float:
+    def spread(self) -> Decimal:
         """Calculate bid-ask spread."""
         return self.ask - self.bid
 
     @property
-    def spread_pct(self) -> float:
+    def spread_pct(self) -> Decimal:
         """Calculate spread as percentage of mid price."""
         mid = (self.bid + self.ask) / 2
-        if mid == 0:
-            return 0.0
+        if mid == Decimal("0"):
+            return Decimal("0")
         return self.spread / mid
 
 
@@ -177,9 +178,9 @@ class Balance:
     """Account balance."""
 
     currency: str
-    free: float
-    used: float
-    total: float
+    free: Decimal
+    used: Decimal
+    total: Decimal
 
 
 @dataclass
@@ -190,27 +191,48 @@ class Order:
     symbol: str
     side: OrderSide
     type: OrderType
-    amount: float
+    amount: Decimal
     status: OrderStatus
-    price: Optional[float] = None
-    filled: float = 0.0
-    remaining: float = 0.0
-    cost: float = 0.0
-    fee: float = 0.0
+    price: Optional[Decimal] = None
+    filled: Decimal = Decimal("0")
+    remaining: Decimal = Decimal("0")
+    cost: Decimal = Decimal("0")
+    fee: Decimal = Decimal("0")
     timestamp: Optional[datetime] = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Calculate derived fields."""
-        if self.remaining == 0.0:
+        if self.remaining == Decimal("0"):
             self.remaining = self.amount - self.filled
-        if self.cost == 0.0 and self.price and self.filled:
+        if self.cost == Decimal("0") and self.price and self.filled:
             self.cost = self.price * self.filled
 
     @property
     def is_filled(self) -> bool:
         """Check if order is fully filled."""
         return self.status == OrderStatus.CLOSED or self.filled >= self.amount
+
+
+@dataclass
+class Position:
+    """Open position data."""
+
+    symbol: str
+    side: OrderSide
+    size: Decimal
+    entry_price: Decimal
+    unrealized_pnl: Decimal = Decimal("0")
+    realized_pnl: Decimal = Decimal("0")
+    leverage: int = 1
+    liquidation_price: Optional[Decimal] = None
+    margin: Decimal = Decimal("0")
+    timestamp: Optional[datetime] = None
+
+    @property
+    def notional_value(self) -> Decimal:
+        """Calculate notional value of position."""
+        return abs(self.size) * self.entry_price
 
 
 # ============ Configuration ============
@@ -304,6 +326,18 @@ class ExchangeAdapter(ABC):
         """Fetch order status."""
         pass
 
+    @abstractmethod
+    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+        """Fetch open positions.
+
+        Args:
+            symbol: Optional symbol filter. If None, fetch all positions.
+
+        Returns:
+            List of open positions.
+        """
+        pass
+
 
 # ============ Binance Adapter ============
 
@@ -365,10 +399,10 @@ class BinanceAdapter(ExchangeAdapter):
             data = await self._exchange.fetch_ticker(symbol)
             return Ticker(
                 symbol=data["symbol"],
-                bid=float(data.get("bid", 0)),
-                ask=float(data.get("ask", 0)),
-                last=float(data.get("last", 0)),
-                volume=float(data.get("baseVolume", 0)),
+                bid=Decimal(str(data.get("bid", 0))),
+                ask=Decimal(str(data.get("ask", 0))),
+                last=Decimal(str(data.get("last", 0))),
+                volume=Decimal(str(data.get("baseVolume", 0))),
                 timestamp=datetime.fromtimestamp(
                     data["timestamp"] / 1000
                 ) if data.get("timestamp") else None,
@@ -443,9 +477,9 @@ class BinanceAdapter(ExchangeAdapter):
                 if isinstance(balance, dict) and "free" in balance:
                     result[currency] = Balance(
                         currency=currency,
-                        free=float(balance.get("free", 0)),
-                        used=float(balance.get("used", 0)),
-                        total=float(balance.get("total", 0)),
+                        free=Decimal(str(balance.get("free", 0))),
+                        used=Decimal(str(balance.get("used", 0))),
+                        total=Decimal(str(balance.get("total", 0))),
                     )
             return result
         except Exception as e:
@@ -543,11 +577,46 @@ class BinanceAdapter(ExchangeAdapter):
             symbol=data["symbol"],
             side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
             type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
-            price=float(data["price"]) if data.get("price") else None,
-            amount=float(data["amount"]),
+            price=Decimal(str(data["price"])) if data.get("price") else None,
+            amount=Decimal(str(data["amount"])),
             status=status_map.get(data["status"], OrderStatus.OPEN),
-            filled=float(data.get("filled", 0)),
+            filled=Decimal(str(data.get("filled", 0))),
         )
+
+    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+        """Fetch open positions from Binance.
+
+        Args:
+            symbol: Optional symbol filter
+
+        Returns:
+            List of open positions
+        """
+        try:
+            positions = await self._exchange.fetch_positions(symbols=[symbol] if symbol else None)
+            result = []
+            for pos in positions:
+                # Skip positions with zero size
+                size = Decimal(str(pos.get("contracts", 0) or pos.get("contractSize", 0) or 0))
+                if size == Decimal("0"):
+                    continue
+
+                side = OrderSide.BUY if pos.get("side") == "long" else OrderSide.SELL
+                result.append(Position(
+                    symbol=pos["symbol"],
+                    side=side,
+                    size=size,
+                    entry_price=Decimal(str(pos.get("entryPrice", 0) or 0)),
+                    unrealized_pnl=Decimal(str(pos.get("unrealizedPnl", 0) or 0)),
+                    realized_pnl=Decimal(str(pos.get("realizedPnl", 0) or 0)),
+                    leverage=int(pos.get("leverage", 1) or 1),
+                    liquidation_price=Decimal(str(pos.get("liquidationPrice"))) if pos.get("liquidationPrice") else None,
+                    margin=Decimal(str(pos.get("initialMargin", 0) or pos.get("margin", 0) or 0)),
+                    timestamp=datetime.fromtimestamp(pos["timestamp"] / 1000) if pos.get("timestamp") else None,
+                ))
+            return result
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch positions: {e}")
 
 
 # ============ OKX Adapter ============
@@ -603,10 +672,10 @@ class OKXAdapter(ExchangeAdapter):
             data = await self._exchange.fetch_ticker(symbol)
             return Ticker(
                 symbol=data["symbol"],
-                bid=float(data.get("bid", 0)),
-                ask=float(data.get("ask", 0)),
-                last=float(data.get("last", 0)),
-                volume=float(data.get("baseVolume", 0)),
+                bid=Decimal(str(data.get("bid", 0))),
+                ask=Decimal(str(data.get("ask", 0))),
+                last=Decimal(str(data.get("last", 0))),
+                volume=Decimal(str(data.get("baseVolume", 0))),
                 timestamp=datetime.fromtimestamp(
                     data["timestamp"] / 1000
                 ) if data.get("timestamp") else None,
@@ -660,9 +729,9 @@ class OKXAdapter(ExchangeAdapter):
                 if isinstance(balance, dict) and "free" in balance:
                     result[currency] = Balance(
                         currency=currency,
-                        free=float(balance.get("free", 0)),
-                        used=float(balance.get("used", 0)),
-                        total=float(balance.get("total", 0)),
+                        free=Decimal(str(balance.get("free", 0))),
+                        used=Decimal(str(balance.get("used", 0))),
+                        total=Decimal(str(balance.get("total", 0))),
                     )
             return result
         except Exception as e:
@@ -726,11 +795,46 @@ class OKXAdapter(ExchangeAdapter):
             symbol=data["symbol"],
             side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
             type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
-            price=float(data["price"]) if data.get("price") else None,
-            amount=float(data["amount"]),
+            price=Decimal(str(data["price"])) if data.get("price") else None,
+            amount=Decimal(str(data["amount"])),
             status=status_map.get(data["status"], OrderStatus.OPEN),
-            filled=float(data.get("filled", 0)),
+            filled=Decimal(str(data.get("filled", 0))),
         )
+
+    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+        """Fetch open positions from OKX.
+
+        Args:
+            symbol: Optional symbol filter
+
+        Returns:
+            List of open positions
+        """
+        try:
+            positions = await self._exchange.fetch_positions(symbols=[symbol] if symbol else None)
+            result = []
+            for pos in positions:
+                # Skip positions with zero size
+                size = Decimal(str(pos.get("contracts", 0) or pos.get("contractSize", 0) or 0))
+                if size == Decimal("0"):
+                    continue
+
+                side = OrderSide.BUY if pos.get("side") == "long" else OrderSide.SELL
+                result.append(Position(
+                    symbol=pos["symbol"],
+                    side=side,
+                    size=size,
+                    entry_price=Decimal(str(pos.get("entryPrice", 0) or 0)),
+                    unrealized_pnl=Decimal(str(pos.get("unrealizedPnl", 0) or 0)),
+                    realized_pnl=Decimal(str(pos.get("realizedPnl", 0) or 0)),
+                    leverage=int(pos.get("leverage", 1) or 1),
+                    liquidation_price=Decimal(str(pos.get("liquidationPrice"))) if pos.get("liquidationPrice") else None,
+                    margin=Decimal(str(pos.get("initialMargin", 0) or pos.get("margin", 0) or 0)),
+                    timestamp=datetime.fromtimestamp(pos["timestamp"] / 1000) if pos.get("timestamp") else None,
+                ))
+            return result
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch positions: {e}")
 
 
 # ============ Connection Manager ============

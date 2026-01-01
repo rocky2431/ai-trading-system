@@ -342,37 +342,33 @@ class PostgresCheckpointSaver(CheckpointSaver):
             "metadata": checkpoint.state.metadata,
         })
         metadata_json = json.dumps(checkpoint.metadata or {})
-        conn = await asyncpg.connect(self._conn_str)
-        try:
-            await conn.execute(
-                """
-                INSERT INTO agent_checkpoints (id, state_json, node, ts, metadata_json)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (id) DO UPDATE SET
-                    state_json = EXCLUDED.state_json,
-                    node = EXCLUDED.node,
-                    ts = EXCLUDED.ts,
-                    metadata_json = EXCLUDED.metadata_json;
-                """,
-                checkpoint.id,
-                state_json,
-                checkpoint.node,
-                checkpoint.timestamp,
-                metadata_json,
-            )
-        finally:
-            await conn.close()
+        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO agent_checkpoints (id, state_json, node, ts, metadata_json)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (id) DO UPDATE SET
+                        state_json = EXCLUDED.state_json,
+                        node = EXCLUDED.node,
+                        ts = EXCLUDED.ts,
+                        metadata_json = EXCLUDED.metadata_json;
+                    """,
+                    checkpoint.id,
+                    state_json,
+                    checkpoint.node,
+                    checkpoint.timestamp,
+                    metadata_json,
+                )
 
     async def load(self, checkpoint_id: str) -> Optional[Checkpoint]:
         await self._ensure_table()
-        conn = await asyncpg.connect(self._conn_str)
-        try:
-            row = await conn.fetchrow(
-                "SELECT state_json, node, ts, metadata_json FROM agent_checkpoints WHERE id=$1",
-                checkpoint_id,
-            )
-        finally:
-            await conn.close()
+        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT state_json, node, ts, metadata_json FROM agent_checkpoints WHERE id=$1",
+                    checkpoint_id,
+                )
 
         if not row:
             return None
@@ -396,13 +392,11 @@ class PostgresCheckpointSaver(CheckpointSaver):
 
     async def list(self) -> list[Checkpoint]:
         await self._ensure_table()
-        conn = await asyncpg.connect(self._conn_str)
-        try:
-            rows = await conn.fetch(
-                "SELECT id, state_json, node, ts, metadata_json FROM agent_checkpoints ORDER BY ts DESC"
-            )
-        finally:
-            await conn.close()
+        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id, state_json, node, ts, metadata_json FROM agent_checkpoints ORDER BY ts DESC"
+                )
 
         checkpoints: list[Checkpoint] = []
         for row in rows:
@@ -427,14 +421,12 @@ class PostgresCheckpointSaver(CheckpointSaver):
 
     async def delete(self, checkpoint_id: str) -> None:
         await self._ensure_table()
-        conn = await asyncpg.connect(self._conn_str)
-        try:
-            await conn.execute(
-                "DELETE FROM agent_checkpoints WHERE id=$1",
-                checkpoint_id,
-            )
-        finally:
-            await conn.close()
+        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM agent_checkpoints WHERE id=$1",
+                    checkpoint_id,
+                )
 
 
 # === Orchestrator Configuration ===

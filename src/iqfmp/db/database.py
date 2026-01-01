@@ -228,11 +228,11 @@ async def get_optional_redis() -> Optional[redis.Redis]:
 # Sync Database Session (for Celery tasks and sync code)
 # =============================================================================
 
-def _get_sync_engine() -> Engine:
-    """Get or create sync database engine."""
-    global _sync_engine
+def _get_sync_session_factory() -> sessionmaker[Session]:
+    """Get or create sync session factory (lazy initialization)."""
+    global _sync_engine, _sync_session_factory
 
-    if _sync_engine is None:
+    if _sync_session_factory is None:
         settings = get_settings()
         _sync_engine = create_engine(
             settings.sync_database_url,
@@ -240,42 +240,14 @@ def _get_sync_engine() -> Engine:
             pool_size=settings.DB_POOL_SIZE,
             max_overflow=settings.DB_MAX_OVERFLOW,
         )
-
-    return _sync_engine
-
-
-def _get_sync_session_factory() -> sessionmaker[Session]:
-    """Get or create sync session factory."""
-    global _sync_session_factory
-
-    if _sync_session_factory is None:
-        _sync_session_factory = sessionmaker(
-            bind=_get_sync_engine(),
-            autocommit=False,
-            autoflush=False,
-        )
+        _sync_session_factory = sessionmaker(bind=_sync_engine, autocommit=False, autoflush=False)
 
     return _sync_session_factory
 
 
 def get_db_session() -> Generator[Session, None, None]:
-    """Get sync database session (for Celery tasks and sync code).
-
-    Usage:
-        for session in get_db_session():
-            # use session
-            pass
-
-    Or as context manager:
-        session = next(get_db_session())
-        try:
-            # use session
-            session.commit()
-        finally:
-            session.close()
-    """
-    factory = _get_sync_session_factory()
-    session = factory()
+    """Generator for sync database session. Usage: `session = next(get_db_session())`"""
+    session = _get_sync_session_factory()()
     try:
         yield session
     finally:
@@ -284,15 +256,8 @@ def get_db_session() -> Generator[Session, None, None]:
 
 @contextmanager
 def sync_session() -> Generator[Session, None, None]:
-    """Context manager for sync database session.
-
-    Usage:
-        with sync_session() as session:
-            # use session
-            session.commit()
-    """
-    factory = _get_sync_session_factory()
-    session = factory()
+    """Context manager for sync session with auto-commit/rollback."""
+    session = _get_sync_session_factory()()
     try:
         yield session
         session.commit()

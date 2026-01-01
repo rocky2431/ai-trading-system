@@ -7,6 +7,9 @@ Provides multi-directional order execution:
 - TimeoutHandler: Order timeout management
 """
 
+import hashlib
+import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -20,6 +23,8 @@ from iqfmp.exchange.adapter import (
     OrderStatus,
     OrderType,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ==================== Enums ====================
@@ -145,28 +150,76 @@ class IdempotencyCacheEntry:
 
 
 class IdempotencyCache:
-    """Cache for preventing duplicate order execution.
+    """Redis-backed cache for preventing duplicate order execution.
 
     Uses client_order_id as the idempotency key.
-    Entries expire after ttl_seconds.
+    Entries expire after ttl_seconds via Redis TTL.
+    Falls back to in-memory cache if Redis is unavailable.
+
+    Critical state per CLAUDE.md: Must be persistent to survive service restarts.
     """
 
+    REDIS_KEY_PREFIX = "iqfmp:idempotency:"
+
     def __init__(self, ttl_seconds: int = 3600) -> None:
-        """Initialize cache.
+        """Initialize cache with Redis backend.
 
         Args:
             ttl_seconds: Time-to-live for cache entries (default: 1 hour)
         """
-        self._cache: dict[str, IdempotencyCacheEntry] = {}
+        self._ttl_seconds = ttl_seconds
         self._ttl = timedelta(seconds=ttl_seconds)
+        self._fallback_cache: dict[str, IdempotencyCacheEntry] = {}
+        self._redis = self._get_redis_client()
 
-    def _compute_hash(self, request: OrderRequest) -> str:
+    def _get_redis_client(self):
+        """Get Redis client, return None if unavailable."""
+        try:
+            from iqfmp.db import get_redis_client
+            return get_redis_client()
+        except Exception as e:
+            logger.warning(f"Redis unavailable for idempotency cache, using memory fallback: {e}")
+            return None
+
+    def _compute_hash(self, request: "OrderRequest") -> str:
         """Compute hash of request for validation."""
-        import hashlib
         key = f"{request.symbol}:{request.side.value}:{request.order_type.value}:{request.quantity}:{request.price}"
         return hashlib.md5(key.encode()).hexdigest()
 
-    def get(self, client_order_id: str, request: OrderRequest) -> Optional["ExecutionResult"]:
+    def _serialize_result(self, result: "ExecutionResult", request_hash: str) -> str:
+        """Serialize ExecutionResult to JSON for Redis storage."""
+        return json.dumps({
+            "success": result.success,
+            "status": result.status.value,
+            "order_id": result.order_id,
+            "filled_quantity": str(result.filled_quantity) if result.filled_quantity else None,
+            "remaining_quantity": str(result.remaining_quantity) if result.remaining_quantity else None,
+            "average_price": str(result.average_price) if result.average_price else None,
+            "commission": str(result.commission) if result.commission else None,
+            "error": result.error,
+            "action": result.action.value if result.action else None,
+            "timestamp": result.timestamp.isoformat(),
+            "request_hash": request_hash,
+        })
+
+    def _deserialize_result(self, data: str) -> tuple["ExecutionResult", str]:
+        """Deserialize JSON to ExecutionResult."""
+        obj = json.loads(data)
+        result = ExecutionResult(
+            success=obj["success"],
+            status=OrderStatus(obj["status"]),
+            order_id=obj.get("order_id"),
+            filled_quantity=Decimal(obj["filled_quantity"]) if obj.get("filled_quantity") else None,
+            remaining_quantity=Decimal(obj["remaining_quantity"]) if obj.get("remaining_quantity") else None,
+            average_price=Decimal(obj["average_price"]) if obj.get("average_price") else None,
+            commission=Decimal(obj["commission"]) if obj.get("commission") else None,
+            error=obj.get("error"),
+            action=OrderAction(obj["action"]) if obj.get("action") else None,
+            timestamp=datetime.fromisoformat(obj["timestamp"]),
+        )
+        return result, obj["request_hash"]
+
+    def get(self, client_order_id: str, request: "OrderRequest") -> Optional["ExecutionResult"]:
         """Get cached result if exists and not expired.
 
         Args:
@@ -176,23 +229,37 @@ class IdempotencyCache:
         Returns:
             Cached result or None
         """
-        if client_order_id not in self._cache:
+        request_hash = self._compute_hash(request)
+
+        # Try Redis first
+        if self._redis:
+            try:
+                key = f"{self.REDIS_KEY_PREFIX}{client_order_id}"
+                data = self._redis.get(key)
+                if data:
+                    result, stored_hash = self._deserialize_result(data)
+                    if stored_hash == request_hash:
+                        return result
+                    logger.warning(f"Idempotency hash mismatch for {client_order_id}")
+                return None
+            except Exception as e:
+                logger.warning(f"Redis get failed, trying fallback: {e}")
+
+        # Fallback to memory
+        if client_order_id not in self._fallback_cache:
             return None
 
-        entry = self._cache[client_order_id]
-
-        # Check expiry
+        entry = self._fallback_cache[client_order_id]
         if datetime.now() - entry.timestamp > self._ttl:
-            del self._cache[client_order_id]
+            del self._fallback_cache[client_order_id]
             return None
 
-        # Validate request hash matches (prevent different orders with same ID)
-        if entry.request_hash != self._compute_hash(request):
+        if entry.request_hash != request_hash:
             return None
 
         return entry.result
 
-    def set(self, client_order_id: str, request: OrderRequest, result: "ExecutionResult") -> None:
+    def set(self, client_order_id: str, request: "OrderRequest", result: "ExecutionResult") -> None:
         """Cache execution result.
 
         Args:
@@ -200,25 +267,41 @@ class IdempotencyCache:
             request: Original request
             result: Execution result
         """
-        self._cache[client_order_id] = IdempotencyCacheEntry(
+        request_hash = self._compute_hash(request)
+
+        # Try Redis first
+        if self._redis:
+            try:
+                key = f"{self.REDIS_KEY_PREFIX}{client_order_id}"
+                data = self._serialize_result(result, request_hash)
+                self._redis.setex(key, self._ttl_seconds, data)
+                logger.debug(f"Cached idempotency result in Redis: {client_order_id}")
+                return
+            except Exception as e:
+                logger.warning(f"Redis set failed, using fallback: {e}")
+
+        # Fallback to memory
+        self._fallback_cache[client_order_id] = IdempotencyCacheEntry(
             result=result,
             timestamp=datetime.now(),
-            request_hash=self._compute_hash(request),
+            request_hash=request_hash,
         )
 
     def cleanup_expired(self) -> int:
-        """Remove expired entries from cache.
+        """Remove expired entries from fallback cache.
+
+        Redis entries expire automatically via TTL.
 
         Returns:
-            Number of entries removed
+            Number of entries removed from fallback cache
         """
         now = datetime.now()
         expired = [
-            key for key, entry in self._cache.items()
+            key for key, entry in self._fallback_cache.items()
             if now - entry.timestamp > self._ttl
         ]
         for key in expired:
-            del self._cache[key]
+            del self._fallback_cache[key]
         return len(expired)
 
 

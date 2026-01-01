@@ -202,7 +202,21 @@ class Order:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Calculate derived fields."""
+        """Calculate derived fields and normalize types."""
+        # Convert float inputs to Decimal for consistency
+        if not isinstance(self.amount, Decimal):
+            self.amount = Decimal(str(self.amount))
+        if self.price is not None and not isinstance(self.price, Decimal):
+            self.price = Decimal(str(self.price))
+        if not isinstance(self.filled, Decimal):
+            self.filled = Decimal(str(self.filled))
+        if not isinstance(self.remaining, Decimal):
+            self.remaining = Decimal(str(self.remaining))
+        if not isinstance(self.cost, Decimal):
+            self.cost = Decimal(str(self.cost))
+        if not isinstance(self.fee, Decimal):
+            self.fee = Decimal(str(self.fee))
+
         if self.remaining == Decimal("0"):
             self.remaining = self.amount - self.filled
         if self.cost == Decimal("0") and self.price and self.filled:

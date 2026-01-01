@@ -231,7 +231,7 @@ class TestOrderExecutor:
 
         assert result.success is True
         assert result.order_id == "order_123"
-        assert result.filled_quantity == 0.1
+        assert result.filled_quantity == Decimal("0.1")
         mock_adapter.create_order.assert_called_once()
 
     @pytest.mark.asyncio
@@ -263,7 +263,7 @@ class TestOrderExecutor:
         result = await executor.execute(request)
 
         assert result.success is True
-        assert result.filled_quantity == 0.1
+        assert result.filled_quantity == Decimal("0.1")
 
     @pytest.mark.asyncio
     async def test_execute_limit_order(

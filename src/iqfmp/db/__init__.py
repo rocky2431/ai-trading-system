@@ -2,9 +2,11 @@
 
 from iqfmp.db.database import (
     get_async_session,
+    get_db_session,
     get_redis_client,
     init_db,
     close_db,
+    sync_session,
     DatabaseSettings,
 )
 from iqfmp.db.models import (
@@ -16,9 +18,11 @@ from iqfmp.db.models import (
 
 __all__ = [
     "get_async_session",
+    "get_db_session",
     "get_redis_client",
     "init_db",
     "close_db",
+    "sync_session",
     "DatabaseSettings",
     "FactorORM",
     "ResearchTrialORM",

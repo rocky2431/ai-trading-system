@@ -13,7 +13,7 @@ from sqlalchemy import Column, DateTime, Enum, String, Text, desc
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
-from iqfmp.api.database import Base, get_db_session
+from iqfmp.db import Base, get_db_session
 from iqfmp.api.rl.schemas import (
     RLBacktestRequest,
     RLModelInfo,

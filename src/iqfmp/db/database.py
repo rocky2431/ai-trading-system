@@ -1,18 +1,20 @@
 """Database connection and session management for TimescaleDB + Redis."""
 
 import os
-from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Optional
+from contextlib import asynccontextmanager, contextmanager
+from typing import AsyncGenerator, Generator, Optional
 
 import redis.asyncio as redis
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 
@@ -66,7 +68,9 @@ class DatabaseSettings(BaseSettings):
 # Global instances
 _settings: Optional[DatabaseSettings] = None
 _engine: Optional[AsyncEngine] = None
+_sync_engine: Optional[Engine] = None
 _session_factory: Optional[async_sessionmaker[AsyncSession]] = None
+_sync_session_factory: Optional[sessionmaker[Session]] = None
 _redis_client: Optional[redis.Redis] = None
 
 
@@ -218,3 +222,82 @@ async def get_optional_redis() -> Optional[redis.Redis]:
     except Exception as e:
         print(f"Warning: Redis unavailable, using no-cache mode: {e}")
         return None
+
+
+# =============================================================================
+# Sync Database Session (for Celery tasks and sync code)
+# =============================================================================
+
+def _get_sync_engine() -> Engine:
+    """Get or create sync database engine."""
+    global _sync_engine
+
+    if _sync_engine is None:
+        settings = get_settings()
+        _sync_engine = create_engine(
+            settings.sync_database_url,
+            echo=settings.DB_ECHO,
+            pool_size=settings.DB_POOL_SIZE,
+            max_overflow=settings.DB_MAX_OVERFLOW,
+        )
+
+    return _sync_engine
+
+
+def _get_sync_session_factory() -> sessionmaker[Session]:
+    """Get or create sync session factory."""
+    global _sync_session_factory
+
+    if _sync_session_factory is None:
+        _sync_session_factory = sessionmaker(
+            bind=_get_sync_engine(),
+            autocommit=False,
+            autoflush=False,
+        )
+
+    return _sync_session_factory
+
+
+def get_db_session() -> Generator[Session, None, None]:
+    """Get sync database session (for Celery tasks and sync code).
+
+    Usage:
+        for session in get_db_session():
+            # use session
+            pass
+
+    Or as context manager:
+        session = next(get_db_session())
+        try:
+            # use session
+            session.commit()
+        finally:
+            session.close()
+    """
+    factory = _get_sync_session_factory()
+    session = factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+@contextmanager
+def sync_session() -> Generator[Session, None, None]:
+    """Context manager for sync database session.
+
+    Usage:
+        with sync_session() as session:
+            # use session
+            session.commit()
+    """
+    factory = _get_sync_session_factory()
+    session = factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

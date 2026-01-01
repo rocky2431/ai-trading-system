@@ -20,7 +20,7 @@ from iqfmp.core.review import (
     ReviewRequest,
     ReviewStatus,
 )
-from iqfmp.db.base import Base
+from iqfmp.db import Base
 from iqfmp.api.system.websocket import (
     broadcast_review_request_created,
     broadcast_review_decision,
@@ -39,7 +39,7 @@ class ReviewRequestModel(Base):
     code = Column(Text, nullable=False)
     code_summary = Column(Text, nullable=False)
     factor_name = Column(String(255), nullable=False, index=True)
-    metadata = Column(JSON, default=dict)
+    extra_data = Column(JSON, default=dict)  # renamed from 'metadata' (SQLAlchemy reserved)
     priority = Column(Integer, default=0)
     status = Column(
         Enum(ReviewStatus, name="review_status_enum"),
@@ -114,7 +114,7 @@ class ReviewService:
             code=code,
             code_summary=code_summary,
             factor_name=factor_name,
-            metadata=metadata or {},
+            extra_data=metadata or {},
             priority=priority,
             status=ReviewStatus.PENDING,
             created_at=datetime.utcnow(),

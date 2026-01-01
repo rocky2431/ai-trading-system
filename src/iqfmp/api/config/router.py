@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter, Depends
 
+from iqfmp.api.auth.dependencies import get_current_user, require_role
+from iqfmp.api.auth.models import User, UserRole
 from iqfmp.api.config.schemas import (
     AgentConfigResponse,
     AvailableModelsResponse,
@@ -70,18 +72,20 @@ async def get_available_models(
 
 @router.get("/api-keys", response_model=SavedAPIKeysResponse)
 async def get_api_keys(
+    current_user: User = Depends(get_current_user),
     service: ConfigService = Depends(get_config_service),
 ) -> SavedAPIKeysResponse:
-    """Get saved API keys (masked)."""
+    """Get saved API keys (masked). Requires authentication."""
     return service.get_saved_api_keys()
 
 
 @router.post("/api-keys", response_model=SetAPIKeysResponse)
 async def set_api_keys(
     request: SetAPIKeysRequest,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
     service: ConfigService = Depends(get_config_service),
 ) -> SetAPIKeysResponse:
-    """Set API keys."""
+    """Set API keys. Requires ADMIN role."""
     return service.set_api_keys(
         provider=request.provider,
         api_key=request.api_key,
@@ -96,9 +100,10 @@ async def set_api_keys(
 @router.delete("/api-keys/{key_type}", response_model=SetAPIKeysResponse)
 async def delete_api_keys(
     key_type: str,
+    current_user: User = Depends(require_role(UserRole.ADMIN)),
     service: ConfigService = Depends(get_config_service),
 ) -> SetAPIKeysResponse:
-    """Delete API keys by type.
+    """Delete API keys by type. Requires ADMIN role.
 
     Args:
         key_type: "llm" to delete LLM-related keys, "exchange" for exchange keys

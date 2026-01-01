@@ -19,6 +19,8 @@ from iqfmp.exchange.adapter import (
 )
 from iqfmp.exchange.execution import (
     ExecutionResult,
+    IdempotencyCache,
+    IdempotencyCacheError,
     OrderAction,
     OrderDirection,
     OrderExecutionError,
@@ -851,6 +853,242 @@ class TestTimeoutHandler:
         handler.unregister("order_206")
 
         assert handler.has_timeout("order_206") is False
+
+
+# ==================== IdempotencyCache Tests ====================
+
+
+class TestIdempotencyCache:
+    """Test Redis-backed IdempotencyCache."""
+
+    @pytest.fixture
+    def mock_redis(self) -> MagicMock:
+        """Create mock Redis client."""
+        redis = MagicMock()
+        redis.get.return_value = None
+        redis.setex.return_value = True
+        redis.delete.return_value = 1
+        return redis
+
+    @pytest.fixture
+    def cache(self, mock_redis: MagicMock) -> IdempotencyCache:
+        """Create IdempotencyCache with mock Redis."""
+        return IdempotencyCache(ttl_seconds=3600, redis_client=mock_redis)
+
+    @pytest.fixture
+    def sample_request(self) -> OrderRequest:
+        """Create sample order request."""
+        return OrderRequest(
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("0.1"),
+            action=OrderAction.OPEN_LONG,
+            client_order_id="test-order-001",
+        )
+
+    @pytest.fixture
+    def sample_result(self) -> ExecutionResult:
+        """Create sample execution result."""
+        return ExecutionResult(
+            success=True,
+            status=OrderStatus.CLOSED,
+            order_id="exchange-order-123",
+            filled_quantity=Decimal("0.1"),
+            average_price=Decimal("50000.0"),
+            action=OrderAction.OPEN_LONG,
+        )
+
+    def test_init_with_injected_redis_client(self, mock_redis: MagicMock) -> None:
+        """Test initialization with injected Redis client (dependency injection)."""
+        cache = IdempotencyCache(ttl_seconds=1800, redis_client=mock_redis)
+        assert cache._redis == mock_redis
+        assert cache._ttl_seconds == 1800
+
+    def test_init_raises_when_redis_unavailable(self) -> None:
+        """Test initialization raises error when Redis is unavailable."""
+        with patch("iqfmp.exchange.execution.IdempotencyCache._get_redis_client") as mock_get:
+            mock_get.side_effect = IdempotencyCacheError("Redis unavailable")
+            with pytest.raises(IdempotencyCacheError) as exc_info:
+                IdempotencyCache(ttl_seconds=3600)
+            assert "Redis unavailable" in str(exc_info.value)
+
+    def test_get_returns_none_when_not_cached(
+        self, cache: IdempotencyCache, mock_redis: MagicMock, sample_request: OrderRequest
+    ) -> None:
+        """Test get() returns None when entry not found."""
+        mock_redis.get.return_value = None
+
+        result = cache.get("test-order-001", sample_request)
+
+        assert result is None
+        mock_redis.get.assert_called_once_with("iqfmp:idempotency:test-order-001")
+
+    def test_get_returns_cached_result(
+        self,
+        cache: IdempotencyCache,
+        mock_redis: MagicMock,
+        sample_request: OrderRequest,
+        sample_result: ExecutionResult,
+    ) -> None:
+        """Test get() returns cached result when found and hash matches."""
+        # Serialize the result as the cache would
+        request_hash = cache._compute_hash(sample_request)
+        cached_data = cache._serialize_result(sample_result, request_hash)
+        mock_redis.get.return_value = cached_data
+
+        result = cache.get("test-order-001", sample_request)
+
+        assert result is not None
+        assert result.success is True
+        assert result.order_id == "exchange-order-123"
+        assert result.filled_quantity == Decimal("0.1")
+
+    def test_get_returns_none_on_hash_mismatch(
+        self,
+        cache: IdempotencyCache,
+        mock_redis: MagicMock,
+        sample_request: OrderRequest,
+        sample_result: ExecutionResult,
+    ) -> None:
+        """Test get() returns None when hash doesn't match (different request)."""
+        # Serialize with a different hash
+        cached_data = cache._serialize_result(sample_result, "different-hash")
+        mock_redis.get.return_value = cached_data
+
+        result = cache.get("test-order-001", sample_request)
+
+        assert result is None
+
+    def test_get_raises_on_redis_error(
+        self, cache: IdempotencyCache, mock_redis: MagicMock, sample_request: OrderRequest
+    ) -> None:
+        """Test get() raises IdempotencyCacheError on Redis failure."""
+        mock_redis.get.side_effect = Exception("Redis connection error")
+
+        with pytest.raises(IdempotencyCacheError) as exc_info:
+            cache.get("test-order-001", sample_request)
+        assert "Redis get failed" in str(exc_info.value)
+
+    def test_get_returns_none_on_corrupted_data(
+        self, cache: IdempotencyCache, mock_redis: MagicMock, sample_request: OrderRequest
+    ) -> None:
+        """Test get() returns None on corrupted cached data (JSON decode error)."""
+        mock_redis.get.return_value = "not-valid-json{{"
+
+        result = cache.get("test-order-001", sample_request)
+
+        assert result is None
+
+    def test_set_stores_result_in_redis(
+        self,
+        cache: IdempotencyCache,
+        mock_redis: MagicMock,
+        sample_request: OrderRequest,
+        sample_result: ExecutionResult,
+    ) -> None:
+        """Test set() stores result in Redis with TTL."""
+        cache.set("test-order-001", sample_request, sample_result)
+
+        mock_redis.setex.assert_called_once()
+        call_args = mock_redis.setex.call_args
+        assert call_args[0][0] == "iqfmp:idempotency:test-order-001"
+        assert call_args[0][1] == 3600  # TTL
+        # Verify the data is valid JSON
+        import json
+        data = json.loads(call_args[0][2])
+        assert data["success"] is True
+        assert data["order_id"] == "exchange-order-123"
+
+    def test_set_raises_on_redis_error(
+        self,
+        cache: IdempotencyCache,
+        mock_redis: MagicMock,
+        sample_request: OrderRequest,
+        sample_result: ExecutionResult,
+    ) -> None:
+        """Test set() raises IdempotencyCacheError on Redis failure."""
+        mock_redis.setex.side_effect = Exception("Redis write error")
+
+        with pytest.raises(IdempotencyCacheError) as exc_info:
+            cache.set("test-order-001", sample_request, sample_result)
+        assert "Redis set failed" in str(exc_info.value)
+        assert "Critical state persistence required" in str(exc_info.value)
+
+    def test_delete_removes_cached_entry(
+        self, cache: IdempotencyCache, mock_redis: MagicMock
+    ) -> None:
+        """Test delete() removes cached entry from Redis."""
+        mock_redis.delete.return_value = 1
+
+        result = cache.delete("test-order-001")
+
+        assert result is True
+        mock_redis.delete.assert_called_once_with("iqfmp:idempotency:test-order-001")
+
+    def test_delete_returns_false_when_not_found(
+        self, cache: IdempotencyCache, mock_redis: MagicMock
+    ) -> None:
+        """Test delete() returns False when entry not found."""
+        mock_redis.delete.return_value = 0
+
+        result = cache.delete("nonexistent-order")
+
+        assert result is False
+
+    def test_delete_returns_false_on_redis_error(
+        self, cache: IdempotencyCache, mock_redis: MagicMock
+    ) -> None:
+        """Test delete() returns False on Redis error (logs warning)."""
+        mock_redis.delete.side_effect = Exception("Redis error")
+
+        result = cache.delete("test-order-001")
+
+        assert result is False
+
+    def test_round_trip_serialization(
+        self,
+        cache: IdempotencyCache,
+        sample_request: OrderRequest,
+        sample_result: ExecutionResult,
+    ) -> None:
+        """Test serialization/deserialization preserves all fields."""
+        request_hash = cache._compute_hash(sample_request)
+        serialized = cache._serialize_result(sample_result, request_hash)
+        deserialized, stored_hash = cache._deserialize_result(serialized)
+
+        assert stored_hash == request_hash
+        assert deserialized.success == sample_result.success
+        assert deserialized.status == sample_result.status
+        assert deserialized.order_id == sample_result.order_id
+        assert deserialized.filled_quantity == sample_result.filled_quantity
+        assert deserialized.average_price == sample_result.average_price
+        assert deserialized.action == sample_result.action
+
+    def test_compute_hash_is_deterministic(
+        self, cache: IdempotencyCache, sample_request: OrderRequest
+    ) -> None:
+        """Test _compute_hash produces consistent results."""
+        hash1 = cache._compute_hash(sample_request)
+        hash2 = cache._compute_hash(sample_request)
+        assert hash1 == hash2
+
+    def test_compute_hash_differs_for_different_requests(
+        self, cache: IdempotencyCache, sample_request: OrderRequest
+    ) -> None:
+        """Test _compute_hash produces different results for different requests."""
+        hash1 = cache._compute_hash(sample_request)
+
+        different_request = OrderRequest(
+            symbol="ETH/USDT",  # Different symbol
+            side=OrderSide.BUY,
+            order_type=OrderType.MARKET,
+            quantity=Decimal("0.1"),
+            action=OrderAction.OPEN_LONG,
+        )
+        hash2 = cache._compute_hash(different_request)
+
+        assert hash1 != hash2
 
 
 # ==================== Integration Tests ====================

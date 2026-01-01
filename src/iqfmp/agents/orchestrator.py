@@ -301,132 +301,87 @@ class MemorySaver(CheckpointSaver):
 
 
 class PostgresCheckpointSaver(CheckpointSaver):
-    """PostgreSQL-backed checkpoint storage.
+    """PostgreSQL-backed checkpoint storage with connection pooling."""
 
-    Uses asyncpg to persist AgentState snapshots. Intended for production
-    alignment with architecture要求的持久化 checkpoint。
-    """
+    _pool: Optional[asyncpg.Pool] = None
+    _pool_lock: asyncio.Lock = asyncio.Lock()
 
     def __init__(self, conn_str: str) -> None:
         self._conn_str = conn_str
-        self._initialized = False
-        self._init_lock = asyncio.Lock()
 
-    async def _ensure_table(self) -> None:
-        if self._initialized:
-            return
-        async with self._init_lock:
-            if self._initialized:
-                return
-            conn = await asyncpg.connect(self._conn_str)
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS agent_checkpoints (
-                    id TEXT PRIMARY KEY,
-                    state_json TEXT NOT NULL,
-                    node TEXT NOT NULL,
-                    ts DOUBLE PRECISION,
-                    metadata_json TEXT
-                );
-                """
-            )
-            await conn.close()
-            self._initialized = True
+    async def _get_pool(self) -> asyncpg.Pool:
+        """Get or create shared connection pool."""
+        if self._pool is None:
+            async with self._pool_lock:
+                if self._pool is None:
+                    self._pool = await asyncpg.create_pool(self._conn_str, min_size=1, max_size=5)
+                    async with self._pool.acquire() as conn:
+                        await conn.execute("""
+                            CREATE TABLE IF NOT EXISTS agent_checkpoints (
+                                id TEXT PRIMARY KEY,
+                                state_json TEXT NOT NULL,
+                                node TEXT NOT NULL,
+                                ts DOUBLE PRECISION,
+                                metadata_json TEXT
+                            )
+                        """)
+        return self._pool
 
-    async def save(self, checkpoint: Checkpoint) -> None:
-        await self._ensure_table()
-        state_json = json.dumps({
-            "messages": checkpoint.state.messages,
-            "context": checkpoint.state.context,
-            "current_node": checkpoint.state.current_node,
-            "metadata": checkpoint.state.metadata,
+    def _state_to_json(self, state: AgentState) -> str:
+        return json.dumps({
+            "messages": state.messages, "context": state.context,
+            "current_node": state.current_node, "metadata": state.metadata,
         })
-        metadata_json = json.dumps(checkpoint.metadata or {})
-        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    """
-                    INSERT INTO agent_checkpoints (id, state_json, node, ts, metadata_json)
-                    VALUES ($1, $2, $3, $4, $5)
-                    ON CONFLICT (id) DO UPDATE SET
-                        state_json = EXCLUDED.state_json,
-                        node = EXCLUDED.node,
-                        ts = EXCLUDED.ts,
-                        metadata_json = EXCLUDED.metadata_json;
-                    """,
-                    checkpoint.id,
-                    state_json,
-                    checkpoint.node,
-                    checkpoint.timestamp,
-                    metadata_json,
-                )
 
-    async def load(self, checkpoint_id: str) -> Optional[Checkpoint]:
-        await self._ensure_table()
-        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
-            async with pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT state_json, node, ts, metadata_json FROM agent_checkpoints WHERE id=$1",
-                    checkpoint_id,
-                )
-
-        if not row:
-            return None
-
-        state_payload = json.loads(row["state_json"])
-        state = AgentState(
-            messages=state_payload.get("messages", []),
-            context=state_payload.get("context", {}),
-            current_node=state_payload.get("current_node"),
-            metadata=state_payload.get("metadata", {}),
-        )
-        metadata = json.loads(row["metadata_json"] or "{}")
-
+    def _row_to_checkpoint(self, row: asyncpg.Record, checkpoint_id: Optional[str] = None) -> Checkpoint:
+        payload = json.loads(row["state_json"])
         return Checkpoint(
-            id=checkpoint_id,
-            state=state,
-            node=row["node"],
-            timestamp=row["ts"] or time.time(),
-            metadata=metadata,
-        )
-
-    async def list(self) -> list[Checkpoint]:
-        await self._ensure_table()
-        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
-            async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT id, state_json, node, ts, metadata_json FROM agent_checkpoints ORDER BY ts DESC"
-                )
-
-        checkpoints: list[Checkpoint] = []
-        for row in rows:
-            payload = json.loads(row["state_json"])
-            state = AgentState(
+            id=checkpoint_id or row["id"],
+            state=AgentState(
                 messages=payload.get("messages", []),
                 context=payload.get("context", {}),
                 current_node=payload.get("current_node"),
                 metadata=payload.get("metadata", {}),
+            ),
+            node=row["node"],
+            timestamp=row["ts"] or time.time(),
+            metadata=json.loads(row["metadata_json"] or "{}"),
+        )
+
+    async def save(self, checkpoint: Checkpoint) -> None:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO agent_checkpoints (id, state_json, node, ts, metadata_json)
+                   VALUES ($1, $2, $3, $4, $5)
+                   ON CONFLICT (id) DO UPDATE SET
+                       state_json = EXCLUDED.state_json, node = EXCLUDED.node,
+                       ts = EXCLUDED.ts, metadata_json = EXCLUDED.metadata_json""",
+                checkpoint.id, self._state_to_json(checkpoint.state),
+                checkpoint.node, checkpoint.timestamp, json.dumps(checkpoint.metadata or {}),
             )
-            metadata = json.loads(row["metadata_json"] or "{}")
-            checkpoints.append(
-                Checkpoint(
-                    id=row["id"],
-                    state=state,
-                    node=row["node"],
-                    timestamp=row["ts"] or time.time(),
-                    metadata=metadata,
-                )
+
+    async def load(self, checkpoint_id: str) -> Optional[Checkpoint]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT state_json, node, ts, metadata_json FROM agent_checkpoints WHERE id=$1",
+                checkpoint_id,
             )
-        return checkpoints
+        return self._row_to_checkpoint(row, checkpoint_id) if row else None
+
+    async def list(self) -> list[Checkpoint]:
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT id, state_json, node, ts, metadata_json FROM agent_checkpoints ORDER BY ts DESC"
+            )
+        return [self._row_to_checkpoint(row) for row in rows]
 
     async def delete(self, checkpoint_id: str) -> None:
-        await self._ensure_table()
-        async with asyncpg.create_pool(self._conn_str, min_size=1, max_size=1) as pool:
-            async with pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM agent_checkpoints WHERE id=$1",
-                    checkpoint_id,
-                )
+        pool = await self._get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM agent_checkpoints WHERE id=$1", checkpoint_id)
 
 
 # === Orchestrator Configuration ===

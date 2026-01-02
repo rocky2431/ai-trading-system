@@ -1,6 +1,7 @@
 """FastAPI application entry point."""
 
 import logging
+import os
 import time
 from collections import defaultdict
 from contextlib import asynccontextmanager
@@ -37,7 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Startup: Initialize ConfigService first to restore API keys from config
     from iqfmp.api.config.service import ConfigService
     config_service = ConfigService()  # This restores env vars from saved config
-    print(f"Config initialized from {config_service._config_file}")
+    logger.info(f"Config initialized from {config_service._config_file}")
 
     # M2 FIX: Initialize Qlib for factor evaluation
     try:
@@ -59,12 +60,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 # =============================================================================
 # P0 SECURITY: Rate Limiting Middleware
 # Prevents API abuse and DoS attacks per 8.2 API Security requirements
+# Uses Redis for distributed rate limiting across multiple instances
 # =============================================================================
 class RateLimitMiddleware(BaseHTTPMiddleware):
-    """Simple in-memory rate limiter.
+    """Redis-backed rate limiter with in-memory fallback.
 
-    For production, replace with Redis-based rate limiting.
+    Uses Redis sliding window counters for distributed rate limiting.
+    Falls back to in-memory limiting if Redis is unavailable.
     """
+
+    REDIS_PREFIX = "ratelimit:"
 
     def __init__(
         self,
@@ -75,8 +80,93 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.requests_per_minute = requests_per_minute
         self.requests_per_second = requests_per_second
+        # Fallback in-memory storage (used when Redis unavailable)
         self._minute_requests: dict[str, list[float]] = defaultdict(list)
         self._second_requests: dict[str, list[float]] = defaultdict(list)
+        self._redis_available: bool | None = None
+
+    async def _get_redis_client(self):
+        """Get Redis client, caching availability status."""
+        if self._redis_available is False:
+            return None
+        try:
+            from iqfmp.db.database import get_redis_client
+            client = get_redis_client()
+            await client.ping()
+            self._redis_available = True
+            return client
+        except Exception:
+            self._redis_available = False
+            logger.warning("Redis unavailable for rate limiting, using in-memory fallback")
+            return None
+
+    async def _check_rate_limit_redis(
+        self, client_ip: str, redis_client
+    ) -> tuple[bool, str, int]:
+        """Check rate limits using Redis sliding window.
+
+        Returns:
+            (is_limited, message, retry_after_seconds)
+        """
+        now = int(time.time())
+
+        # Per-second limit using Redis INCR with TTL
+        second_key = f"{self.REDIS_PREFIX}sec:{client_ip}:{now}"
+        try:
+            count = await redis_client.incr(second_key)
+            if count == 1:
+                await redis_client.expire(second_key, 2)  # Expire after 2 seconds
+            if count > self.requests_per_second:
+                return True, "Rate limit exceeded. Please slow down.", 1
+        except Exception as e:
+            logger.warning(f"Redis rate limit check failed (second): {e}")
+
+        # Per-minute limit using sorted set sliding window
+        minute_key = f"{self.REDIS_PREFIX}min:{client_ip}"
+        window_start = now - 60
+        try:
+            pipe = redis_client.pipeline()
+            # Remove old entries
+            pipe.zremrangebyscore(minute_key, 0, window_start)
+            # Add current request
+            pipe.zadd(minute_key, {str(now): now})
+            # Count requests in window
+            pipe.zcard(minute_key)
+            # Set expiry
+            pipe.expire(minute_key, 70)
+            results = await pipe.execute()
+            request_count = results[2]
+
+            if request_count > self.requests_per_minute:
+                return True, "Rate limit exceeded. Try again in a minute.", 60
+        except Exception as e:
+            logger.warning(f"Redis rate limit check failed (minute): {e}")
+
+        return False, "", 0
+
+    async def _check_rate_limit_memory(self, client_ip: str) -> tuple[bool, str, int]:
+        """Fallback in-memory rate limiting."""
+        now = time.time()
+
+        # Per-second limit
+        self._second_requests[client_ip] = [
+            t for t in self._second_requests[client_ip] if now - t < 1
+        ]
+        if len(self._second_requests[client_ip]) >= self.requests_per_second:
+            return True, "Rate limit exceeded. Please slow down.", 1
+
+        # Per-minute limit
+        self._minute_requests[client_ip] = [
+            t for t in self._minute_requests[client_ip] if now - t < 60
+        ]
+        if len(self._minute_requests[client_ip]) >= self.requests_per_minute:
+            return True, "Rate limit exceeded. Try again in a minute.", 60
+
+        # Record request
+        self._second_requests[client_ip].append(now)
+        self._minute_requests[client_ip].append(now)
+
+        return False, "", 0
 
     async def dispatch(self, request: Request, call_next):
         # Skip rate limiting for health check
@@ -84,37 +174,29 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # Get client IP (use X-Forwarded-For if behind proxy)
-        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
+        client_ip = request.headers.get(
+            "X-Forwarded-For", request.client.host if request.client else "unknown"
+        )
         if "," in client_ip:
             client_ip = client_ip.split(",")[0].strip()
 
-        now = time.time()
-
-        # Clean old entries and check per-second limit
-        self._second_requests[client_ip] = [
-            t for t in self._second_requests[client_ip] if now - t < 1
-        ]
-        if len(self._second_requests[client_ip]) >= self.requests_per_second:
-            return JSONResponse(
-                status_code=429,
-                content={"detail": "Rate limit exceeded. Please slow down."},
-                headers={"Retry-After": "1"},
+        # Try Redis first, fall back to in-memory
+        redis_client = await self._get_redis_client()
+        if redis_client:
+            is_limited, message, retry_after = await self._check_rate_limit_redis(
+                client_ip, redis_client
+            )
+        else:
+            is_limited, message, retry_after = await self._check_rate_limit_memory(
+                client_ip
             )
 
-        # Clean old entries and check per-minute limit
-        self._minute_requests[client_ip] = [
-            t for t in self._minute_requests[client_ip] if now - t < 60
-        ]
-        if len(self._minute_requests[client_ip]) >= self.requests_per_minute:
+        if is_limited:
             return JSONResponse(
                 status_code=429,
-                content={"detail": "Rate limit exceeded. Try again in a minute."},
-                headers={"Retry-After": "60"},
+                content={"detail": message},
+                headers={"Retry-After": str(retry_after)},
             )
-
-        # Record this request
-        self._second_requests[client_ip].append(now)
-        self._minute_requests[client_ip].append(now)
 
         response = await call_next(request)
         return response
@@ -132,13 +214,23 @@ def create_app() -> FastAPI:
         openapi_url="/openapi.json",
     )
 
-    # CORS middleware
+    # CORS middleware - configure via environment for security
+    # CORS_ORIGINS: comma-separated list of allowed origins
+    # Default: localhost development origins only
+    cors_origins_str = os.environ.get(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
+    )
+    cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
+
+    # In production, CORS_ORIGINS must be explicitly set to allowed domains
+    # Never use allow_origins=["*"] with allow_credentials=True (security vulnerability)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately in production
+        allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
     )
 
     # P0 SECURITY: Rate limiting middleware per 8.2 API Security

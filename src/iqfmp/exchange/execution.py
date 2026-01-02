@@ -508,9 +508,19 @@ class OrderExecutor:
                 status=order.status,
                 action=stop_request.action,
             )
-        except Exception:
-            # Log error but don't fail the main order
-            return None
+        except Exception as e:
+            order_type_name = "stop_loss" if is_stop_loss else "take_profit"
+            logger.error(
+                f"Failed to create {order_type_name} order for {request.symbol}: {e}. "
+                f"Parent order may be unprotected."
+            )
+            # Return failure result instead of silently failing
+            return ExecutionResult(
+                success=False,
+                error=f"Failed to create {order_type_name} order: {e}",
+                status=OrderStatus.REJECTED,
+                action=OrderAction.CLOSE_LONG if request.action == OrderAction.OPEN_LONG else OrderAction.CLOSE_SHORT,
+            )
 
     async def execute_with_stop_loss(
         self,
@@ -559,39 +569,122 @@ class OrderExecutor:
 # ==================== OrderManager ====================
 
 
-class OrderManager:
-    """Manage order lifecycle and tracking."""
+class OrderManagerError(OrderExecutionError):
+    """Raised when order manager operations fail."""
 
-    def __init__(self, adapter: ExchangeAdapter) -> None:
-        """Initialize order manager.
+    pass
+
+
+class OrderManager:
+    """Manage order lifecycle and tracking with Redis persistence.
+
+    Critical state per CLAUDE.md: Order tracking must be persistent to survive
+    service restarts. Uses Redis for persistence.
+    """
+
+    REDIS_KEY_PREFIX = "iqfmp:orders:"
+    REDIS_ACTIVE_KEY = "iqfmp:active_orders"
+
+    def __init__(self, adapter: ExchangeAdapter, redis_client: Any = None) -> None:
+        """Initialize order manager with Redis persistence.
 
         Args:
             adapter: Exchange adapter
+            redis_client: Optional Redis client for dependency injection (testing)
+
+        Raises:
+            OrderManagerError: If Redis is unavailable and no client injected
         """
         self._adapter = adapter
-        self._orders: dict[str, Order] = {}
-        self._active_orders: set[str] = set()
+        self._redis = redis_client if redis_client is not None else self._get_redis_client()
+
+    def _get_redis_client(self):
+        """Get Redis client. Raises if unavailable (critical state requires persistence)."""
+        try:
+            from iqfmp.db import get_redis_client
+            client = get_redis_client()
+            if client is None:
+                raise OrderManagerError(
+                    "Redis unavailable. Order tracking requires persistent storage "
+                    "per CLAUDE.md critical state rules."
+                )
+            return client
+        except OrderManagerError:
+            raise
+        except Exception as e:
+            raise OrderManagerError(
+                f"Failed to connect to Redis for order tracking: {e}"
+            ) from e
+
+    def _serialize_order(self, order: Order) -> str:
+        """Serialize Order to JSON for Redis storage."""
+        return json.dumps({
+            "id": order.id,
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "type": order.type.value,
+            "amount": str(order.amount),
+            "status": order.status.value,
+            "price": str(order.price) if order.price else None,
+            "filled": str(order.filled),
+            "remaining": str(order.remaining),
+            "cost": str(order.cost),
+            "fee": str(order.fee),
+            "timestamp": order.timestamp.isoformat() if order.timestamp else None,
+            "metadata": order.metadata,
+        })
+
+    def _deserialize_order(self, data: str) -> Order:
+        """Deserialize JSON to Order."""
+        obj = json.loads(data)
+        return Order(
+            id=obj["id"],
+            symbol=obj["symbol"],
+            side=OrderSide(obj["side"]),
+            type=OrderType(obj["type"]),
+            amount=Decimal(obj["amount"]),
+            status=OrderStatus(obj["status"]),
+            price=Decimal(obj["price"]) if obj.get("price") else None,
+            filled=Decimal(obj["filled"]),
+            remaining=Decimal(obj["remaining"]),
+            cost=Decimal(obj["cost"]),
+            fee=Decimal(obj["fee"]),
+            timestamp=datetime.fromisoformat(obj["timestamp"]) if obj.get("timestamp") else None,
+            metadata=obj.get("metadata", {}),
+        )
 
     @property
     def active_orders(self) -> set[str]:
-        """Get active order IDs."""
-        return self._active_orders.copy()
+        """Get active order IDs from Redis."""
+        try:
+            members = self._redis.smembers(self.REDIS_ACTIVE_KEY)
+            return set(members) if members else set()
+        except Exception as e:
+            logger.error(f"Failed to get active orders from Redis: {e}")
+            return set()
 
     def track(self, order: Order) -> None:
-        """Track an order.
+        """Track an order with Redis persistence.
 
         Args:
             order: Order to track
         """
-        self._orders[order.id] = order
+        try:
+            key = f"{self.REDIS_KEY_PREFIX}{order.id}"
+            self._redis.set(key, self._serialize_order(order))
 
-        if order.status in (OrderStatus.OPEN,):
-            self._active_orders.add(order.id)
-        else:
-            self._active_orders.discard(order.id)
+            if order.status == OrderStatus.OPEN:
+                self._redis.sadd(self.REDIS_ACTIVE_KEY, order.id)
+            else:
+                self._redis.srem(self.REDIS_ACTIVE_KEY, order.id)
+
+            logger.debug(f"Tracked order {order.id} with status {order.status.value}")
+        except Exception as e:
+            logger.error(f"Failed to track order {order.id} in Redis: {e}")
+            raise OrderManagerError(f"Failed to track order: {e}") from e
 
     def get_order(self, order_id: str) -> Optional[Order]:
-        """Get order by ID.
+        """Get order by ID from Redis.
 
         Args:
             order_id: Order ID
@@ -599,7 +692,18 @@ class OrderManager:
         Returns:
             Order or None
         """
-        return self._orders.get(order_id)
+        try:
+            key = f"{self.REDIS_KEY_PREFIX}{order_id}"
+            data = self._redis.get(key)
+            if data:
+                return self._deserialize_order(data)
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Corrupted order data for {order_id}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get order {order_id} from Redis: {e}")
+            return None
 
     async def update_status(self, order_id: str) -> Order:
         """Update order status from exchange.
@@ -609,8 +713,11 @@ class OrderManager:
 
         Returns:
             Updated order
+
+        Raises:
+            ValueError: If order not found
         """
-        order = self._orders.get(order_id)
+        order = self.get_order(order_id)
         if order is None:
             raise ValueError(f"Order {order_id} not found")
 
@@ -626,17 +733,22 @@ class OrderManager:
 
         Returns:
             Cancelled order
+
+        Raises:
+            ValueError: If order not found
         """
-        order = self._orders.get(order_id)
+        order = self.get_order(order_id)
         if order is None:
             raise ValueError(f"Order {order_id} not found")
 
-        cancelled = await self._adapter.cancel_order(order_id, order.symbol)
-        self.track(cancelled)
-        return cancelled
+        await self._adapter.cancel_order(order_id, order.symbol)
+        # Update order status
+        updated = await self._adapter.fetch_order(order_id, order.symbol)
+        self.track(updated)
+        return updated
 
     def get_orders_by_symbol(self, symbol: str) -> list[Order]:
-        """Get orders by symbol.
+        """Get orders by symbol from Redis.
 
         Args:
             symbol: Trading symbol
@@ -644,23 +756,63 @@ class OrderManager:
         Returns:
             List of orders
         """
-        return [o for o in self._orders.values() if o.symbol == symbol]
+        try:
+            # Scan for all order keys
+            cursor = 0
+            orders = []
+            while True:
+                cursor, keys = self._redis.scan(cursor, match=f"{self.REDIS_KEY_PREFIX}*", count=100)
+                for key in keys:
+                    data = self._redis.get(key)
+                    if data:
+                        try:
+                            order = self._deserialize_order(data)
+                            if order.symbol == symbol:
+                                orders.append(order)
+                        except Exception:
+                            continue
+                if cursor == 0:
+                    break
+            return orders
+        except Exception as e:
+            logger.error(f"Failed to get orders by symbol {symbol}: {e}")
+            return []
 
     def get_history(self, limit: int = 100) -> list[Order]:
-        """Get order history.
+        """Get order history from Redis.
 
         Args:
             limit: Maximum number of orders
 
         Returns:
-            List of orders
+            List of orders sorted by timestamp descending
         """
-        orders = sorted(
-            self._orders.values(),
-            key=lambda o: o.timestamp,
-            reverse=True,
-        )
-        return orders[:limit]
+        try:
+            # Scan for all order keys
+            cursor = 0
+            orders = []
+            while True:
+                cursor, keys = self._redis.scan(cursor, match=f"{self.REDIS_KEY_PREFIX}*", count=100)
+                for key in keys:
+                    data = self._redis.get(key)
+                    if data:
+                        try:
+                            order = self._deserialize_order(data)
+                            orders.append(order)
+                        except Exception:
+                            continue
+                if cursor == 0:
+                    break
+
+            # Sort by timestamp descending (None timestamps go last)
+            orders.sort(
+                key=lambda o: o.timestamp if o.timestamp else datetime.min,
+                reverse=True,
+            )
+            return orders[:limit]
+        except Exception as e:
+            logger.error(f"Failed to get order history: {e}")
+            return []
 
 
 # ==================== PartialFillHandler ====================
@@ -838,9 +990,11 @@ class TimeoutHandler:
         try:
             await self._adapter.cancel_order(order_id, symbol)
             self.unregister(order_id)
+            logger.info(f"Cancelled expired order {order_id} on {symbol}")
             return True
-        except Exception:
-            return False
+        except Exception as e:
+            logger.error(f"Failed to cancel expired order {order_id} on {symbol}: {e}")
+            raise OrderExecutionError(f"Failed to cancel expired order {order_id}: {e}") from e
 
     async def check_and_cancel_expired(self) -> list[str]:
         """Check all timeouts and cancel expired orders.
@@ -857,12 +1011,13 @@ class TimeoutHandler:
                     await self._adapter.cancel_order(order_id, symbol)
                     cancelled.append(order_id)
                     self.unregister(order_id)
+                    logger.info(f"Cancelled expired order {order_id}")
 
                     # Call callback if set
                     if timeout.callback:
                         timeout.callback(order_id)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.error(f"Failed to cancel expired order {order_id} on {symbol}: {e}")
 
         return cancelled
 
@@ -875,7 +1030,9 @@ __all__ = [
     "OrderAction",
     "OrderDirection",
     # Exceptions
+    "IdempotencyCacheError",
     "OrderExecutionError",
+    "OrderManagerError",
     # Models
     "ExecutionResult",
     "IdempotencyCacheEntry",

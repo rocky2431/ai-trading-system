@@ -123,11 +123,10 @@ export function useLiveTrading() {
         wsRef.current = new WebSocket(wsUrl)
 
         wsRef.current.onopen = () => {
-          console.log('Trading WebSocket connected')
+          // WebSocket connected
         }
 
         wsRef.current.onclose = () => {
-          console.log('Trading WebSocket disconnected')
           // Reconnect after 5 seconds
           reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000)
         }

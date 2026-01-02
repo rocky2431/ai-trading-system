@@ -8,7 +8,7 @@ import { api } from './client'
 
 // ============== Types ==============
 
-export type UserRole = 'admin' | 'user' | 'readonly'
+export type UserRole = 'admin' | 'user' | 'viewer'
 
 export interface UserResponse {
   id: string
@@ -44,29 +44,67 @@ export interface RefreshTokenRequest {
 const TOKEN_KEY = 'iqfmp_access_token'
 const REFRESH_TOKEN_KEY = 'iqfmp_refresh_token'
 
+// In-memory fallback for when localStorage is unavailable (private browsing, etc.)
+let memoryTokens: { access?: string; refresh?: string } = {}
+
+function safeGetItem(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    // localStorage unavailable (private browsing, security restrictions)
+    return key === TOKEN_KEY ? memoryTokens.access ?? null : memoryTokens.refresh ?? null
+  }
+}
+
+function safeSetItem(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // Fallback to memory storage
+    if (key === TOKEN_KEY) {
+      memoryTokens.access = value
+    } else if (key === REFRESH_TOKEN_KEY) {
+      memoryTokens.refresh = value
+    }
+  }
+}
+
+function safeRemoveItem(key: string): void {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // Clear from memory fallback
+  }
+  if (key === TOKEN_KEY) {
+    delete memoryTokens.access
+  } else if (key === REFRESH_TOKEN_KEY) {
+    delete memoryTokens.refresh
+  }
+}
+
 export const tokenStorage = {
   getAccessToken: (): string | null => {
-    return localStorage.getItem(TOKEN_KEY)
+    return safeGetItem(TOKEN_KEY)
   },
 
   getRefreshToken: (): string | null => {
-    return localStorage.getItem(REFRESH_TOKEN_KEY)
+    return safeGetItem(REFRESH_TOKEN_KEY)
   },
 
   setTokens: (accessToken: string, refreshToken?: string): void => {
-    localStorage.setItem(TOKEN_KEY, accessToken)
+    safeSetItem(TOKEN_KEY, accessToken)
     if (refreshToken) {
-      localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken)
+      safeSetItem(REFRESH_TOKEN_KEY, refreshToken)
     }
   },
 
   clearTokens: (): void => {
-    localStorage.removeItem(TOKEN_KEY)
-    localStorage.removeItem(REFRESH_TOKEN_KEY)
+    safeRemoveItem(TOKEN_KEY)
+    safeRemoveItem(REFRESH_TOKEN_KEY)
   },
 
   isAuthenticated: (): boolean => {
-    return !!localStorage.getItem(TOKEN_KEY)
+    return !!safeGetItem(TOKEN_KEY)
   },
 }
 

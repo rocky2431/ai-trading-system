@@ -2,7 +2,7 @@
  * Backtest Hooks - 策略和回测管理
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   backtestApi,
   type StrategyResponse,
@@ -126,17 +126,34 @@ export function useBacktests(params?: {
   const [error, setError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
+  // Track request ID to ignore stale responses
+  const requestIdRef = useRef(0)
+  const isMountedRef = useRef(true)
+
   const fetchBacktests = useCallback(async () => {
+    const currentRequestId = ++requestIdRef.current
+
     try {
       setLoading(true)
       setError(null)
       const response = await backtestApi.listBacktests(params)
+
+      // Ignore response if component unmounted or newer request started
+      if (!isMountedRef.current || currentRequestId !== requestIdRef.current) {
+        return
+      }
+
       setBacktests(response.backtests)
       setTotal(response.total)
     } catch (err) {
+      if (!isMountedRef.current || currentRequestId !== requestIdRef.current) {
+        return
+      }
       setError(err instanceof Error ? err.message : 'Failed to fetch backtests')
     } finally {
-      setLoading(false)
+      if (isMountedRef.current && currentRequestId === requestIdRef.current) {
+        setLoading(false)
+      }
     }
   }, [params?.strategy_id, params?.status, params?.page, params?.page_size])
 
@@ -182,6 +199,14 @@ export function useBacktests(params?: {
       return { success: false, message }
     }
   }, [fetchBacktests])
+
+  // Reset mounted ref on mount/unmount
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     fetchBacktests()

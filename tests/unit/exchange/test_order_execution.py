@@ -436,9 +436,61 @@ class TestOrderManager:
         return adapter
 
     @pytest.fixture
-    def manager(self, mock_adapter: MagicMock) -> OrderManager:
-        """Create order manager."""
-        return OrderManager(adapter=mock_adapter)
+    def mock_redis(self) -> MagicMock:
+        """Create mock Redis client for order persistence with in-memory storage."""
+        redis = MagicMock()
+        # In-memory storage to simulate Redis behavior
+        storage: dict[str, str] = {}
+        sets: dict[str, set] = {}
+
+        def mock_get(key: str):
+            return storage.get(key)
+
+        def mock_set(key: str, value: str, *args, **kwargs):
+            storage[key] = value
+            return True
+
+        def mock_delete(*keys: str):
+            for key in keys:
+                storage.pop(key, None)
+            return len(keys)
+
+        def mock_smembers(key: str):
+            return sets.get(key, set())
+
+        def mock_sadd(key: str, *values):
+            if key not in sets:
+                sets[key] = set()
+            sets[key].update(values)
+            return len(values)
+
+        def mock_srem(key: str, *values):
+            if key in sets:
+                for v in values:
+                    sets[key].discard(v)
+            return len(values)
+
+        def mock_scan(cursor: int, match: str = "*", count: int = 100):
+            # Simple scan that returns all matching keys
+            import fnmatch
+            pattern = match.replace("*", ".*")
+            matched = [k for k in storage.keys() if fnmatch.fnmatch(k, match)]
+            return (0, matched)
+
+        redis.get.side_effect = mock_get
+        redis.set.side_effect = mock_set
+        redis.delete.side_effect = mock_delete
+        redis.smembers.side_effect = mock_smembers
+        redis.sadd.side_effect = mock_sadd
+        redis.srem.side_effect = mock_srem
+        redis.scan.side_effect = mock_scan
+
+        return redis
+
+    @pytest.fixture
+    def manager(self, mock_adapter: MagicMock, mock_redis: MagicMock) -> OrderManager:
+        """Create order manager with mock Redis."""
+        return OrderManager(adapter=mock_adapter, redis_client=mock_redis)
 
     @pytest.mark.asyncio
     async def test_track_order(
@@ -533,18 +585,18 @@ class TestOrderManager:
         )
         manager.track(order)
 
-        mock_adapter.cancel_order = AsyncMock(
-            return_value=Order(
-                id="order_004",
-                symbol="BTC/USDT",
-                side=OrderSide.BUY,
-                type=OrderType.LIMIT,
-                amount=0.1,
-                filled=0.0,
-                status=OrderStatus.CANCELED,
-                timestamp=datetime.now(),
-            )
+        cancelled_order = Order(
+            id="order_004",
+            symbol="BTC/USDT",
+            side=OrderSide.BUY,
+            type=OrderType.LIMIT,
+            amount=0.1,
+            filled=0.0,
+            status=OrderStatus.CANCELED,
+            timestamp=datetime.now(),
         )
+        mock_adapter.cancel_order = AsyncMock(return_value=cancelled_order)
+        mock_adapter.fetch_order = AsyncMock(return_value=cancelled_order)
 
         cancelled = await manager.cancel("order_004")
 

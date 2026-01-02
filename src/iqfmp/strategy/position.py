@@ -2,7 +2,7 @@
 
 This module provides:
 - Position: Represents a trading position
-- PositionManager: Manages open/close positions
+- PositionManager: Manages open/close positions with Redis persistence
 - PositionSizer: Kelly/Fixed/RiskParity sizing
 - StopLoss: Price/Percent/Trailing/Time stops
 - TakeProfit: Fixed/Trailing take profits
@@ -10,13 +10,18 @@ This module provides:
 
 from __future__ import annotations
 
+import json
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Optional
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 class PositionSide(Enum):
@@ -46,55 +51,78 @@ class InsufficientFundsError(Exception):
     pass
 
 
+def _to_decimal(value: float | Decimal | str | None) -> Decimal | None:
+    """Convert value to Decimal for financial precision."""
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
 @dataclass
 class Position:
-    """Represents a trading position."""
+    """Represents a trading position.
+
+    Per CLAUDE.md: All financial data uses Decimal, not float.
+    """
 
     symbol: str
     side: PositionSide
-    entry_price: float
-    quantity: float
+    entry_price: Decimal
+    quantity: Decimal
     entry_time: Optional[datetime] = None
     status: PositionStatus = PositionStatus.OPEN
-    exit_price: Optional[float] = None
+    exit_price: Optional[Decimal] = None
     exit_time: Optional[datetime] = None
-    pnl: float = 0.0
+    pnl: Decimal = field(default_factory=lambda: Decimal("0"))
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Set default entry time if not provided."""
+        """Convert float inputs to Decimal and set default entry time."""
+        # Convert float inputs to Decimal for financial precision
+        self.entry_price = _to_decimal(self.entry_price) or Decimal("0")
+        self.quantity = _to_decimal(self.quantity) or Decimal("0")
+        self.exit_price = _to_decimal(self.exit_price)
+        if not isinstance(self.pnl, Decimal):
+            self.pnl = _to_decimal(self.pnl) or Decimal("0")
+
         if self.entry_time is None:
             self.entry_time = datetime.now()
 
-    def calculate_pnl(self, current_price: float) -> float:
+    def calculate_pnl(self, current_price: float | Decimal) -> Decimal:
         """Calculate unrealized P&L.
 
         Args:
             current_price: Current market price
 
         Returns:
-            Unrealized profit/loss
+            Unrealized profit/loss as Decimal
         """
+        price = _to_decimal(current_price) or Decimal("0")
         if self.side == PositionSide.LONG:
-            return (current_price - self.entry_price) * self.quantity
+            return (price - self.entry_price) * self.quantity
         else:  # SHORT
-            return (self.entry_price - current_price) * self.quantity
+            return (self.entry_price - price) * self.quantity
 
-    def calculate_return_pct(self, current_price: float) -> float:
+    def calculate_return_pct(self, current_price: float | Decimal) -> Decimal:
         """Calculate return percentage.
 
         Args:
             current_price: Current market price
 
         Returns:
-            Return as decimal (0.1 = 10%)
+            Return as Decimal (0.1 = 10%)
         """
+        price = _to_decimal(current_price) or Decimal("0")
+        if self.entry_price == Decimal("0"):
+            return Decimal("0")
         if self.side == PositionSide.LONG:
-            return (current_price - self.entry_price) / self.entry_price
+            return (price - self.entry_price) / self.entry_price
         else:  # SHORT
-            return (self.entry_price - current_price) / self.entry_price
+            return (self.entry_price - price) / self.entry_price
 
-    def close(self, exit_price: float) -> Position:
+    def close(self, exit_price: float | Decimal) -> Position:
         """Close the position.
 
         Args:
@@ -103,7 +131,7 @@ class Position:
         Returns:
             Self with updated status and P&L
         """
-        self.exit_price = exit_price
+        self.exit_price = _to_decimal(exit_price)
         self.exit_time = datetime.now()
         self.pnl = self.calculate_pnl(exit_price)
         self.status = PositionStatus.CLOSED
@@ -531,10 +559,19 @@ class TrailingTakeProfit(TakeProfit):
 class PositionConfig:
     """Configuration for position manager."""
 
-    initial_capital: float = 100000.0
+    initial_capital: Decimal = field(default_factory=lambda: Decimal("100000"))
     max_positions: int = 10
-    max_position_size: float = 0.1  # Max 10% per position
-    commission_rate: float = 0.001  # 0.1% commission
+    max_position_size: Decimal = field(default_factory=lambda: Decimal("0.1"))  # Max 10% per position
+    commission_rate: Decimal = field(default_factory=lambda: Decimal("0.001"))  # 0.1% commission
+
+    def __post_init__(self) -> None:
+        """Convert float inputs to Decimal."""
+        if not isinstance(self.initial_capital, Decimal):
+            self.initial_capital = _to_decimal(self.initial_capital) or Decimal("100000")
+        if not isinstance(self.max_position_size, Decimal):
+            self.max_position_size = _to_decimal(self.max_position_size) or Decimal("0.1")
+        if not isinstance(self.commission_rate, Decimal):
+            self.commission_rate = _to_decimal(self.commission_rate) or Decimal("0.001")
 
 
 @dataclass
@@ -542,33 +579,169 @@ class CloseResult:
     """Result of closing a position."""
 
     symbol: str
-    pnl: float
+    pnl: Decimal
     status: PositionStatus
     position: Position
 
 
-class PositionManager:
-    """Manages trading positions."""
+class PositionManagerError(Exception):
+    """Raised when position manager operations fail."""
 
-    def __init__(self, config: PositionConfig) -> None:
-        """Initialize position manager.
+    pass
+
+
+class PositionManager:
+    """Manages trading positions with Redis persistence.
+
+    Critical state per CLAUDE.md: Position data must be persistent to survive
+    service restarts. Uses Redis for persistence.
+    """
+
+    REDIS_KEY_PREFIX = "iqfmp:positions:"
+    REDIS_CLOSED_KEY = "iqfmp:closed_positions"
+    REDIS_CAPITAL_KEY = "iqfmp:position_capital"
+
+    def __init__(self, config: PositionConfig, redis_client: Any = None) -> None:
+        """Initialize position manager with Redis persistence.
 
         Args:
             config: Position manager configuration
+            redis_client: Optional Redis client for dependency injection (testing)
         """
         self.config = config
-        self.capital = config.initial_capital
-        self.positions: dict[str, Position] = {}
-        self.closed_positions: list[Position] = []
+        self._redis = redis_client if redis_client is not None else self._get_redis_client()
         self.stop_losses: list[StopLoss] = []
         self.take_profits: list[TakeProfit] = []
+
+        # Initialize capital from Redis or use config default
+        self._init_capital()
+
+    def _get_redis_client(self) -> Any:
+        """Get Redis client. Returns None if unavailable (graceful degradation)."""
+        try:
+            from iqfmp.db import get_redis_client
+            return get_redis_client()
+        except Exception as e:
+            logger.warning(f"Redis unavailable for position storage: {e}. Using in-memory fallback.")
+            return None
+
+    def _init_capital(self) -> None:
+        """Initialize capital from Redis or config default."""
+        if self._redis:
+            try:
+                stored_capital = self._redis.get(self.REDIS_CAPITAL_KEY)
+                if stored_capital:
+                    self.capital = Decimal(stored_capital)
+                    return
+            except Exception as e:
+                logger.warning(f"Failed to load capital from Redis: {e}")
+        self.capital: Decimal = self.config.initial_capital
+
+    def _save_capital(self) -> None:
+        """Save capital to Redis."""
+        if self._redis:
+            try:
+                self._redis.set(self.REDIS_CAPITAL_KEY, str(self.capital))
+            except Exception as e:
+                logger.warning(f"Failed to save capital to Redis: {e}")
+
+    def _serialize_position(self, position: Position) -> str:
+        """Serialize Position to JSON for Redis storage."""
+        return json.dumps({
+            "symbol": position.symbol,
+            "side": position.side.value,
+            "entry_price": str(position.entry_price),
+            "quantity": str(position.quantity),
+            "entry_time": position.entry_time.isoformat() if position.entry_time else None,
+            "status": position.status.value,
+            "exit_price": str(position.exit_price) if position.exit_price else None,
+            "exit_time": position.exit_time.isoformat() if position.exit_time else None,
+            "pnl": str(position.pnl),
+            "metadata": position.metadata,
+        })
+
+    def _deserialize_position(self, data: str) -> Position:
+        """Deserialize JSON to Position."""
+        obj = json.loads(data)
+        return Position(
+            symbol=obj["symbol"],
+            side=PositionSide(obj["side"]),
+            entry_price=obj["entry_price"],
+            quantity=obj["quantity"],
+            entry_time=datetime.fromisoformat(obj["entry_time"]) if obj.get("entry_time") else None,
+            status=PositionStatus(obj["status"]),
+            exit_price=obj.get("exit_price"),
+            exit_time=datetime.fromisoformat(obj["exit_time"]) if obj.get("exit_time") else None,
+            pnl=obj.get("pnl", 0.0),
+            metadata=obj.get("metadata", {}),
+        )
+
+    @property
+    def positions(self) -> dict[str, Position]:
+        """Get all open positions from Redis."""
+        positions = {}
+        if self._redis:
+            try:
+                cursor = 0
+                while True:
+                    cursor, keys = self._redis.scan(cursor, match=f"{self.REDIS_KEY_PREFIX}*", count=100)
+                    for key in keys:
+                        data = self._redis.get(key)
+                        if data:
+                            position = self._deserialize_position(data)
+                            if position.status == PositionStatus.OPEN:
+                                positions[position.symbol] = position
+                    if cursor == 0:
+                        break
+            except Exception as e:
+                logger.warning(f"Failed to load positions from Redis: {e}")
+        return positions
+
+    @property
+    def closed_positions(self) -> list[Position]:
+        """Get all closed positions from Redis."""
+        closed = []
+        if self._redis:
+            try:
+                data_list = self._redis.lrange(self.REDIS_CLOSED_KEY, 0, -1)
+                for data in data_list:
+                    closed.append(self._deserialize_position(data))
+            except Exception as e:
+                logger.warning(f"Failed to load closed positions from Redis: {e}")
+        return closed
+
+    def _save_position(self, position: Position) -> None:
+        """Save position to Redis."""
+        if self._redis:
+            try:
+                key = f"{self.REDIS_KEY_PREFIX}{position.symbol}"
+                self._redis.set(key, self._serialize_position(position))
+            except Exception as e:
+                logger.warning(f"Failed to save position {position.symbol}: {e}")
+
+    def _delete_position(self, symbol: str) -> None:
+        """Delete position from Redis."""
+        if self._redis:
+            try:
+                key = f"{self.REDIS_KEY_PREFIX}{symbol}"
+                self._redis.delete(key)
+            except Exception as e:
+                logger.warning(f"Failed to delete position {symbol}: {e}")
+
+    def _add_closed_position(self, position: Position) -> None:
+        """Add closed position to Redis list."""
+        if self._redis:
+            try:
+                self._redis.lpush(self.REDIS_CLOSED_KEY, self._serialize_position(position))
+            except Exception as e:
+                logger.warning(f"Failed to save closed position {position.symbol}: {e}")
 
     def open_position(
         self,
         symbol: str,
         side: PositionSide,
-        price: float,
-        quantity: float,
+        price: float | Decimal,
+        quantity: float | Decimal,
         **metadata: Any,
     ) -> Position:
         """Open a new position.
@@ -587,10 +760,14 @@ class PositionManager:
             InvalidPositionError: If position is invalid
             InsufficientFundsError: If insufficient funds
         """
+        # Convert to Decimal
+        price_dec = _to_decimal(price) or Decimal("0")
+        quantity_dec = _to_decimal(quantity) or Decimal("0")
+
         # Validate inputs
-        if quantity <= 0:
+        if quantity_dec <= Decimal("0"):
             raise InvalidPositionError("Quantity must be positive")
-        if price <= 0:
+        if price_dec <= Decimal("0"):
             raise InvalidPositionError("Price must be positive")
 
         # Check max positions
@@ -600,7 +777,7 @@ class PositionManager:
             )
 
         # Check funds
-        cost = price * quantity
+        cost = price_dec * quantity_dec
         if cost > self.capital:
             raise InsufficientFundsError(
                 f"Insufficient funds: need {cost}, have {self.capital}"
@@ -617,23 +794,25 @@ class PositionManager:
         position = Position(
             symbol=symbol,
             side=side,
-            entry_price=price,
-            quantity=quantity,
+            entry_price=price_dec,
+            quantity=quantity_dec,
             metadata=metadata,
         )
 
         # Deduct capital
         self.capital -= cost
+        self._save_capital()
 
-        # Store position
-        self.positions[symbol] = position
+        # Store position to Redis
+        self._save_position(position)
+        logger.info(f"Opened {side.value} position for {symbol}: qty={quantity}, price={price}")
 
         return position
 
     def close_position(
         self,
         symbol: str,
-        price: float,
+        price: float | Decimal,
     ) -> CloseResult:
         """Close an existing position.
 
@@ -656,10 +835,12 @@ class PositionManager:
         # Add back capital plus P&L
         cost = position.entry_price * position.quantity
         self.capital += cost + position.pnl
+        self._save_capital()
 
-        # Move to closed
-        self.closed_positions.append(position)
-        del self.positions[symbol]
+        # Move to closed in Redis
+        self._add_closed_position(position)
+        self._delete_position(symbol)
+        logger.info(f"Closed position for {symbol}: pnl={position.pnl}")
 
         return CloseResult(
             symbol=symbol,
@@ -697,7 +878,7 @@ class PositionManager:
 
     def check_stops(
         self,
-        prices: dict[str, float],
+        prices: dict[str, float | Decimal],
         current_time: Optional[datetime] = None,
     ) -> list[CloseResult]:
         """Check and trigger stop losses.
@@ -754,8 +935,9 @@ class PositionManager:
             side = PositionSide.LONG if signal > 0 else PositionSide.SHORT
 
             # Calculate quantity (simple fixed fraction)
-            position_value = self.capital * 0.01  # 1% per position
-            quantity = position_value / price
+            position_value = self.capital * Decimal("0.01")  # 1% per position
+            price_dec = _to_decimal(price) or Decimal("1")
+            quantity = position_value / price_dec
 
             try:
                 position = self.open_position(
@@ -772,23 +954,24 @@ class PositionManager:
 
     def get_portfolio_value(
         self,
-        prices: dict[str, float],
-    ) -> float:
+        prices: dict[str, float | Decimal],
+    ) -> Decimal:
         """Calculate total portfolio value.
 
         Args:
             prices: Current prices by symbol
 
         Returns:
-            Total portfolio value
+            Total portfolio value as Decimal
         """
         total = self.capital
 
         for symbol, position in self.positions.items():
-            price = prices.get(symbol, position.entry_price)
+            price = prices.get(symbol) or position.entry_price
+            price_dec = _to_decimal(price) if not isinstance(price, Decimal) else price
             # Add position value
             position_value = position.entry_price * position.quantity
-            unrealized_pnl = position.calculate_pnl(price)
+            unrealized_pnl = position.calculate_pnl(price_dec)
             total += position_value + unrealized_pnl
 
         return total

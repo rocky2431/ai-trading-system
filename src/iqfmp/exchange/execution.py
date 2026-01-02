@@ -769,7 +769,8 @@ class OrderManager:
                             order = self._deserialize_order(data)
                             if order.symbol == symbol:
                                 orders.append(order)
-                        except Exception:
+                        except Exception as e:
+                            logger.error(f"Failed to deserialize order from Redis key {key}: {e}")
                             continue
                 if cursor == 0:
                     break
@@ -799,7 +800,8 @@ class OrderManager:
                         try:
                             order = self._deserialize_order(data)
                             orders.append(order)
-                        except Exception:
+                        except Exception as e:
+                            logger.error(f"Failed to deserialize order from Redis key {key}: {e}")
                             continue
                 if cursor == 0:
                     break

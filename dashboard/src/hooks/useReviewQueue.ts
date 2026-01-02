@@ -192,8 +192,12 @@ export function useReviewQueue(): UseReviewQueueResult {
     }
   }, [refresh])
 
-  // WebSocket 连接管理
+  // WebSocket 连接管理 with exponential backoff
   useEffect(() => {
+    let retryCount = 0
+    const MAX_RETRIES = 5
+    const BASE_DELAY = 1000 // 1 second
+
     const connectWebSocket = () => {
       // 使用系统 WebSocket 端点
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -205,24 +209,27 @@ export function useReviewQueue(): UseReviewQueueResult {
 
         wsRef.current.onopen = () => {
           setWsConnected(true)
+          retryCount = 0 // Reset on successful connection
         }
 
         wsRef.current.onclose = () => {
           setWsConnected(false)
 
-          // 5秒后尝试重连
-          reconnectTimeoutRef.current = setTimeout(() => {
-            connectWebSocket()
-          }, 5000)
+          // Exponential backoff with max retries
+          if (retryCount < MAX_RETRIES) {
+            const delay = BASE_DELAY * Math.pow(2, retryCount)
+            retryCount++
+            reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay)
+          }
         }
 
-        wsRef.current.onerror = (error) => {
-          console.error('Review WebSocket error:', error)
+        wsRef.current.onerror = () => {
+          // Error handled in onclose
         }
 
         wsRef.current.onmessage = handleWebSocketMessage
-      } catch (err) {
-        console.error('Failed to connect WebSocket:', err)
+      } catch {
+        // Connection error - will be retried via onclose
       }
     }
 

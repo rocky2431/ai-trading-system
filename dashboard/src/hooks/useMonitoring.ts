@@ -4,7 +4,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react'
-import { systemApi } from '@/api'
+import { systemApi, factorsApi, pipelineApi } from '@/api'
 import type { SystemStatusResponse } from '@/api'
 
 // IQFMP 监控指标类型
@@ -130,41 +130,31 @@ export function useMonitoring(refreshInterval = 5000) {
       const response = await systemApi.getStatus()
       const baseMetrics = apiToMonitoringMetrics(response)
 
-      // 获取因子统计 (使用扩展的 /factors/stats API)
+      // 获取因子统计 (使用认证的 API 客户端)
       try {
-        const factorsResponse = await fetch(
-          `${import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}/factors/stats`
-        )
-        if (factorsResponse.ok) {
-          const factorStats = await factorsResponse.json()
-          baseMetrics.factors = {
-            totalGenerated: factorStats.total_factors || 0,
-            totalEvaluated: factorStats.evaluated_count || 0,
-            passRate: factorStats.pass_rate || 0,
-            avgIC: factorStats.avg_ic || 0,
-            avgSharpe: factorStats.avg_sharpe || 0,
-            pendingEvaluation: factorStats.pending_count || 0,
-          }
+        const factorStats = await factorsApi.stats()
+        baseMetrics.factors = {
+          totalGenerated: factorStats.total_factors || 0,
+          totalEvaluated: factorStats.evaluated_count || 0,
+          passRate: factorStats.pass_rate || 0,
+          avgIC: factorStats.avg_ic || 0,
+          avgSharpe: factorStats.avg_sharpe || 0,
+          pendingEvaluation: factorStats.pending_count || 0,
         }
       } catch {
         // 使用默认值
       }
 
-      // 尝试获取 RD Loop 状态
+      // 尝试获取 RD Loop 状态 (使用认证的 API 客户端)
       try {
-        const rdLoopResponse = await fetch(
-          `${import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'}/pipeline/rdloop/state`
-        )
-        if (rdLoopResponse.ok) {
-          const rdLoopState = await rdLoopResponse.json()
-          baseMetrics.rdLoop = {
-            isRunning: rdLoopState.is_running || false,
-            currentIteration: rdLoopState.iteration || 0,
-            totalIterations: 100,
-            coreFactorsCount: rdLoopState.core_factors_count || 0,
-            hypothesesTested: rdLoopState.total_hypotheses_tested || 0,
-            currentPhase: rdLoopState.phase || 'idle',
-          }
+        const rdLoopState = await pipelineApi.getRDLoopState()
+        baseMetrics.rdLoop = {
+          isRunning: rdLoopState.is_running || false,
+          currentIteration: rdLoopState.iteration || 0,
+          totalIterations: 100,
+          coreFactorsCount: rdLoopState.core_factors_count || 0,
+          hypothesesTested: rdLoopState.total_hypotheses_tested || 0,
+          currentPhase: rdLoopState.phase || 'idle',
         }
       } catch {
         // 使用默认值

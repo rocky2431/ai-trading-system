@@ -51,6 +51,12 @@ class InsufficientFundsError(Exception):
     pass
 
 
+class PositionStorageError(Exception):
+    """Raised when position storage (Redis) is unavailable."""
+
+    pass
+
+
 def _to_decimal(value: float | Decimal | str | None) -> Decimal | None:
     """Convert value to Decimal for financial precision."""
     if value is None:
@@ -617,13 +623,26 @@ class PositionManager:
         self._init_capital()
 
     def _get_redis_client(self) -> Any:
-        """Get Redis client. Returns None if unavailable (graceful degradation)."""
+        """Get Redis client. Raises PositionStorageError if unavailable.
+
+        Per CLAUDE.md: Critical state must be persisted to PostgreSQL/Redis.
+        Position data is critical state and requires persistent storage.
+        """
         try:
             from iqfmp.db import get_redis_client
-            return get_redis_client()
+            client = get_redis_client()
+            if client is None:
+                raise PositionStorageError(
+                    "Redis unavailable. Position data requires persistent storage "
+                    "per CLAUDE.md critical state rules."
+                )
+            return client
+        except PositionStorageError:
+            raise
         except Exception as e:
-            logger.warning(f"Redis unavailable for position storage: {e}. Using in-memory fallback.")
-            return None
+            raise PositionStorageError(
+                f"Failed to connect to Redis for position storage: {e}"
+            ) from e
 
     def _init_capital(self) -> None:
         """Initialize capital from Redis or config default."""

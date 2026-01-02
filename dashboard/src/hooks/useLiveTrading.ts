@@ -112,8 +112,12 @@ export function useLiveTrading() {
     return undefined
   }, [state.isConnected, fetchState])
 
-  // WebSocket connection
+  // WebSocket connection with exponential backoff
   useEffect(() => {
+    let retryCount = 0
+    const MAX_RETRIES = 5
+    const BASE_DELAY = 1000 // 1 second
+
     const connectWebSocket = () => {
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsHost = window.location.host
@@ -123,16 +127,21 @@ export function useLiveTrading() {
         wsRef.current = new WebSocket(wsUrl)
 
         wsRef.current.onopen = () => {
-          // WebSocket connected
+          // Reset retry count on successful connection
+          retryCount = 0
         }
 
         wsRef.current.onclose = () => {
-          // Reconnect after 5 seconds
-          reconnectTimeoutRef.current = setTimeout(connectWebSocket, 5000)
+          // Exponential backoff with max retries
+          if (retryCount < MAX_RETRIES) {
+            const delay = BASE_DELAY * Math.pow(2, retryCount)
+            retryCount++
+            reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay)
+          }
         }
 
-        wsRef.current.onerror = (error) => {
-          console.error('Trading WebSocket error:', error)
+        wsRef.current.onerror = () => {
+          // Error handled in onclose
         }
 
         wsRef.current.onmessage = (event) => {

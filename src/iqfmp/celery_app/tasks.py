@@ -740,13 +740,14 @@ def emergency_close_task(
                 f"<b>任务ID</b>: {task_id}"
             )
             return await notifier._send_message(message)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to send emergency close notification: {e}")
             return False
 
     try:
         asyncio.run(_send_result_notification())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to run emergency close notification task: {e}")
 
     logger.warning(f"Emergency close completed: success={success_count}, failed={failed_count}, skipped={skipped_count}")
 

@@ -104,7 +104,8 @@ class LLMTraceStore:
             key = f"{self.REDIS_PREFIX}{record.execution_id}"
             await redis.rpush(key, record.to_json())
             await redis.expire(key, self.DEFAULT_TTL_SECONDS)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to record LLM trace to Redis: execution_id={record.execution_id}, error={e}")
             return
 
     async def _list_redis(self, execution_id: str) -> list[LLMTraceRecord]:
@@ -121,7 +122,8 @@ class LLMTraceStore:
                 if isinstance(item, str):
                     records.append(LLMTraceRecord.from_json(item))
             return records
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to list LLM traces from Redis for execution_id={execution_id}: {e}")
             return []
 
     async def _record_postgres(self, record: LLMTraceRecord) -> None:
@@ -144,7 +146,8 @@ class LLMTraceStore:
                     )
                 )
                 await session.commit()
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to record LLM trace to PostgreSQL: execution_id={record.execution_id}, error={e}")
             return
 
     async def _list_postgres(self, execution_id: str) -> list[LLMTraceRecord]:
@@ -156,7 +159,8 @@ class LLMTraceStore:
                     .order_by(LLMTraceORM.id)
                 )
                 rows = result.scalars().all()
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to list LLM traces from PostgreSQL for execution_id={execution_id}: {e}")
             return []
 
         records: list[LLMTraceRecord] = []

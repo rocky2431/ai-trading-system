@@ -728,7 +728,6 @@ class FactorGenerationAgent:
                 from iqfmp.vector import (
                     FactorVectorStore,
                     QdrantConfig,
-                    QdrantUnavailableError,
                     SimilaritySearcher,
                 )
 
@@ -789,7 +788,7 @@ class FactorGenerationAgent:
     def _check_duplicate_factor(
         self,
         user_request: str,
-        factor_family: FactorFamily | None = None,
+        _factor_family: FactorFamily | None = None,
     ) -> Optional["GeneratedFactor"]:
         """Check if a similar factor already exists in vector store.
 
@@ -799,7 +798,7 @@ class FactorGenerationAgent:
 
         Args:
             user_request: Natural language description of the factor
-            factor_family: Optional factor family constraint
+            _factor_family: Reserved for future family-based filtering
 
         Returns:
             GeneratedFactor if duplicate found, None otherwise

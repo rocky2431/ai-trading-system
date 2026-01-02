@@ -1,5 +1,7 @@
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { DashboardLayout } from '@/layouts/DashboardLayout'
+import { ProtectedRoute } from '@/components/ProtectedRoute'
+import { LoginPage } from '@/pages/LoginPage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { AgentMonitorPage } from '@/pages/AgentMonitorPage'
 import { MonitoringPage } from '@/pages/MonitoringPage'
@@ -22,7 +24,18 @@ function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/" element={<DashboardLayout />}>
+        {/* Public route - Login */}
+        <Route path="/login" element={<LoginPage />} />
+
+        {/* Protected routes */}
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <DashboardLayout />
+            </ProtectedRoute>
+          }
+        >
           <Route index element={<DashboardPage />} />
           <Route path="monitoring" element={<MonitoringPage />} />
           <Route path="agents" element={<AgentMonitorPage />} />

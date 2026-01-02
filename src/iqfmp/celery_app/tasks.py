@@ -104,7 +104,11 @@ def backtest_task(
         }
 
     except Exception as e:
-        logger.error(f"Backtest task {task_id} failed: {e}")
+        import traceback
+        logger.error(f"Backtest task {task_id} failed: {e}\n{traceback.format_exc()}")
+        # Check if this might be a transient error worth retrying
+        if isinstance(e, (ConnectionError, TimeoutError, OSError)):
+            raise self.retry(exc=e)
         return {
             "task_id": task_id,
             "strategy_id": strategy_id,
@@ -177,7 +181,11 @@ def evaluate_factor_task(
         raise self.retry(exc=e)
 
     except Exception as e:
-        logger.error(f"Factor evaluation task {task_id} failed: {e}")
+        import traceback
+        logger.error(f"Factor evaluation task {task_id} failed: {e}\n{traceback.format_exc()}")
+        # Check if this might be a transient error worth retrying
+        if isinstance(e, (ConnectionError, TimeoutError, OSError)):
+            raise self.retry(exc=e)
         return {
             "task_id": task_id,
             "factor_id": factor_id,
@@ -241,7 +249,11 @@ def generate_factor_task(
         }
 
     except Exception as e:
-        logger.error(f"Factor generation task {task_id} failed: {e}")
+        import traceback
+        logger.error(f"Factor generation task {task_id} failed: {e}\n{traceback.format_exc()}")
+        # Check if this might be a transient error worth retrying
+        if isinstance(e, (ConnectionError, TimeoutError, OSError)):
+            raise self.retry(exc=e)
         return {
             "task_id": task_id,
             "status": "failed",
@@ -1447,7 +1459,11 @@ def mining_task(
         }
 
     except Exception as e:
-        logger.error(f"Mining task {task_id} failed: {e}")
+        import traceback
+        logger.error(f"Mining task {task_id} failed: {e}\n{traceback.format_exc()}")
+        # Check if this might be a transient error worth retrying
+        if isinstance(e, (ConnectionError, TimeoutError, OSError)):
+            raise self.retry(exc=e)
         return {
             "task_id": task_id,
             "celery_task_id": celery_task_id,

@@ -40,7 +40,12 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   }
 
   // Get auth token if available (direct localStorage access to avoid circular import)
-  const token = localStorage.getItem(TOKEN_KEY)
+  let token: string | null = null
+  try {
+    token = localStorage.getItem(TOKEN_KEY)
+  } catch {
+    // localStorage unavailable (private browsing, security restrictions)
+  }
 
   const response = await fetch(url, {
     ...fetchOptions,

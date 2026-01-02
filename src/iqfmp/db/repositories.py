@@ -1,6 +1,7 @@
 """Repository layer for database operations."""
 
 import json
+import logging
 from datetime import datetime
 from typing import Optional
 
@@ -17,6 +18,8 @@ from iqfmp.db.models import (
     MiningTaskORM,
 )
 from iqfmp.models.factor import Factor, FactorMetrics, FactorStatus, StabilityReport
+
+logger = logging.getLogger(__name__)
 
 
 class FactorRepository:
@@ -40,8 +43,8 @@ class FactorRepository:
             data = await self.redis.get(f"{self.CACHE_PREFIX}{factor_id}")
             if data:
                 return json.loads(data)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Redis cache get failed for factor {factor_id}: {e}")
         return None
 
     async def _set_cache(self, factor_id: str, data: dict) -> None:
@@ -54,8 +57,8 @@ class FactorRepository:
                 self.CACHE_TTL,
                 json.dumps(data, default=str),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Redis cache set failed for factor {factor_id}: {e}")
 
     async def _invalidate_cache(self, factor_id: str) -> None:
         """Invalidate factor cache."""
@@ -63,8 +66,8 @@ class FactorRepository:
             return
         try:
             await self.redis.delete(f"{self.CACHE_PREFIX}{factor_id}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Redis cache invalidate failed for factor {factor_id}: {e}")
 
     # ==================== CRUD Operations ====================
 
@@ -432,8 +435,8 @@ class StrategyRepository:
             data = await self.redis.get(f"{self.CACHE_PREFIX}{strategy_id}")
             if data:
                 return json.loads(data)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Redis cache get failed for strategy {strategy_id}: {e}")
         return None
 
     async def _set_cache(self, strategy_id: str, data: dict) -> None:
@@ -446,8 +449,8 @@ class StrategyRepository:
                 self.CACHE_TTL,
                 json.dumps(data, default=str),
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Redis cache set failed for strategy {strategy_id}: {e}")
 
     async def _invalidate_cache(self, strategy_id: str) -> None:
         """Invalidate strategy cache."""
@@ -455,8 +458,8 @@ class StrategyRepository:
             return
         try:
             await self.redis.delete(f"{self.CACHE_PREFIX}{strategy_id}")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Redis cache invalidate failed for strategy {strategy_id}: {e}")
 
     async def create(
         self,
@@ -890,8 +893,8 @@ class MiningTaskRepository:
                 cached = await self.redis.get(f"{self.CACHE_PREFIX}{task_id}")
                 if cached:
                     return json.loads(cached)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Redis cache get failed for mining task {task_id}: {e}")
 
         # Query database
         result = await self.session.execute(

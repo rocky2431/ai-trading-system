@@ -324,10 +324,23 @@ class ExchangeAdapter(ABC):
         symbol: str,
         side: OrderSide,
         order_type: OrderType,
-        amount: float,
-        price: Optional[float] = None,
+        amount: Decimal,
+        price: Optional[Decimal] = None,
+        **kwargs: Any,
     ) -> Order:
-        """Create an order."""
+        """Create an order.
+
+        Args:
+            symbol: Trading pair symbol
+            side: Order side (buy/sell)
+            order_type: Order type (limit/market/stop)
+            amount: Order amount (Decimal for financial precision)
+            price: Limit price (Decimal for financial precision)
+            **kwargs: Additional order parameters (reduceOnly, postOnly, etc.)
+
+        Returns:
+            Created order
+        """
         pass
 
     @abstractmethod
@@ -504,8 +517,9 @@ class BinanceAdapter(ExchangeAdapter):
         symbol: str,
         side: OrderSide,
         order_type: OrderType,
-        amount: float,
-        price: Optional[float] = None,
+        amount: Decimal,
+        price: Optional[Decimal] = None,
+        **kwargs: Any,
     ) -> Order:
         """Create order on Binance.
 
@@ -513,19 +527,28 @@ class BinanceAdapter(ExchangeAdapter):
             symbol: Trading pair
             side: Buy or sell
             order_type: Order type
-            amount: Order amount
-            price: Limit price (optional)
+            amount: Order amount (Decimal for financial precision)
+            price: Limit price (Decimal for financial precision)
+            **kwargs: Additional order parameters
 
         Returns:
             Created order
         """
         try:
+            # Convert Decimal to float for ccxt (ccxt uses float internally)
+            params = {}
+            if kwargs.get("reduceOnly"):
+                params["reduceOnly"] = True
+            if kwargs.get("postOnly"):
+                params["postOnly"] = True
+
             data = await self._exchange.create_order(
                 symbol=symbol,
                 type=order_type.value,
                 side=side.value,
-                amount=amount,
-                price=price,
+                amount=float(amount),
+                price=float(price) if price else None,
+                params=params,
             )
             return self._parse_order(data)
         except Exception as e:
@@ -756,17 +779,38 @@ class OKXAdapter(ExchangeAdapter):
         symbol: str,
         side: OrderSide,
         order_type: OrderType,
-        amount: float,
-        price: Optional[float] = None,
+        amount: Decimal,
+        price: Optional[Decimal] = None,
+        **kwargs: Any,
     ) -> Order:
-        """Create order on OKX."""
+        """Create order on OKX.
+
+        Args:
+            symbol: Trading pair
+            side: Buy or sell
+            order_type: Order type
+            amount: Order amount (Decimal for financial precision)
+            price: Limit price (Decimal for financial precision)
+            **kwargs: Additional order parameters
+
+        Returns:
+            Created order
+        """
         try:
+            # Convert Decimal to float for ccxt (ccxt uses float internally)
+            params = {}
+            if kwargs.get("reduceOnly"):
+                params["reduceOnly"] = True
+            if kwargs.get("postOnly"):
+                params["postOnly"] = True
+
             data = await self._exchange.create_order(
                 symbol=symbol,
                 type=order_type.value,
                 side=side.value,
-                amount=amount,
-                price=price,
+                amount=float(amount),
+                price=float(price) if price else None,
+                params=params,
             )
             return self._parse_order(data)
         except Exception as e:

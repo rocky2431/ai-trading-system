@@ -1,5 +1,6 @@
 """Database connection and session management for TimescaleDB + Redis."""
 
+import logging
 import os
 from contextlib import asynccontextmanager, contextmanager
 from typing import AsyncGenerator, Generator, Optional
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseSettings(BaseSettings):
@@ -124,15 +127,15 @@ async def init_db() -> None:
     try:
         async with _engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
-        print(f"Connected to TimescaleDB: {settings.PGHOST}:{settings.PGPORT}/{settings.PGDATABASE}")
+        logger.info(f"Connected to TimescaleDB: {settings.PGHOST}:{settings.PGPORT}/{settings.PGDATABASE}")
     except Exception as e:
-        print(f"Warning: Failed to connect to TimescaleDB: {e}")
+        logger.error(f"Failed to connect to TimescaleDB: {e}")
 
     try:
         await _redis_client.ping()
-        print(f"Connected to Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+        logger.info(f"Connected to Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
     except Exception as e:
-        print(f"Warning: Failed to connect to Redis: {e}")
+        logger.error(f"Failed to connect to Redis: {e}")
 
 
 async def close_db() -> None:
@@ -206,7 +209,7 @@ async def get_optional_db() -> AsyncGenerator[AsyncSession | None, None]:
         async with get_async_session() as session:
             yield session
     except Exception as e:
-        print(f"Warning: Database unavailable, using in-memory fallback: {e}")
+        logger.warning(f"Database unavailable, using in-memory fallback: {e}")
         yield None
 
 
@@ -220,7 +223,7 @@ async def get_optional_redis() -> Optional[redis.Redis]:
         await client.ping()
         return client
     except Exception as e:
-        print(f"Warning: Redis unavailable, using no-cache mode: {e}")
+        logger.warning(f"Redis unavailable, using no-cache mode: {e}")
         return None
 
 

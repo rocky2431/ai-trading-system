@@ -21,9 +21,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional, Protocol
+
+logger = logging.getLogger(__name__)
 
 import redis.asyncio as aioredis
 from sqlalchemy import select, delete, func, update
@@ -230,9 +233,9 @@ class PromptCache:
                 self._session_hits += 1
                 self._l1_hits += 1
                 return cached_value
-        except Exception:
+        except Exception as e:
             # Redis unavailable, continue to L2
-            pass
+            logger.warning(f"L1 Redis cache get failed for key {key[:8]}...: {e}")
 
         # L2: Check PostgreSQL
         try:
@@ -257,14 +260,14 @@ class PromptCache:
                     try:
                         redis_client = get_redis_client()
                         await redis_client.setex(redis_key, self.redis_ttl, row)
-                    except Exception:
-                        pass  # Redis unavailable, skip promotion
+                    except Exception as e:
+                        logger.warning(f"Failed to promote cache entry to L1 Redis: {e}")
 
                     self._session_hits += 1
                     self._l2_hits += 1
                     return row
-        except Exception:
-            pass  # Database unavailable
+        except Exception as e:
+            logger.warning(f"L2 PostgreSQL cache get failed for key {key[:8]}...: {e}")
 
         self._session_misses += 1
         return None
@@ -297,8 +300,8 @@ class PromptCache:
         try:
             redis_client = get_redis_client()
             await redis_client.setex(redis_key, self.redis_ttl, response)
-        except Exception:
-            pass  # Redis unavailable
+        except Exception as e:
+            logger.warning(f"L1 Redis cache set failed for key {key[:8]}...: {e}")
 
         # L2: Write to PostgreSQL
         try:
@@ -318,8 +321,8 @@ class PromptCache:
                         tokens_saved=tokens_saved,
                     )
                     session.add(entry)
-        except Exception:
-            pass  # Database unavailable
+        except Exception as e:
+            logger.warning(f"L2 PostgreSQL cache set failed for key {key[:8]}...: {e}")
 
     async def get_stats(self) -> PromptCacheStats:
         """Get cache statistics.
@@ -344,8 +347,8 @@ class PromptCache:
                 total_entries = row[0] or 0
                 total_tokens_saved = row[1] or 0
                 total_hits = row[2] or 0
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to get cache stats from PostgreSQL: {e}")
 
         # Calculate session hit rate
         total_requests = self._session_hits + self._session_misses
@@ -415,8 +418,8 @@ class PromptCache:
                 )
                 after_count = result.scalar() or 0
                 removed = before_count - after_count
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to cleanup cache entries: {e}")
 
         return removed
 
@@ -435,15 +438,15 @@ class PromptCache:
                     await redis_client.delete(*keys)
                 if cursor == 0:
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to clear L1 Redis cache: {e}")
 
         # Clear PostgreSQL (L2)
         try:
             async with get_async_session() as session:
                 await session.execute(delete(PromptCacheORM))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to clear L2 PostgreSQL cache: {e}")
 
         # Reset session stats
         self._session_hits = 0
@@ -475,7 +478,8 @@ class PromptCache:
                 return loop.run_until_complete(
                     self.get(messages, model, seed, temperature)
                 )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Sync cache get failed: {e}")
             return None
 
     def set_sync(
@@ -502,8 +506,8 @@ class PromptCache:
                 loop.run_until_complete(
                     self.set(messages, model, response, tokens_saved, seed, temperature)
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Sync cache set failed: {e}")
 
     def get_stats_sync(self) -> PromptCacheStats:
         """Synchronous wrapper for get_stats()."""
@@ -516,7 +520,8 @@ class PromptCache:
                     return future.result(timeout=5.0)
             else:
                 return loop.run_until_complete(self.get_stats())
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Sync get_stats failed: {e}")
             return PromptCacheStats(
                 total_entries=0,
                 total_tokens_saved=0,

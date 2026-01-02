@@ -872,23 +872,34 @@ async def detect_available_sources_from_db(
     Returns:
         List of available DataSourceType values
     """
-    # Core OHLCV always available
+    import logging
+    from sqlalchemy import select, func
+
+    logger = logging.getLogger(__name__)
+
+    # Core OHLCV and derivatives always available
     available = [DataSourceType.OHLCV, DataSourceType.DERIVATIVES]
 
-    # TODO: Query database to check for:
-    # - Order book data presence
-    # - On-chain metrics availability
-    # - Sentiment data availability
+    if session is None:
+        return available
 
-    # Placeholder: In production, query the actual database
-    # Example query pattern:
-    # result = await session.execute(
-    #     select(func.count())
-    #     .select_from(OrderBookSnapshot)
-    #     .where(OrderBookSnapshot.instrument == instrument)
-    # )
-    # if result.scalar() > 0:
-    #     available.append(DataSourceType.ORDERBOOK)
+    # Check for order book data availability
+    try:
+        from iqfmp.db.models import OrderBookSnapshotORM
+
+        result = await session.execute(
+            select(func.count())
+            .select_from(OrderBookSnapshotORM)
+            .where(OrderBookSnapshotORM.symbol == instrument)
+            .limit(1)
+        )
+        if (result.scalar() or 0) > 0:
+            available.append(DataSourceType.ORDERBOOK)
+    except Exception as e:
+        logger.warning(f"Failed to check OrderBook availability for {instrument}: {e}")
+
+    # OnChain and Sentiment data sources are not yet implemented in the database schema.
+    # When these models are added, extend this function to check their availability.
 
     return available
 

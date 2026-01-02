@@ -205,12 +205,10 @@ export function useReviewQueue(): UseReviewQueueResult {
 
         wsRef.current.onopen = () => {
           setWsConnected(true)
-          console.log('Review WebSocket connected')
         }
 
         wsRef.current.onclose = () => {
           setWsConnected(false)
-          console.log('Review WebSocket disconnected')
 
           // 5秒后尝试重连
           reconnectTimeoutRef.current = setTimeout(() => {

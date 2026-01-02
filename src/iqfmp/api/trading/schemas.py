@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ============== Enums ==============
@@ -130,16 +130,25 @@ class OrderResponse(BaseModel):
 
 class CreateOrderRequest(BaseModel):
     """Request to create an order."""
-    symbol: str
+    symbol: str = Field(..., min_length=1, description="Trading pair symbol (e.g., BTCUSDT)")
     side: OrderSide
     type: OrderType
-    size: float
-    price: Optional[float] = None
-    stop_price: Optional[float] = None
-    leverage: int = 1
+    size: float = Field(..., gt=0, description="Order size, must be positive")
+    price: Optional[float] = Field(None, gt=0, description="Limit price, required for LIMIT orders")
+    stop_price: Optional[float] = Field(None, gt=0, description="Stop trigger price")
+    leverage: int = Field(1, ge=1, le=125, description="Leverage multiplier (1-125)")
     reduce_only: bool = False
     post_only: bool = False
     client_order_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_order_type_requirements(self) -> "CreateOrderRequest":
+        """Validate that LIMIT and STOP_LIMIT orders have price, STOP orders have stop_price."""
+        if self.type in (OrderType.LIMIT, OrderType.STOP_LIMIT) and self.price is None:
+            raise ValueError(f"{self.type.value} orders require a price")
+        if self.type in (OrderType.STOP, OrderType.STOP_LIMIT) and self.stop_price is None:
+            raise ValueError(f"{self.type.value} orders require a stop_price")
+        return self
 
 
 class CreateOrderResponse(BaseModel):

@@ -3,8 +3,8 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -18,8 +18,25 @@ class WebSocketMessage(BaseModel):
     """WebSocket message format."""
 
     type: str  # "status", "agent_update", "task_update", "resource_update", "ping", "pong"
-    data: Optional[dict[str, Any]] = None
-    timestamp: datetime = datetime.now(timezone.utc)
+    data: dict[str, Any] | None = None
+    timestamp: datetime = datetime.now(UTC)
+
+
+def _build_resources_dict(resources) -> dict[str, Any]:
+    """Build standard resources dict from ResourceMetrics."""
+    return {
+        "cpu": {"usage": resources.cpu.usage, "cores": resources.cpu.cores},
+        "memory": {
+            "used": resources.memory.used,
+            "total": resources.memory.total,
+            "percentage": resources.memory.percentage,
+        },
+        "disk": {
+            "used": resources.disk.used,
+            "total": resources.disk.total,
+            "percentage": resources.disk.percentage,
+        },
+    }
 
 
 class ConnectionManager:
@@ -28,7 +45,7 @@ class ConnectionManager:
     def __init__(self) -> None:
         """Initialize connection manager."""
         self._active_connections: list[WebSocket] = []
-        self._broadcast_task: Optional[asyncio.Task] = None
+        self._broadcast_task: asyncio.Task | None = None
         self._broadcast_interval: float = 2.0  # seconds
         self._running: bool = False
 
@@ -112,17 +129,7 @@ class ConnectionManager:
                     message = WebSocketMessage(
                         type="resource_update",
                         data={
-                            "cpu": {"usage": resources.cpu.usage, "cores": resources.cpu.cores},
-                            "memory": {
-                                "used": resources.memory.used,
-                                "total": resources.memory.total,
-                                "percentage": resources.memory.percentage,
-                            },
-                            "disk": {
-                                "used": resources.disk.used,
-                                "total": resources.disk.total,
-                                "percentage": resources.disk.percentage,
-                            },
+                            **_build_resources_dict(resources),
                             "system_health": health,
                         },
                     )
@@ -162,19 +169,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
             type="connected",
             data={
                 "message": "Connected to IQFMP WebSocket",
-                "resources": {
-                    "cpu": {"usage": resources.cpu.usage, "cores": resources.cpu.cores},
-                    "memory": {
-                        "used": resources.memory.used,
-                        "total": resources.memory.total,
-                        "percentage": resources.memory.percentage,
-                    },
-                    "disk": {
-                        "used": resources.disk.used,
-                        "total": resources.disk.total,
-                        "percentage": resources.disk.percentage,
-                    },
-                },
+                "resources": _build_resources_dict(resources),
                 "system_health": health,
                 "llm": {
                     "provider": llm_metrics.provider,
@@ -204,19 +199,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
                     status_message = WebSocketMessage(
                         type="status",
                         data={
-                            "resources": {
-                                "cpu": {"usage": resources.cpu.usage, "cores": resources.cpu.cores},
-                                "memory": {
-                                    "used": resources.memory.used,
-                                    "total": resources.memory.total,
-                                    "percentage": resources.memory.percentage,
-                                },
-                                "disk": {
-                                    "used": resources.disk.used,
-                                    "total": resources.disk.total,
-                                    "percentage": resources.disk.percentage,
-                                },
-                            },
+                            "resources": _build_resources_dict(resources),
                             "system_health": health,
                         },
                     )
@@ -254,7 +237,7 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
 async def broadcast_agent_update(
     agent_id: str,
     status: str,
-    current_task: Optional[str] = None,
+    current_task: str | None = None,
     progress: float = 0.0,
 ) -> None:
     """Broadcast an agent status update.
@@ -281,8 +264,8 @@ async def broadcast_task_update(
     task_id: str,
     task_type: str,
     status: str,
-    progress: Optional[float] = None,
-    result: Optional[dict] = None,
+    progress: float | None = None,
+    result: dict | None = None,
 ) -> None:
     """Broadcast a task status update.
 
@@ -385,8 +368,8 @@ async def broadcast_review_decision(
     request_id: str,
     approved: bool,
     reviewer: str,
-    factor_name: Optional[str] = None,
-    reason: Optional[str] = None,
+    factor_name: str | None = None,
+    reason: str | None = None,
 ) -> None:
     """Broadcast a review decision event.
 
@@ -413,7 +396,7 @@ async def broadcast_review_decision(
 
 async def broadcast_review_timeout(
     request_id: str,
-    factor_name: Optional[str] = None,
+    factor_name: str | None = None,
 ) -> None:
     """Broadcast a review timeout event.
 

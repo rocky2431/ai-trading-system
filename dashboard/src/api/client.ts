@@ -11,6 +11,31 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/
 const TOKEN_KEY = 'iqfmp_access_token'
 const REFRESH_TOKEN_KEY = 'iqfmp_refresh_token'
 
+// Safe localStorage helpers - handle private browsing and security restrictions
+const safeStorage = {
+  get(key: string): string | null {
+    try {
+      return localStorage.getItem(key)
+    } catch {
+      return null
+    }
+  },
+  set(key: string, value: string): void {
+    try {
+      localStorage.setItem(key, value)
+    } catch {
+      // Silently fail - localStorage unavailable
+    }
+  },
+  remove(key: string): void {
+    try {
+      localStorage.removeItem(key)
+    } catch {
+      // Silently fail - localStorage unavailable
+    }
+  },
+}
+
 interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | undefined>
   _isRetry?: boolean // Internal flag to prevent infinite retry loops
@@ -38,13 +63,7 @@ async function tryRefreshToken(): Promise<boolean> {
 
   refreshPromise = (async () => {
     try {
-      let refreshToken: string | null = null
-      try {
-        refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
-      } catch {
-        // localStorage unavailable
-      }
-
+      const refreshToken = safeStorage.get(REFRESH_TOKEN_KEY)
       if (!refreshToken) {
         return false
       }
@@ -61,11 +80,7 @@ async function tryRefreshToken(): Promise<boolean> {
 
       const data = await response.json()
       if (data.access_token) {
-        try {
-          localStorage.setItem(TOKEN_KEY, data.access_token)
-        } catch {
-          // localStorage unavailable
-        }
+        safeStorage.set(TOKEN_KEY, data.access_token)
         return true
       }
       return false
@@ -99,12 +114,7 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
   }
 
   // Get auth token if available (direct localStorage access to avoid circular import)
-  let token: string | null = null
-  try {
-    token = localStorage.getItem(TOKEN_KEY)
-  } catch {
-    // localStorage unavailable (private browsing, security restrictions)
-  }
+  const token = safeStorage.get(TOKEN_KEY)
 
   const response = await fetch(url, {
     ...fetchOptions,
@@ -122,13 +132,9 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
       // Retry the original request with new token
       return request<T>(endpoint, { ...options, _isRetry: true })
     }
-    // Refresh failed - clear tokens and redirect to login
-    try {
-      localStorage.removeItem(TOKEN_KEY)
-      localStorage.removeItem(REFRESH_TOKEN_KEY)
-    } catch {
-      // localStorage unavailable
-    }
+    // Refresh failed - clear tokens
+    safeStorage.remove(TOKEN_KEY)
+    safeStorage.remove(REFRESH_TOKEN_KEY)
   }
 
   if (!response.ok) {

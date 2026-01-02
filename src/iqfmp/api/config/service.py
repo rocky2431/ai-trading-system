@@ -1,32 +1,58 @@
 """Config service for managing IQFMP system configuration."""
 
+import json
 import logging
 import os
-import json
 import time
-import httpx
-from pathlib import Path
-from typing import Optional
 from datetime import datetime, timedelta
+from pathlib import Path
 
-logger = logging.getLogger(__name__)
+import httpx
 
 from iqfmp.api.config.schemas import (
     AgentConfigResponse,
     AgentModelConfig,
     AvailableModelsResponse,
+    # P3: Alpha Benchmark
+    BenchmarkConfigResponse,
+    BenchmarkConfigUpdate,
+    BenchmarkResultEntry,
+    BenchmarkResultsResponse,
+    CheckpointInfo,
+    CheckpointListResponse,
+    CheckpointStateResponse,
+    # P3: Checkpoints
+    CheckpointThreadInfo,
     ConfigStatusResponse,
     DataConfigResponse,
+    # P3: Derivative Data
+    DerivativeDataConfigResponse,
+    DerivativeDataConfigUpdate,
     EmbeddingModelInfo,
     EvaluationConfig,
+    ExecutionLogEntry,
+    ExecutionLogResponse,
     FactorFamilyOption,
     FactorMiningConfigResponse,
+    FallbackChainConfig,
     FeaturesStatus,
     FrequencyOption,
+    LLMAdvancedConfigResponse,
+    LLMAdvancedConfigUpdate,
+    LLMCostSummary,
+    LLMTraceEntry,
+    LLMTraceResponse,
     ModelInfo,
+    # P3: LLM Advanced
+    RateLimitConfigResponse,
     RiskControlConfig,
     RiskControlConfigResponse,
+    # P3: Sandbox/Security
+    SandboxConfigResponse,
+    SandboxConfigUpdate,
     SavedAPIKeysResponse,
+    SecurityConfigResponse,
+    SecurityConfigUpdate,
     SetAgentConfigRequest,
     SetAPIKeysResponse,
     SetDataConfigRequest,
@@ -34,35 +60,9 @@ from iqfmp.api.config.schemas import (
     SetRiskControlConfigRequest,
     TestExchangeResponse,
     TestLLMResponse,
-    # P3: Sandbox/Security
-    SandboxConfigResponse,
-    SandboxConfigUpdate,
-    ExecutionLogEntry,
-    ExecutionLogResponse,
-    SecurityConfigResponse,
-    SecurityConfigUpdate,
-    # P3: LLM Advanced
-    RateLimitConfigResponse,
-    FallbackChainConfig,
-    LLMAdvancedConfigResponse,
-    LLMAdvancedConfigUpdate,
-    LLMTraceEntry,
-    LLMTraceResponse,
-    LLMCostSummary,
-    # P3: Derivative Data
-    DerivativeDataConfigResponse,
-    DerivativeDataConfigUpdate,
-    # P3: Checkpoints
-    CheckpointThreadInfo,
-    CheckpointInfo,
-    CheckpointListResponse,
-    CheckpointStateResponse,
-    # P3: Alpha Benchmark
-    BenchmarkConfigResponse,
-    BenchmarkConfigUpdate,
-    BenchmarkResultEntry,
-    BenchmarkResultsResponse,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ConfigService:
@@ -70,9 +70,9 @@ class ConfigService:
 
     # Cache for OpenRouter models (TTL: 5 minutes)
     _models_cache: list = []
-    _models_cache_time: Optional[datetime] = None
+    _models_cache_time: datetime | None = None
     _embedding_models_cache: list = []
-    _embedding_models_cache_time: Optional[datetime] = None
+    _embedding_models_cache_time: datetime | None = None
     _cache_ttl = timedelta(minutes=5)
 
     # Preferred providers to show (filter from 500+ models)
@@ -156,12 +156,12 @@ class ConfigService:
         """Load configuration from file."""
         if self._config_file.exists():
             try:
-                with open(self._config_file, "r") as f:
+                with open(self._config_file) as f:
                     return json.load(f)
             except json.JSONDecodeError as e:
                 logger.error(f"Config file corrupted at {self._config_file}: {e}")
                 return {}
-            except IOError as e:
+            except OSError as e:
                 logger.error(f"Cannot read config file {self._config_file}: {e}")
                 return {}
             except Exception as e:
@@ -174,7 +174,7 @@ class ConfigService:
         with open(self._config_file, "w") as f:
             json.dump(self._config, f, indent=2)
 
-    def _mask_api_key(self, key: Optional[str]) -> Optional[str]:
+    def _mask_api_key(self, key: str | None) -> str | None:
         """Mask API key for display."""
         if not key:
             return None
@@ -209,12 +209,8 @@ class ConfigService:
             from iqfmp.core.qlib_init import is_qlib_initialized
             qlib_available = is_qlib_initialized()
         except (ImportError, LookupError, Exception):
-            # Fallback to simple import check
-            try:
-                import qlib
-                qlib_available = True
-            except Exception:
-                pass
+            # Fallback: assume available if import check passes
+            qlib_available = True
 
         # Check TimescaleDB connection - support both DATABASE_URL and individual PG* vars
         timescaledb_connected = self._check_timescaledb_connection()
@@ -245,8 +241,9 @@ class ConfigService:
     def _check_timescaledb_connection(self) -> bool:
         """Check TimescaleDB connection status."""
         try:
-            import psycopg2
             from urllib.parse import urlparse
+
+            import psycopg2
 
             # Parse DATABASE_URL if available
             db_url = os.getenv("DATABASE_URL")
@@ -277,16 +274,6 @@ class ConfigService:
 
     def _check_redis_connection(self) -> bool:
         """Check Redis connection status."""
-        # Check if REDIS_URL or individual vars exist
-        has_config = bool(
-            os.getenv("REDIS_URL")
-            or os.getenv("REDIS_HOST")
-        )
-        if not has_config:
-            # Default to localhost:6379
-            pass
-
-        # Try actual connection
         try:
             import redis
             redis_url = os.getenv("REDIS_URL")
@@ -368,7 +355,7 @@ class ConfigService:
 
             return models
 
-        except Exception as e:
+        except Exception:
             # Fallback to cached or minimal list
             if self._models_cache:
                 return self._models_cache
@@ -447,7 +434,7 @@ class ConfigService:
 
             return models
 
-        except Exception as e:
+        except Exception:
             # Fallback to cached or static list
             if self._embedding_models_cache:
                 return self._embedding_models_cache
@@ -461,9 +448,7 @@ class ConfigService:
         # Known dimensions based on model families
         if "text-embedding-3-large" in lower_id:
             return 3072
-        elif "text-embedding-3-small" in lower_id:
-            return 1536
-        elif "text-embedding-ada" in lower_id:
+        elif "text-embedding-3-small" in lower_id or "text-embedding-ada" in lower_id:
             return 1536
         elif "qwen3-embedding-8b" in lower_id or "qwen3-embedding-4b" in lower_id:
             return 4096  # Qwen3 embedding models
@@ -533,13 +518,13 @@ class ConfigService:
 
     def set_api_keys(
         self,
-        provider: Optional[str] = None,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        embedding_model: Optional[str] = None,
-        exchange_id: Optional[str] = None,
-        exchange_api_key: Optional[str] = None,
-        exchange_secret: Optional[str] = None,
+        provider: str | None = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        embedding_model: str | None = None,
+        exchange_id: str | None = None,
+        exchange_api_key: str | None = None,
+        exchange_secret: str | None = None,
     ) -> SetAPIKeysResponse:
         """Set API keys."""
         updated = []
@@ -986,8 +971,9 @@ class ConfigService:
         """Get sandbox execution logs with pagination."""
         try:
             # Try to fetch from database
-            from iqfmp.storage.database import get_db_session
             from sqlalchemy import text
+
+            from iqfmp.storage.database import get_db_session
 
             async with get_db_session() as session:
                 # Build query
@@ -1160,8 +1146,9 @@ class ConfigService:
     ) -> LLMTraceResponse:
         """Get LLM API call traces (audit log)."""
         try:
-            from iqfmp.storage.database import get_db_session
             from sqlalchemy import text
+
+            from iqfmp.storage.database import get_db_session
 
             async with get_db_session() as session:
                 # Build query
@@ -1227,8 +1214,9 @@ class ConfigService:
     async def get_llm_costs(self, hours: int) -> LLMCostSummary:
         """Get LLM cost summary for the specified time period."""
         try:
-            from iqfmp.storage.database import get_db_session
             from sqlalchemy import text
+
+            from iqfmp.storage.database import get_db_session
 
             async with get_db_session() as session:
                 cutoff = datetime.now() - timedelta(hours=hours)
@@ -1470,8 +1458,9 @@ class ConfigService:
     ) -> BenchmarkResultsResponse:
         """Get benchmark results with pagination."""
         try:
-            from iqfmp.storage.database import get_db_session
             from sqlalchemy import text
+
+            from iqfmp.storage.database import get_db_session
 
             async with get_db_session() as session:
                 # Build query
@@ -1543,7 +1532,7 @@ class ConfigService:
 
 
 # Singleton instance
-_config_service: Optional[ConfigService] = None
+_config_service: ConfigService | None = None
 
 
 def get_config_service() -> ConfigService:

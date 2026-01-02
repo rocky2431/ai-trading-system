@@ -20,12 +20,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
 # Use Qlib-native statistics instead of scipy
-from iqfmp.evaluation.qlib_stats import normal_ppf, normal_cdf
+from iqfmp.evaluation.qlib_stats import normal_cdf, normal_ppf
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +61,8 @@ class ThresholdResult:
     threshold: float
     sharpe: float
     n_trials: int
-    deflated_sharpe: Optional[float] = None
-    p_value: Optional[float] = None
+    deflated_sharpe: float | None = None
+    p_value: float | None = None
 
 
 @dataclass
@@ -85,12 +85,12 @@ class TrialRecord:
     factor_name: str
     factor_family: str
     sharpe_ratio: float
-    trial_id: Optional[str] = None
-    ic_mean: Optional[float] = None
-    ir: Optional[float] = None
-    max_drawdown: Optional[float] = None
-    win_rate: Optional[float] = None
-    created_at: Optional[datetime] = None
+    trial_id: str | None = None
+    ic_mean: float | None = None
+    ir: float | None = None
+    max_drawdown: float | None = None
+    win_rate: float | None = None
+    created_at: datetime | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -155,7 +155,7 @@ class DynamicThreshold:
     higher thresholds adjusted for multiple hypothesis testing.
     """
 
-    def __init__(self, config: Optional[ThresholdConfig] = None) -> None:
+    def __init__(self, config: ThresholdConfig | None = None) -> None:
         """Initialize with configuration."""
         self.config = config or ThresholdConfig()
 
@@ -179,10 +179,7 @@ class DynamicThreshold:
 
         # Expected maximum of n standard normal variables (Bonferroni-like adjustment)
         # E[max(Z_1, ..., Z_n)] ≈ sqrt(2 * ln(n)) for large n
-        if n_trials == 1:
-            expected_max = 0.0
-        else:
-            expected_max = math.sqrt(2 * math.log(n_trials))
+        expected_max = 0.0 if n_trials == 1 else math.sqrt(2 * math.log(n_trials))
 
         # Get z-score for confidence level
         # Higher confidence → higher z-score → higher threshold
@@ -200,8 +197,8 @@ class DynamicThreshold:
     def calculate_deflated(
         self,
         n_trials: int,
-        n_observations: Optional[int] = None,
-        expected_sharpe: float = 0.0,
+        n_observations: int | None = None,
+        _expected_sharpe: float = 0.0,
         variance_of_sharpe: float = 1.0,
         skewness: float = 0.0,
         kurtosis: float = 3.0,
@@ -317,7 +314,7 @@ class DynamicThreshold:
         self,
         observed_sharpe: float,
         n_trials: int,
-        n_observations: Optional[int] = None,
+        n_observations: int | None = None,
         skewness: float = 0.0,
         kurtosis: float = 3.0,
     ) -> tuple[float, float]:
@@ -383,7 +380,7 @@ class DynamicThreshold:
         self,
         sharpe: float,
         n_trials: int,
-        n_observations: Optional[int] = None,
+        n_observations: int | None = None,
         skewness: float = 0.0,
         kurtosis: float = 3.0,
     ) -> ThresholdResult:
@@ -478,7 +475,7 @@ class FileStorage(LedgerStorage):
 
     def _read_file(self) -> list[TrialRecord]:
         """Read trials from file."""
-        with open(self.filepath, "r") as f:
+        with open(self.filepath) as f:
             data = json.load(f)
         return [TrialRecord.from_dict(d) for d in data.get("trials", [])]
 
@@ -508,6 +505,22 @@ class PostgresStorage(LedgerStorage):
         self._loaded = False
         self._threshold = DynamicThreshold()
 
+    @staticmethod
+    def _orm_to_trial(orm: Any) -> TrialRecord:
+        """Convert ORM model to TrialRecord."""
+        return TrialRecord(
+            trial_id=orm.trial_id,
+            factor_name=orm.factor_name,
+            factor_family=orm.factor_family,
+            sharpe_ratio=orm.sharpe_ratio,
+            ic_mean=orm.ic_mean,
+            ir=orm.ir,
+            max_drawdown=orm.max_drawdown,
+            win_rate=orm.win_rate,
+            created_at=orm.created_at.replace(tzinfo=None) if orm.created_at else None,
+            metadata=orm.evaluation_config or {},
+        )
+
     def save(self, trials: list[TrialRecord]) -> None:
         """Save trials to PostgreSQL (sync wrapper for async operation)."""
         import asyncio
@@ -525,9 +538,10 @@ class PostgresStorage(LedgerStorage):
 
     async def _save_async(self, trials: list[TrialRecord]) -> None:
         """Async save implementation."""
+        from sqlalchemy import func, select
+
         from iqfmp.db.database import get_async_session
         from iqfmp.db.models import ResearchTrialORM
-        from sqlalchemy import select, func
 
         async with get_async_session() as session:
             # Get existing trial IDs from database
@@ -582,9 +596,10 @@ class PostgresStorage(LedgerStorage):
 
     async def _load_async(self) -> list[TrialRecord]:
         """Async load implementation."""
+        from sqlalchemy import select
+
         from iqfmp.db.database import get_async_session
         from iqfmp.db.models import ResearchTrialORM
-        from sqlalchemy import select
 
         try:
             async with get_async_session() as session:
@@ -592,22 +607,7 @@ class PostgresStorage(LedgerStorage):
                     select(ResearchTrialORM).order_by(ResearchTrialORM.trial_number)
                 )
                 orm_trials = result.scalars().all()
-
-                return [
-                    TrialRecord(
-                        trial_id=t.trial_id,
-                        factor_name=t.factor_name,
-                        factor_family=t.factor_family,
-                        sharpe_ratio=t.sharpe_ratio,
-                        ic_mean=t.ic_mean,
-                        ir=t.ir,
-                        max_drawdown=t.max_drawdown,
-                        win_rate=t.win_rate,
-                        created_at=t.created_at.replace(tzinfo=None) if t.created_at else None,
-                        metadata=t.evaluation_config or {},
-                    )
-                    for t in orm_trials
-                ]
+                return [self._orm_to_trial(t) for t in orm_trials]
         except Exception as e:
             # If database not available, return empty
             logger.warning(f"PostgreSQL load failed: {e}")
@@ -616,7 +616,7 @@ class PostgresStorage(LedgerStorage):
     async def save_trial_async(
         self,
         trial: TrialRecord,
-        factor_id: Optional[str] = None,
+        factor_id: str | None = None,
     ) -> str:
         """Save a single trial asynchronously with factor linking.
 
@@ -627,9 +627,10 @@ class PostgresStorage(LedgerStorage):
         Returns:
             Trial ID
         """
+        from sqlalchemy import func, select
+
         from iqfmp.db.database import get_async_session
         from iqfmp.db.models import ResearchTrialORM
-        from sqlalchemy import select, func
 
         async with get_async_session() as session:
             # Get current max trial number
@@ -664,9 +665,10 @@ class PostgresStorage(LedgerStorage):
 
     async def get_trial_count_async(self) -> int:
         """Get trial count from database."""
+        from sqlalchemy import func, select
+
         from iqfmp.db.database import get_async_session
         from iqfmp.db.models import ResearchTrialORM
-        from sqlalchemy import select, func
 
         try:
             async with get_async_session() as session:
@@ -679,9 +681,10 @@ class PostgresStorage(LedgerStorage):
 
     async def get_trials_by_family_async(self, family: str) -> list[TrialRecord]:
         """Get trials by family from database."""
+        from sqlalchemy import select
+
         from iqfmp.db.database import get_async_session
         from iqfmp.db.models import ResearchTrialORM
-        from sqlalchemy import select
 
         async with get_async_session() as session:
             result = await session.execute(
@@ -690,22 +693,7 @@ class PostgresStorage(LedgerStorage):
                 .order_by(ResearchTrialORM.trial_number)
             )
             orm_trials = result.scalars().all()
-
-            return [
-                TrialRecord(
-                    trial_id=t.trial_id,
-                    factor_name=t.factor_name,
-                    factor_family=t.factor_family,
-                    sharpe_ratio=t.sharpe_ratio,
-                    ic_mean=t.ic_mean,
-                    ir=t.ir,
-                    max_drawdown=t.max_drawdown,
-                    win_rate=t.win_rate,
-                    created_at=t.created_at.replace(tzinfo=None) if t.created_at else None,
-                    metadata=t.evaluation_config or {},
-                )
-                for t in orm_trials
-            ]
+            return [self._orm_to_trial(t) for t in orm_trials]
 
 
 @dataclass
@@ -720,7 +708,7 @@ class LedgerStatistics:
     median_sharpe: float = 0.0
 
 
-def _get_default_storage(strict_mode: bool = False) -> "LedgerStorage":
+def _get_default_storage(strict_mode: bool = False) -> LedgerStorage:
     """Get the default storage backend with PostgreSQL preference.
 
     P1-2 FIX: Production systems MUST use PostgresStorage to persist
@@ -762,7 +750,7 @@ def _get_default_storage(strict_mode: bool = False) -> "LedgerStorage":
         return MemoryStorage()
 
 
-def validate_production_storage(storage: "LedgerStorage") -> None:
+def validate_production_storage(storage: LedgerStorage) -> None:
     """Validate that storage backend is suitable for production.
 
     P3.1 FIX: Explicitly block MemoryStorage/FileStorage in production environments.
@@ -774,13 +762,15 @@ def validate_production_storage(storage: "LedgerStorage") -> None:
         RuntimeError: If storage is not PostgresStorage and strict mode is enabled.
     """
     import os
-    if os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true":
-        if isinstance(storage, (MemoryStorage, FileStorage)):
-            raise RuntimeError(
-                f"PRODUCTION ERROR: {type(storage).__name__} is not allowed. "
-                "Use PostgresStorage for production persistence. "
-                "Set RESEARCH_LEDGER_STRICT=false for development."
-            )
+    if (
+        os.getenv("RESEARCH_LEDGER_STRICT", "").lower() == "true"
+        and isinstance(storage, (MemoryStorage, FileStorage))
+    ):
+        raise RuntimeError(
+            f"PRODUCTION ERROR: {type(storage).__name__} is not allowed. "
+            "Use PostgresStorage for production persistence. "
+            "Set RESEARCH_LEDGER_STRICT=false for development."
+        )
 
 
 class ResearchLedger:
@@ -795,8 +785,8 @@ class ResearchLedger:
 
     def __init__(
         self,
-        storage: Optional[LedgerStorage] = None,
-        threshold: Optional[DynamicThreshold] = None,
+        storage: LedgerStorage | None = None,
+        threshold: DynamicThreshold | None = None,
     ) -> None:
         """Initialize ledger with storage and threshold calculator.
 
@@ -826,7 +816,7 @@ class ResearchLedger:
         self._storage.save(self._trials)
         return trial.trial_id
 
-    def get_trial(self, trial_id: str) -> Optional[TrialRecord]:
+    def get_trial(self, trial_id: str) -> TrialRecord | None:
         """Get a trial by ID.
 
         Args:
@@ -883,7 +873,7 @@ class ResearchLedger:
     def check_significance_deflated(
         self,
         sharpe: float,
-        n_observations: Optional[int] = None,
+        n_observations: int | None = None,
         skewness: float = 0.0,
         kurtosis: float = 3.0,
     ) -> ThresholdResult:

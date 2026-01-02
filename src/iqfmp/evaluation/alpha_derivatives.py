@@ -7,12 +7,19 @@ These factors are designed for perpetual futures trading strategies.
 """
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+
+def _rolling_zscore(series: pd.Series, window: int = 30) -> pd.Series:
+    """Calculate rolling z-score for a series."""
+    mean = series.rolling(window).mean()
+    std = series.rolling(window).std()
+    return (series - mean) / (std + 1e-10)
 
 
 # Registry for derivative alpha factors
@@ -49,9 +56,7 @@ def funding_rate_ma8(df: pd.DataFrame) -> pd.Series:
 def funding_rate_zscore(df: pd.DataFrame) -> pd.Series:
     """Z-score of funding rate (30-period window)."""
     fr = df.get("funding_rate", pd.Series(0, index=df.index))
-    mean = fr.rolling(30).mean()
-    std = fr.rolling(30).std()
-    return (fr - mean) / (std + 1e-10)
+    return _rolling_zscore(fr)
 
 
 @_register_derivative("FUNDING_CUMSUM_8H")
@@ -80,7 +85,7 @@ def funding_momentum(df: pd.DataFrame) -> pd.Series:
 def funding_reversal(df: pd.DataFrame) -> pd.Series:
     """Funding rate reversal signal (contrarian)."""
     fr = df.get("funding_rate", pd.Series(0, index=df.index))
-    zscore = (fr - fr.rolling(30).mean()) / (fr.rolling(30).std() + 1e-10)
+    zscore = _rolling_zscore(fr)
     # Signal is negative when funding is extremely high (crowded longs)
     return -zscore.clip(-3, 3) / 3
 
@@ -89,7 +94,7 @@ def funding_reversal(df: pd.DataFrame) -> pd.Series:
 def funding_extreme(df: pd.DataFrame) -> pd.Series:
     """Binary flag for extreme funding (|zscore| > 2)."""
     fr = df.get("funding_rate", pd.Series(0, index=df.index))
-    zscore = (fr - fr.rolling(30).mean()) / (fr.rolling(30).std() + 1e-10)
+    zscore = _rolling_zscore(fr)
     return (zscore.abs() > 2).astype(float)
 
 
@@ -153,9 +158,7 @@ def oi_change_24h(df: pd.DataFrame) -> pd.Series:
 def oi_zscore(df: pd.DataFrame) -> pd.Series:
     """Z-score of open interest (30-period)."""
     oi = df.get("open_interest", pd.Series(0, index=df.index))
-    mean = oi.rolling(30).mean()
-    std = oi.rolling(30).std()
-    return (oi - mean) / (std + 1e-10)
+    return _rolling_zscore(oi)
 
 
 @_register_derivative("OI_PRICE_DIVERGENCE")
@@ -208,16 +211,14 @@ def ls_ratio(df: pd.DataFrame) -> pd.Series:
 def ls_ratio_zscore(df: pd.DataFrame) -> pd.Series:
     """Z-score of long/short ratio."""
     ls = df.get("long_short_ratio", pd.Series(1, index=df.index))
-    mean = ls.rolling(30).mean()
-    std = ls.rolling(30).std()
-    return (ls - mean) / (std + 1e-10)
+    return _rolling_zscore(ls)
 
 
 @_register_derivative("LS_CONTRARIAN")
 def ls_contrarian(df: pd.DataFrame) -> pd.Series:
     """Contrarian signal based on L/S ratio extremes."""
     ls = df.get("long_short_ratio", pd.Series(1, index=df.index))
-    zscore = (ls - ls.rolling(30).mean()) / (ls.rolling(30).std() + 1e-10)
+    zscore = _rolling_zscore(ls)
     # Go short when too many longs, go long when too many shorts
     return -zscore.clip(-2, 2) / 2
 
@@ -284,9 +285,7 @@ def liq_total_zscore(df: pd.DataFrame) -> pd.Series:
     long_liq = df.get("liquidation_long", pd.Series(0, index=df.index))
     short_liq = df.get("liquidation_short", pd.Series(0, index=df.index))
     total = long_liq + short_liq
-    mean = total.rolling(24).mean()
-    std = total.rolling(24).std()
-    return (total - mean) / (std + 1e-10)
+    return _rolling_zscore(total, window=24)
 
 
 @_register_derivative("LIQ_CASCADE_SIGNAL")
@@ -295,7 +294,7 @@ def liq_cascade_signal(df: pd.DataFrame) -> pd.Series:
     long_liq = df.get("liquidation_long", pd.Series(0, index=df.index))
     short_liq = df.get("liquidation_short", pd.Series(0, index=df.index))
     total = long_liq + short_liq
-    zscore = (total - total.rolling(24).mean()) / (total.rolling(24).std() + 1e-10)
+    zscore = _rolling_zscore(total, window=24)
     liq_ratio = (long_liq - short_liq) / (total + 1e-10)
     # Positive when shorts liquidated (go long), negative when longs liquidated
     return (zscore > 2).astype(float) * liq_ratio
@@ -322,9 +321,7 @@ def basis_rate(df: pd.DataFrame) -> pd.Series:
 def basis_zscore(df: pd.DataFrame) -> pd.Series:
     """Z-score of basis rate."""
     br = df.get("basis_rate", pd.Series(0, index=df.index))
-    mean = br.rolling(30).mean()
-    std = br.rolling(30).std()
-    return (br - mean) / (std + 1e-10)
+    return _rolling_zscore(br)
 
 
 @_register_derivative("BASIS_MOMENTUM")
@@ -408,12 +405,10 @@ def crypto_sentiment(df: pd.DataFrame) -> pd.Series:
 @_register_derivative("LEVERAGE_PRESSURE")
 def leverage_pressure(df: pd.DataFrame) -> pd.Series:
     """Leverage pressure indicator (high OI + high funding = crowded)."""
-    oi_z = df.get("open_interest", pd.Series(0, index=df.index))
-    oi_z = (oi_z - oi_z.rolling(30).mean()) / (oi_z.rolling(30).std() + 1e-10)
-
+    oi = df.get("open_interest", pd.Series(0, index=df.index))
     fr = df.get("funding_rate", pd.Series(0, index=df.index))
-    fr_z = (fr - fr.rolling(30).mean()) / (fr.rolling(30).std() + 1e-10)
-
+    oi_z = _rolling_zscore(oi)
+    fr_z = _rolling_zscore(fr)
     # High leverage pressure when both are extreme in same direction
     return oi_z * fr_z
 
@@ -435,11 +430,9 @@ def liquidation_risk(df: pd.DataFrame) -> pd.Series:
     """Liquidation risk indicator."""
     # High leverage + extreme positioning = high liquidation risk
     oi = df.get("open_interest", pd.Series(0, index=df.index))
-    oi_z = (oi - oi.rolling(30).mean()) / (oi.rolling(30).std() + 1e-10)
-
+    oi_z = _rolling_zscore(oi)
     ls = df.get("long_short_ratio", pd.Series(1, index=df.index))
     ls_extreme = (ls - 1).abs()
-
     return oi_z.abs() * ls_extreme
 
 
@@ -498,7 +491,7 @@ def get_derivative_factors_by_category() -> dict[str, list[str]]:
         "composite": [],
     }
 
-    for name in DERIVATIVE_FACTORS.keys():
+    for name in DERIVATIVE_FACTORS:
         if name.startswith("FUNDING"):
             categories["funding"].append(name)
         elif name.startswith("OI_"):

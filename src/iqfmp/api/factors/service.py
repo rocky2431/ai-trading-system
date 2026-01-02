@@ -8,82 +8,72 @@ Integrates:
 """
 
 import asyncio
+import contextlib
 import hashlib
-import json
 import logging
 import os
 import uuid
 from datetime import datetime
-from typing import Optional
 
 import numpy as np
-
-logger = logging.getLogger(__name__)
 import pandas as pd
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from iqfmp.models.factor import Factor, FactorMetrics, FactorStatus, StabilityReport
-from iqfmp.llm.provider import LLMConfig, LLMProvider
 from iqfmp.agents.factor_generation import (
+    FactorFamily,
     FactorGenerationAgent,
     FactorGenerationConfig,
-    FactorFamily,
 )
-from iqfmp.db.repositories import (
-    FactorRepository,
-    ResearchTrialRepository,
-    FactorValueRepository,
-    MiningTaskRepository,
-)
-from iqfmp.db.database import get_async_session
 from iqfmp.api.factors.schemas import (
-    MiningTaskStatus,
     FactorLibraryStats,
+    MiningTaskStatus,
 )
 
-# Import evaluation module components
-from iqfmp.evaluation.factor_evaluator import (
-    FactorEvaluator as FullFactorEvaluator,
-    EvaluationConfig,
-    FactorMetrics as EvalFactorMetrics,
+# WebSocket broadcast imports
+from iqfmp.api.system.websocket import (
+    broadcast_evaluation_complete,
+    broadcast_factor_created,
+    broadcast_task_update,
+)
+from iqfmp.db.database import get_async_session
+from iqfmp.db.repositories import (
+    FactorRepository,
+    FactorValueRepository,
+    MiningTaskRepository,
+    ResearchTrialRepository,
 )
 from iqfmp.evaluation.cv_splitter import (
     CryptoCVSplitter,
     CVSplitConfig,
 )
-from iqfmp.evaluation.stability_analyzer import (
-    StabilityAnalyzer,
-    StabilityConfig,
-    StabilityReport as FullStabilityReport,
+from iqfmp.evaluation.factor_evaluator import (
+    EvaluationConfig,
 )
-# New evaluation modules
-from iqfmp.evaluation.walk_forward_validator import (
-    WalkForwardValidator,
-    WalkForwardConfig,
-    WalkForwardResult,
-)
+
+# Import evaluation module components
 from iqfmp.evaluation.ic_decomposition import (
     ICDecompositionAnalyzer,
     ICDecompositionConfig,
-    ICDecompositionResult,
 )
-from iqfmp.evaluation.redundancy_detector import (
-    RedundancyDetector,
-    RedundancyConfig,
-    RedundancyResult,
+from iqfmp.evaluation.stability_analyzer import (
+    StabilityAnalyzer,
+    StabilityConfig,
 )
+
+# New evaluation modules
+from iqfmp.evaluation.walk_forward_validator import (
+    WalkForwardConfig,
+    WalkForwardValidator,
+)
+from iqfmp.llm.provider import LLMConfig, LLMProvider
+from iqfmp.models.factor import Factor, FactorMetrics, FactorStatus, StabilityReport
+from iqfmp.vector.search import SearchResult, SimilaritySearcher
 
 # Vector store imports
 from iqfmp.vector.store import FactorVectorStore
-from iqfmp.vector.search import SimilaritySearcher, SearchResult
 
-# WebSocket broadcast imports
-from iqfmp.api.system.websocket import (
-    broadcast_factor_created,
-    broadcast_evaluation_complete,
-    broadcast_task_update,
-)
+logger = logging.getLogger(__name__)
 
 
 class FactorDuplicateError(Exception):
@@ -110,7 +100,7 @@ class AsyncFactorService:
     def __init__(
         self,
         session: AsyncSession,
-        redis_client: Optional[redis.Redis] = None,
+        redis_client: redis.Redis | None = None,
     ) -> None:
         """Initialize factor service with database session.
 
@@ -124,11 +114,11 @@ class AsyncFactorService:
         self.trial_repo = ResearchTrialRepository(session)
         self.factor_value_repo = FactorValueRepository(session)
         self.mining_task_repo = MiningTaskRepository(session, redis_client)
-        self._llm_provider: Optional[LLMProvider] = None
-        self._generation_agent: Optional[FactorGenerationAgent] = None
+        self._llm_provider: LLMProvider | None = None
+        self._generation_agent: FactorGenerationAgent | None = None
         # Vector store for factor indexing and similarity search
-        self._vector_store: Optional[FactorVectorStore] = None
-        self._similarity_searcher: Optional[SimilaritySearcher] = None
+        self._vector_store: FactorVectorStore | None = None
+        self._similarity_searcher: SimilaritySearcher | None = None
 
     def _get_llm_provider(self) -> LLMProvider:
         """获取或创建 LLM Provider.
@@ -196,7 +186,7 @@ class AsyncFactorService:
     async def _index_factor_to_vector_store(
         self,
         factor: Factor,
-        metrics: Optional[FactorMetrics] = None,
+        metrics: FactorMetrics | None = None,
     ) -> bool:
         """将因子索引到向量存储 (Task 7.1).
 
@@ -477,7 +467,7 @@ class AsyncFactorService:
 
         return factor
 
-    async def get_factor(self, factor_id: str) -> Optional[Factor]:
+    async def get_factor(self, factor_id: str) -> Factor | None:
         """Get factor by ID.
 
         Args:
@@ -492,8 +482,8 @@ class AsyncFactorService:
         self,
         page: int = 1,
         page_size: int = 10,
-        family: Optional[str] = None,
-        status: Optional[str] = None,
+        family: str | None = None,
+        status: str | None = None,
     ) -> tuple[list[Factor], int]:
         """List factors with pagination and filtering.
 
@@ -577,8 +567,8 @@ class AsyncFactorService:
             raise FactorNotFoundError(f"Factor {factor_id} not found")
 
         # Use Qlib-based factor engine with TimescaleDB data
-        from iqfmp.core.factor_engine import FactorEngine
         from iqfmp.core.data_provider import DataProvider
+        from iqfmp.core.factor_engine import FactorEngine
 
         try:
             # Load real market data from TimescaleDB (primary) or CSV (fallback)
@@ -616,7 +606,7 @@ class AsyncFactorService:
             eval_df = self._prepare_evaluation_data(df, factor_values)
 
             # ====== 1. Configure Full Evaluator ======
-            eval_config = EvaluationConfig(
+            _eval_config = EvaluationConfig(  # noqa: F841 - reserved for future use
                 date_column="date",
                 symbol_column="symbol",
                 factor_column="factor_value",
@@ -807,7 +797,7 @@ class AsyncFactorService:
         splits: list[str],
         include_walk_forward: bool = True,
         include_ic_decomposition: bool = True,
-        walk_forward_config: Optional[dict] = None,
+        walk_forward_config: dict | None = None,
         symbol: str = "ETH/USDT",
         timeframe: str = "1d",
     ) -> dict:
@@ -860,8 +850,8 @@ class AsyncFactorService:
             return result
 
         try:
-            from iqfmp.core.factor_engine import FactorEngine
             from iqfmp.core.data_provider import DataProvider
+            from iqfmp.core.factor_engine import FactorEngine
 
             provider = DataProvider(session=self.session)
             df = await provider.load_ohlcv(symbol=symbol, timeframe=timeframe)
@@ -1051,7 +1041,7 @@ class AsyncFactorService:
         self,
         factor_values: pd.Series,
         returns: pd.Series,
-        volume: Optional[pd.Series] = None,
+        _volume: pd.Series | None = None,
     ) -> dict:
         """Calculate core factor metrics."""
         from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
@@ -1114,7 +1104,7 @@ class AsyncFactorService:
         self,
         factor_values: pd.Series,
         volume: pd.Series,
-        funding_rate: Optional[pd.Series] = None,
+        funding_rate: pd.Series | None = None,
         periods_per_year: float = 252.0,
         taker_fee: float = 0.0004,  # 0.04% taker fee
         slippage_bps: float = 2.0,  # 2 basis points
@@ -1384,8 +1374,8 @@ class AsyncFactorService:
                         progress=progress,
                     )
 
-                    # P1.2: Broadcast mining progress via WebSocket
-                    try:
+                    # P1.2: Broadcast mining progress via WebSocket (non-critical)
+                    with contextlib.suppress(Exception):
                         await broadcast_task_update(
                             task_id=task_id,
                             task_type="mining",
@@ -1397,8 +1387,6 @@ class AsyncFactorService:
                                 "failed": failed_count,
                             },
                         )
-                    except Exception:
-                        pass  # Non-critical, continue execution
 
                     # Small delay to avoid overwhelming LLM
                     await asyncio.sleep(0.5)
@@ -1425,9 +1413,36 @@ class AsyncFactorService:
         task = await self.mining_task_repo.get_by_id(task_id)
         return task.get("status") == "cancelled" if task else False
 
+    def _parse_task_datetime(self, value: str | datetime | None) -> datetime | None:
+        """Parse datetime from string or return as-is."""
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
+        return value
+
+    def _task_data_to_status(self, task_data: dict) -> MiningTaskStatus:
+        """Convert task data dict to MiningTaskStatus."""
+        return MiningTaskStatus(
+            id=task_data["id"],
+            name=task_data["name"],
+            description=task_data.get("description", ""),
+            factor_families=task_data.get("factor_families", []),
+            target_count=task_data["target_count"],
+            generated_count=task_data["generated_count"],
+            passed_count=task_data["passed_count"],
+            failed_count=task_data["failed_count"],
+            status=task_data["status"],
+            progress=task_data["progress"],
+            error_message=task_data.get("error_message"),
+            created_at=self._parse_task_datetime(task_data["created_at"]),
+            started_at=self._parse_task_datetime(task_data.get("started_at")),
+            completed_at=self._parse_task_datetime(task_data.get("completed_at")),
+        )
+
     async def list_mining_tasks(
         self,
-        status: Optional[str] = None,
+        status: str | None = None,
         limit: int = 20,
     ) -> list[MiningTaskStatus]:
         """List mining tasks from database.
@@ -1443,29 +1458,9 @@ class AsyncFactorService:
             status=status,
             limit=limit,
         )
+        return [self._task_data_to_status(task_data) for task_data in task_dicts]
 
-        tasks = []
-        for task_data in task_dicts:
-            tasks.append(MiningTaskStatus(
-                id=task_data["id"],
-                name=task_data["name"],
-                description=task_data.get("description", ""),
-                factor_families=task_data.get("factor_families", []),
-                target_count=task_data["target_count"],
-                generated_count=task_data["generated_count"],
-                passed_count=task_data["passed_count"],
-                failed_count=task_data["failed_count"],
-                status=task_data["status"],
-                progress=task_data["progress"],
-                error_message=task_data.get("error_message"),
-                created_at=datetime.fromisoformat(task_data["created_at"]) if isinstance(task_data["created_at"], str) else task_data["created_at"],
-                started_at=datetime.fromisoformat(task_data["started_at"]) if task_data.get("started_at") and isinstance(task_data["started_at"], str) else task_data.get("started_at"),
-                completed_at=datetime.fromisoformat(task_data["completed_at"]) if task_data.get("completed_at") and isinstance(task_data["completed_at"], str) else task_data.get("completed_at"),
-            ))
-
-        return tasks
-
-    async def get_mining_task(self, task_id: str) -> Optional[MiningTaskStatus]:
+    async def get_mining_task(self, task_id: str) -> MiningTaskStatus | None:
         """Get mining task by ID from database.
 
         Args:
@@ -1475,24 +1470,8 @@ class AsyncFactorService:
             Mining task status or None
         """
         task_data = await self.mining_task_repo.get_by_id(task_id)
-
         if task_data:
-            return MiningTaskStatus(
-                id=task_data["id"],
-                name=task_data["name"],
-                description=task_data.get("description", ""),
-                factor_families=task_data.get("factor_families", []),
-                target_count=task_data["target_count"],
-                generated_count=task_data["generated_count"],
-                passed_count=task_data["passed_count"],
-                failed_count=task_data["failed_count"],
-                status=task_data["status"],
-                progress=task_data["progress"],
-                error_message=task_data.get("error_message"),
-                created_at=datetime.fromisoformat(task_data["created_at"]) if isinstance(task_data["created_at"], str) else task_data["created_at"],
-                started_at=datetime.fromisoformat(task_data["started_at"]) if task_data.get("started_at") and isinstance(task_data["started_at"], str) else task_data.get("started_at"),
-                completed_at=datetime.fromisoformat(task_data["completed_at"]) if task_data.get("completed_at") and isinstance(task_data["completed_at"], str) else task_data.get("completed_at"),
-            )
+            return self._task_data_to_status(task_data)
         return None
 
     async def cancel_mining_task(self, task_id: str) -> bool:
@@ -1590,10 +1569,11 @@ class AsyncFactorService:
             factors.append(factor)
 
         # Calculate real correlation matrix using factor values
-        from iqfmp.core.factor_engine import FactorEngine
-        from iqfmp.core.data_provider import DataProvider
-        from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
         import numpy as np
+
+        from iqfmp.core.data_provider import DataProvider
+        from iqfmp.core.factor_engine import FactorEngine
+        from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
 
         correlation_matrix: dict[str, dict[str, float]] = {}
 
@@ -1671,11 +1651,11 @@ class SyncFactorService:
 
     def __init__(self) -> None:
         """Initialize sync factor service."""
-        self._async_service: Optional["AsyncFactorService"] = None
+        self._async_service: AsyncFactorService | None = None
         # Fallback to in-memory storage if DB not available
         self._factors: dict[str, Factor] = {}
-        self._llm_provider: Optional[LLMProvider] = None
-        self._generation_agent: Optional[FactorGenerationAgent] = None
+        self._llm_provider: LLMProvider | None = None
+        self._generation_agent: FactorGenerationAgent | None = None
 
     def _get_llm_provider(self) -> LLMProvider:
         if self._llm_provider is None:
@@ -1755,15 +1735,15 @@ class SyncFactorService:
 '''
             return self.create_factor(name=name, family=family, code=code, target_task=target_task)
 
-    def get_factor(self, factor_id: str) -> Optional[Factor]:
+    def get_factor(self, factor_id: str) -> Factor | None:
         return self._factors.get(factor_id)
 
     def list_factors(
         self,
         page: int = 1,
         page_size: int = 10,
-        family: Optional[str] = None,
-        status: Optional[str] = None,
+        family: str | None = None,
+        status: str | None = None,
     ) -> tuple[list[Factor], int]:
         factors = list(self._factors.values())
         if family:
@@ -1794,7 +1774,7 @@ class SyncFactorService:
         return False
 
     def evaluate_factor(
-        self, factor_id: str, splits: list[str], market_splits: list[str] = None
+        self, factor_id: str, splits: list[str], _market_splits: list[str] = None
     ) -> tuple[FactorMetrics, StabilityReport, bool, int]:
         factor = self._factors.get(factor_id)
         if not factor:
@@ -1807,8 +1787,8 @@ class SyncFactorService:
             sharpe=1.8,
             max_drawdown=0.15,
             turnover=0.3,
-            ic_by_split={s: 0.05 for s in splits},
-            sharpe_by_split={s: 1.8 for s in splits},
+            ic_by_split=dict.fromkeys(splits, 0.05),
+            sharpe_by_split=dict.fromkeys(splits, 1.8),
         )
         stability = StabilityReport(
             time_stability={"monthly": 0.8, "quarterly": 0.75},

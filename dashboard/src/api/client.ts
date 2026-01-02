@@ -1,12 +1,19 @@
 /**
  * API Client - HTTP 客户端配置
+ *
+ * Features:
+ * - Automatic token refresh on 401 responses
+ * - Bearer token authentication
+ * - Query parameter support
  */
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1'
 const TOKEN_KEY = 'iqfmp_access_token'
+const REFRESH_TOKEN_KEY = 'iqfmp_refresh_token'
 
 interface RequestOptions extends RequestInit {
   params?: Record<string, string | number | undefined>
+  _isRetry?: boolean // Internal flag to prevent infinite retry loops
 }
 
 class ApiError extends Error {
@@ -20,8 +27,60 @@ class ApiError extends Error {
   }
 }
 
+// Track ongoing refresh to prevent multiple simultaneous refresh requests
+let refreshPromise: Promise<boolean> | null = null
+
+async function tryRefreshToken(): Promise<boolean> {
+  // If already refreshing, wait for that to complete
+  if (refreshPromise) {
+    return refreshPromise
+  }
+
+  refreshPromise = (async () => {
+    try {
+      let refreshToken: string | null = null
+      try {
+        refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY)
+      } catch {
+        // localStorage unavailable
+      }
+
+      if (!refreshToken) {
+        return false
+      }
+
+      const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      })
+
+      if (!response.ok) {
+        return false
+      }
+
+      const data = await response.json()
+      if (data.access_token) {
+        try {
+          localStorage.setItem(TOKEN_KEY, data.access_token)
+        } catch {
+          // localStorage unavailable
+        }
+        return true
+      }
+      return false
+    } catch {
+      return false
+    } finally {
+      refreshPromise = null
+    }
+  })()
+
+  return refreshPromise
+}
+
 async function request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-  const { params, ...fetchOptions } = options
+  const { params, _isRetry, ...fetchOptions } = options
 
   let url = `${API_BASE_URL}${endpoint}`
 
@@ -55,6 +114,22 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
       ...fetchOptions.headers,
     },
   })
+
+  // Handle 401 Unauthorized - try to refresh token
+  if (response.status === 401 && !_isRetry && !endpoint.includes('/auth/')) {
+    const refreshed = await tryRefreshToken()
+    if (refreshed) {
+      // Retry the original request with new token
+      return request<T>(endpoint, { ...options, _isRetry: true })
+    }
+    // Refresh failed - clear tokens and redirect to login
+    try {
+      localStorage.removeItem(TOKEN_KEY)
+      localStorage.removeItem(REFRESH_TOKEN_KEY)
+    } catch {
+      // localStorage unavailable
+    }
+  }
 
   if (!response.ok) {
     let errorData

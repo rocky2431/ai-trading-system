@@ -821,11 +821,56 @@ class OrderManager:
 
 
 class PartialFillHandler:
-    """Handle partial fills for orders."""
+    """Handle partial fills for orders.
 
-    def __init__(self) -> None:
-        """Initialize partial fill handler."""
-        self._fills: dict[str, list[PartialFill]] = {}
+    Uses Redis for persistence per CLAUDE.md critical state rules.
+    Partial fills are critical for order reconciliation and audit.
+    """
+
+    REDIS_PREFIX = "partial_fills:"
+    TTL_SECONDS = 86400 * 7  # 7 days
+
+    def __init__(self, redis_client: Any = None) -> None:
+        """Initialize partial fill handler with Redis persistence."""
+        self._redis = redis_client if redis_client is not None else self._get_redis_client()
+
+    def _get_redis_client(self) -> Any:
+        """Get Redis client. Returns None if unavailable (logs warning)."""
+        try:
+            from iqfmp.db import get_redis_client
+            client = get_redis_client()
+            if client is None:
+                logger.warning(
+                    "Redis unavailable for PartialFillHandler. "
+                    "Partial fills will not be persisted."
+                )
+            return client
+        except Exception as e:
+            logger.warning(f"Failed to connect to Redis for partial fills: {e}")
+            return None
+
+    def _serialize_fill(self, fill: PartialFill) -> str:
+        """Serialize PartialFill to JSON."""
+        return json.dumps({
+            "order_id": fill.order_id,
+            "filled_quantity": str(fill.filled_quantity),
+            "fill_price": str(fill.fill_price),
+            "timestamp": fill.timestamp.isoformat(),
+            "trade_id": fill.trade_id,
+            "commission": str(fill.commission) if fill.commission else None,
+        })
+
+    def _deserialize_fill(self, data: str) -> PartialFill:
+        """Deserialize JSON to PartialFill."""
+        obj = json.loads(data)
+        return PartialFill(
+            order_id=obj["order_id"],
+            filled_quantity=Decimal(obj["filled_quantity"]),
+            fill_price=Decimal(obj["fill_price"]),
+            timestamp=datetime.fromisoformat(obj["timestamp"]),
+            trade_id=obj.get("trade_id"),
+            commission=Decimal(obj["commission"]) if obj.get("commission") else None,
+        )
 
     def record(self, fill: PartialFill) -> None:
         """Record a partial fill.
@@ -833,9 +878,16 @@ class PartialFillHandler:
         Args:
             fill: Partial fill to record
         """
-        if fill.order_id not in self._fills:
-            self._fills[fill.order_id] = []
-        self._fills[fill.order_id].append(fill)
+        if self._redis is None:
+            logger.warning(f"Cannot persist partial fill for order {fill.order_id}: Redis unavailable")
+            return
+
+        try:
+            key = f"{self.REDIS_PREFIX}{fill.order_id}"
+            self._redis.rpush(key, self._serialize_fill(fill))
+            self._redis.expire(key, self.TTL_SECONDS)
+        except Exception as e:
+            logger.error(f"Failed to record partial fill for order {fill.order_id}: {e}")
 
     def get_fills(self, order_id: str) -> list[PartialFill]:
         """Get fills for an order.
@@ -846,7 +898,22 @@ class PartialFillHandler:
         Returns:
             List of partial fills
         """
-        return self._fills.get(order_id, [])
+        if self._redis is None:
+            return []
+
+        try:
+            key = f"{self.REDIS_PREFIX}{order_id}"
+            fills_data = self._redis.lrange(key, 0, -1)
+            fills = []
+            for data in fills_data:
+                try:
+                    fills.append(self._deserialize_fill(data))
+                except Exception as e:
+                    logger.error(f"Failed to deserialize partial fill: {e}")
+            return fills
+        except Exception as e:
+            logger.error(f"Failed to get partial fills for order {order_id}: {e}")
+            return []
 
     def get_total_filled(self, order_id: str) -> Decimal:
         """Get total filled quantity.

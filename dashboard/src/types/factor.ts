@@ -10,12 +10,12 @@ export type FactorFamily =
   | 'sentiment'
   | 'fundamental'
 
+// Status values aligned with backend: src/iqfmp/api/factors/schemas.py
 export type FactorStatus =
-  | 'draft'
-  | 'evaluating'
-  | 'approved'
-  | 'rejected'
-  | 'archived'
+  | 'candidate'   // Newly created, pending evaluation
+  | 'rejected'    // Failed evaluation
+  | 'core'        // Passed evaluation, included in strategy
+  | 'redundant'   // Passed but redundant with existing factors
 
 export interface FactorMetrics {
   ic: number                    // Information Coefficient

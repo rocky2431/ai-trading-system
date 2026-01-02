@@ -13,35 +13,32 @@ Six-dimensional coverage:
 """
 
 import ast
+import logging
 import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional, Protocol
 
+from iqfmp.agents.field_capability import (
+    DataSourceType,
+    DynamicCapability,
+    create_capability_for_sources,
+    create_default_capability,
+)
+from iqfmp.core.review import (
+    HumanReviewGate,
+    ReviewConfig,
+    ReviewRequest,
+    ReviewStatus,
+)
+from iqfmp.core.security import ASTSecurityChecker
 from iqfmp.llm.validation import (
     ExpressionGate,
     ExpressionValidationResult,
     FieldSet,
 )
-from iqfmp.core.security import ASTSecurityChecker
-from iqfmp.core.review import (
-    HumanReviewGate,
-    ReviewRequest,
-    ReviewConfig,
-    ReviewStatus,
-)
-from iqfmp.agents.field_capability import (
-    DataSourceType,
-    DynamicCapability,
-    FieldRegistry,
-    OperatorCatalog,
-    TechnicalIndicatorCatalog,
-    INDICATOR_CATALOG,
-    create_default_capability,
-    create_capability_for_sources,
-    validate_expression_fields,
-    generate_field_error_feedback,
-)
+
+logger = logging.getLogger(__name__)
 
 
 class FactorGenerationError(Exception):
@@ -463,7 +460,7 @@ RSI($close, 14)
     def render(
         self,
         user_request: str,
-        factor_family: Optional[FactorFamily] = None,
+        factor_family: FactorFamily | None = None,
         include_examples: bool = False,
         include_field_constraints: bool = False,
         include_capability_context: bool = True,
@@ -555,7 +552,7 @@ class LLMProviderProtocol(Protocol):
     """Protocol for LLM provider interface."""
 
     async def complete(
-        self, prompt: str, system_prompt: Optional[str] = None, **kwargs: Any
+        self, prompt: str, system_prompt: str | None = None, **kwargs: Any
     ) -> Any:
         """Complete a prompt."""
         ...
@@ -585,10 +582,10 @@ class FactorGenerationConfig:
     """
 
     name: str
-    model: Optional[str] = None  # ModelType.value, None = use registry default
-    temperature: Optional[float] = None  # None = use registry default
+    model: str | None = None  # ModelType.value, None = use registry default
+    temperature: float | None = None  # None = use registry default
     n_candidates: int = 3
-    candidate_seed: Optional[int] = None
+    candidate_seed: int | None = None
     rerank_by_indicator_coverage: bool = True
     max_refine_rounds: int = 1
     tool_context_enabled: bool = False
@@ -729,10 +726,10 @@ class FactorGenerationAgent:
         if self.config.vector_dedup_enabled:
             try:
                 from iqfmp.vector import (
-                    SimilaritySearcher,
                     FactorVectorStore,
-                    QdrantUnavailableError,
                     QdrantConfig,
+                    QdrantUnavailableError,
+                    SimilaritySearcher,
                 )
 
                 # 根据严格模式决定是否允许 Mock
@@ -778,7 +775,7 @@ class FactorGenerationAgent:
                     )
 
         # P0 Security: Initialize HumanReviewGate for manual approval
-        self._review_gate: Optional[HumanReviewGate] = None
+        self._review_gate: HumanReviewGate | None = None
         if self.config.human_review_enabled:
             review_config = ReviewConfig(
                 timeout_seconds=self.config.human_review_timeout_seconds,
@@ -792,7 +789,7 @@ class FactorGenerationAgent:
     def _check_duplicate_factor(
         self,
         user_request: str,
-        factor_family: Optional[FactorFamily] = None,
+        factor_family: FactorFamily | None = None,
     ) -> Optional["GeneratedFactor"]:
         """Check if a similar factor already exists in vector store.
 
@@ -887,7 +884,7 @@ class FactorGenerationAgent:
     async def generate(
         self,
         user_request: str,
-        factor_family: Optional[FactorFamily] = None,
+        factor_family: FactorFamily | None = None,
     ) -> GeneratedFactor:
         """Generate a factor from natural language description.
 
@@ -928,7 +925,10 @@ class FactorGenerationAgent:
         # Optional safe tool context (read-only): fields + similar factors
         if self.config.tool_context_enabled:
             try:
-                from iqfmp.llm.tools.read_only import list_available_fields, search_similar_factors
+                from iqfmp.llm.tools.read_only import (
+                    list_available_fields,
+                    search_similar_factors,
+                )
 
                 fields = list_available_fields(field_set=FieldSet.CRYPTO, include_prefix=True)
                 similar = search_similar_factors(
@@ -1008,9 +1008,12 @@ class FactorGenerationAgent:
             raise InvalidFactorError("No candidates returned by LLM provider")
 
         # Score & select best candidate
-        from iqfmp.agents.indicator_intelligence import analyze_indicator_coverage, generate_missing_indicator_feedback
+        from iqfmp.agents.indicator_intelligence import (
+            analyze_indicator_coverage,
+            generate_missing_indicator_feedback,
+        )
 
-        best_code: Optional[str] = None
+        best_code: str | None = None
         best_is_python = False
         best_score = float("-inf")
         best_analysis = None
@@ -1359,7 +1362,7 @@ class FactorGenerationAgent:
     def _validate_qlib_expression(
         self,
         expression: str,
-        allowed_fields: Optional[list[str]] = None,
+        allowed_fields: list[str] | None = None,
     ) -> ExpressionValidationResult:
         """Validate Qlib expression syntax using ExpressionGate.
 
@@ -1376,7 +1379,7 @@ class FactorGenerationAgent:
     def _is_valid_qlib_expression(
         self,
         expression: str,
-        allowed_fields: Optional[list[str]] = None,
+        allowed_fields: list[str] | None = None,
     ) -> bool:
         """Quick check if expression is valid.
 
@@ -1422,7 +1425,7 @@ class FactorGenerationAgent:
         original_code: str,
         error_message: str,
         user_request: str,
-        factor_family: Optional[FactorFamily] = None,
+        factor_family: FactorFamily | None = None,
     ) -> GeneratedFactor:
         """Refine a failed factor based on error feedback.
 
@@ -1514,7 +1517,7 @@ Output: ONLY return the corrected Qlib expression. No explanation needed."""
                 temperature=temperature,
             )
             raw_content = response.content if hasattr(response, "content") else str(response)
-            print(f"DEBUG Refinement Response: {raw_content[:500] if raw_content else 'EMPTY'}")
+            logger.debug(f"Refinement Response: {raw_content[:500] if raw_content else 'EMPTY'}")
 
         except Exception as e:
             raise FactorGenerationError(f"LLM refinement call failed: {e}") from e

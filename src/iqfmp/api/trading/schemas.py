@@ -1,13 +1,22 @@
 """Trading API schemas.
 
 Pydantic models for trading endpoints.
+
+Note: Financial values use Decimal with custom JSON serializers per CLAUDE.md.
 """
 
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PlainSerializer, model_validator
+
+# Custom Decimal type that serializes to string for JSON precision
+DecimalStr = Annotated[
+    Decimal,
+    PlainSerializer(lambda x: str(x), return_type=str),
+]
 
 
 # ============== Enums ==============
@@ -59,14 +68,14 @@ class Position(BaseModel):
     id: str
     symbol: str
     side: PositionSide
-    size: float
-    entry_price: float = Field(alias="entryPrice")
-    mark_price: float = Field(alias="markPrice")
+    size: DecimalStr
+    entry_price: DecimalStr = Field(alias="entryPrice")
+    mark_price: DecimalStr = Field(alias="markPrice")
     leverage: int = 1
-    unrealized_pnl: float = Field(alias="unrealizedPnl")
-    unrealized_pnl_percent: float = Field(alias="unrealizedPnlPercent")
-    margin_used: float = Field(alias="marginUsed")
-    liquidation_price: Optional[float] = Field(None, alias="liquidationPrice")
+    unrealized_pnl: DecimalStr = Field(alias="unrealizedPnl")
+    unrealized_pnl_percent: DecimalStr = Field(alias="unrealizedPnlPercent")
+    margin_used: DecimalStr = Field(alias="marginUsed")
+    liquidation_price: Optional[DecimalStr] = Field(None, alias="liquidationPrice")
     created_at: datetime = Field(alias="createdAt")
 
     class Config:
@@ -82,7 +91,7 @@ class PositionResponse(BaseModel):
 class ClosePositionRequest(BaseModel):
     """Request to close a position."""
     reduce_only: bool = True
-    price: Optional[float] = None  # For limit close
+    price: Optional[DecimalStr] = None  # For limit close
 
 
 class ClosePositionResponse(BaseModel):
@@ -90,7 +99,7 @@ class ClosePositionResponse(BaseModel):
     success: bool
     message: str
     order_id: Optional[str] = None
-    realized_pnl: Optional[float] = None
+    realized_pnl: Optional[DecimalStr] = None
 
 
 class CloseAllPositionsResponse(BaseModel):
@@ -98,7 +107,7 @@ class CloseAllPositionsResponse(BaseModel):
     success: bool
     message: str
     closed_count: int
-    total_realized_pnl: float
+    total_realized_pnl: DecimalStr
 
 
 # ============== Order Models ==============
@@ -110,10 +119,10 @@ class Order(BaseModel):
     symbol: str
     side: OrderSide
     type: OrderType
-    price: Optional[float] = None
-    size: float
-    filled: float = 0
-    remaining: float = 0
+    price: Optional[DecimalStr] = None
+    size: DecimalStr
+    filled: DecimalStr = Decimal("0")
+    remaining: DecimalStr = Decimal("0")
     status: OrderStatus
     created_at: datetime = Field(alias="createdAt")
     updated_at: Optional[datetime] = Field(None, alias="updatedAt")
@@ -133,9 +142,9 @@ class CreateOrderRequest(BaseModel):
     symbol: str = Field(..., min_length=1, description="Trading pair symbol (e.g., BTCUSDT)")
     side: OrderSide
     type: OrderType
-    size: float = Field(..., gt=0, description="Order size, must be positive")
-    price: Optional[float] = Field(None, gt=0, description="Limit price, required for LIMIT orders")
-    stop_price: Optional[float] = Field(None, gt=0, description="Stop trigger price")
+    size: DecimalStr = Field(..., gt=0, description="Order size, must be positive")
+    price: Optional[DecimalStr] = Field(None, gt=0, description="Limit price, required for LIMIT orders")
+    stop_price: Optional[DecimalStr] = Field(None, gt=0, description="Stop trigger price")
     leverage: int = Field(1, ge=1, le=125, description="Leverage multiplier (1-125)")
     reduce_only: bool = False
     post_only: bool = False
@@ -176,13 +185,13 @@ class CancelAllOrdersResponse(BaseModel):
 
 class AccountInfo(BaseModel):
     """Account information."""
-    total_equity: float = Field(alias="totalEquity")
-    available_balance: float = Field(alias="availableBalance")
-    margin_used: float = Field(alias="marginUsed")
-    unrealized_pnl: float = Field(alias="unrealizedPnl")
-    realized_pnl: float = Field(alias="realizedPnl")
-    today_pnl: float = Field(alias="todayPnl")
-    today_pnl_percent: float = Field(alias="todayPnlPercent")
+    total_equity: DecimalStr = Field(alias="totalEquity")
+    available_balance: DecimalStr = Field(alias="availableBalance")
+    margin_used: DecimalStr = Field(alias="marginUsed")
+    unrealized_pnl: DecimalStr = Field(alias="unrealizedPnl")
+    realized_pnl: DecimalStr = Field(alias="realizedPnl")
+    today_pnl: DecimalStr = Field(alias="todayPnl")
+    today_pnl_percent: DecimalStr = Field(alias="todayPnlPercent")
 
     class Config:
         populate_by_name = True
@@ -191,10 +200,10 @@ class AccountInfo(BaseModel):
 class PnLDataPoint(BaseModel):
     """PnL history data point."""
     timestamp: datetime
-    realized_pnl: float = Field(alias="realizedPnl")
-    unrealized_pnl: float = Field(alias="unrealizedPnl")
-    total_pnl: float = Field(alias="totalPnl")
-    equity: float
+    realized_pnl: DecimalStr = Field(alias="realizedPnl")
+    unrealized_pnl: DecimalStr = Field(alias="unrealizedPnl")
+    total_pnl: DecimalStr = Field(alias="totalPnl")
+    equity: DecimalStr
 
     class Config:
         populate_by_name = True
@@ -215,11 +224,11 @@ class RiskAlert(BaseModel):
 class RiskMetrics(BaseModel):
     """Risk metrics."""
     level: RiskLevel
-    margin_usage_percent: float = Field(alias="marginUsagePercent")
-    max_drawdown_percent: float = Field(alias="maxDrawdownPercent")
-    current_drawdown_percent: float = Field(alias="currentDrawdownPercent")
-    daily_loss_percent: float = Field(alias="dailyLossPercent")
-    position_concentration: float = Field(alias="positionConcentration")
+    margin_usage_percent: DecimalStr = Field(alias="marginUsagePercent")
+    max_drawdown_percent: DecimalStr = Field(alias="maxDrawdownPercent")
+    current_drawdown_percent: DecimalStr = Field(alias="currentDrawdownPercent")
+    daily_loss_percent: DecimalStr = Field(alias="dailyLossPercent")
+    position_concentration: DecimalStr = Field(alias="positionConcentration")
     alerts: list[RiskAlert]
 
     class Config:

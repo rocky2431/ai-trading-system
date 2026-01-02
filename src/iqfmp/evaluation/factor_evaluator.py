@@ -10,11 +10,14 @@ All computations MUST go through Qlib. No local numpy/scipy calculations.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 from iqfmp.evaluation.research_ledger import (
     ResearchLedger,
@@ -61,7 +64,7 @@ def _ensure_qlib_initialized() -> bool:
         return True
 
     except Exception as e:
-        print(f"Warning: Qlib initialization failed: {e}")
+        logger.warning(f"Qlib initialization failed: {e}")
         QLIB_AVAILABLE = False
         _qlib_initialized = True
         return False

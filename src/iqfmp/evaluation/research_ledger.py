@@ -610,7 +610,7 @@ class PostgresStorage(LedgerStorage):
                 ]
         except Exception as e:
             # If database not available, return empty
-            print(f"Warning: PostgreSQL load failed: {e}")
+            logger.warning(f"PostgreSQL load failed: {e}")
             return []
 
     async def save_trial_async(

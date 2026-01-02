@@ -10,12 +10,15 @@ Integrates:
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import uuid
 from datetime import datetime
 from typing import Optional
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 import pandas as pd
 import redis.asyncio as redis
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -174,7 +177,7 @@ class AsyncFactorService:
             try:
                 self._vector_store = FactorVectorStore()
             except Exception as e:
-                print(f"Warning: Failed to initialize vector store: {e}")
+                logger.warning(f"Failed to initialize vector store: {e}")
                 self._vector_store = None
         return self._vector_store
 
@@ -186,7 +189,7 @@ class AsyncFactorService:
                     similarity_threshold=0.85,  # 85% 相似度阈值
                 )
             except Exception as e:
-                print(f"Warning: Failed to initialize similarity searcher: {e}")
+                logger.warning(f"Failed to initialize similarity searcher: {e}")
                 self._similarity_searcher = None
         return self._similarity_searcher
 
@@ -249,11 +252,11 @@ class AsyncFactorService:
                 metadata=metadata,
             )
 
-            print(f"Indexed factor to vector store: {factor.id} ({factor.name})")
+            logger.info(f"Indexed factor to vector store: {factor.id} ({factor.name})")
             return True
 
         except Exception as e:
-            print(f"Warning: Failed to index factor to vector store: {e}")
+            logger.warning(f"Failed to index factor to vector store: {e}")
             return False
 
     async def _check_similarity(
@@ -292,7 +295,7 @@ class AsyncFactorService:
             return results
 
         except Exception as e:
-            print(f"Warning: Similarity check failed: {e}")
+            logger.warning(f"Similarity check failed: {e}")
             return []
 
     def _generate_code_hash(self, code: str) -> str:
@@ -360,7 +363,7 @@ class AsyncFactorService:
                 family=factor.family,
             )
         except Exception as e:
-            print(f"Warning: Failed to broadcast factor creation: {e}")
+            logger.warning(f"Failed to broadcast factor creation: {e}")
 
         return factor
 
@@ -418,7 +421,7 @@ class AsyncFactorService:
 
         except Exception as e:
             # Fallback to simple generation if LLM fails
-            print(f"Warning: LLM generation failed ({e}), using fallback")
+            logger.warning(f"LLM generation failed ({e}), using fallback")
             generated_name = self._generate_name(description, family)
             generated_code = f'''def {generated_name}(df):
     """
@@ -470,7 +473,7 @@ class AsyncFactorService:
         # Log warnings if any
         if warnings:
             for warning in warnings:
-                print(f"Warning: {warning}")
+                logger.warning(warning)
 
         return factor
 
@@ -605,9 +608,9 @@ class AsyncFactorService:
                     symbol=str(symbol),
                     timeframe="1d",
                 )
-                print(f"Persisted {rows_saved} factor values to database for {factor.name}")
+                logger.info(f"Persisted {rows_saved} factor values to database for {factor.name}")
             except Exception as e:
-                print(f"Warning: Failed to persist factor values: {e}")
+                logger.warning(f"Failed to persist factor values: {e}")
 
             # Prepare evaluation DataFrame
             eval_df = self._prepare_evaluation_data(df, factor_values)
@@ -696,7 +699,7 @@ class AsyncFactorService:
                         "overall_score": stability_report.overall_score.value,
                     }
                 except Exception as e:
-                    print(f"Warning: Stability analysis failed: {e}")
+                    logger.warning(f"Stability analysis failed: {e}")
                     stability_dict["error"] = str(e)
 
             # ====== 5. Estimate Transaction Costs if enabled ======
@@ -740,12 +743,12 @@ class AsyncFactorService:
             # H1 FIX: Raise proper error instead of returning zero metrics
             # Zero metrics would cause factors to be incorrectly evaluated as "poor"
             error_msg = f"Data loading failed for factor {factor_id} (symbol={symbol}, timeframe={timeframe}): {e}"
-            print(f"ERROR: {error_msg}")
+            logger.error(error_msg)
             raise FactorEvaluationError(error_msg)
         except Exception as e:
             # H1 FIX: Raise proper error for any evaluation failure
             error_msg = f"Factor evaluation failed for {factor_id}: {e}"
-            print(f"ERROR: {error_msg}")
+            logger.error(error_msg)
             raise FactorEvaluationError(error_msg)
 
         # Get dynamic threshold
@@ -794,7 +797,7 @@ class AsyncFactorService:
                 },
             )
         except Exception as e:
-            print(f"Warning: Failed to broadcast evaluation completion: {e}")
+            logger.warning(f"Failed to broadcast evaluation completion: {e}")
 
         return metrics, stability, passed, trial_number
 
@@ -1369,7 +1372,7 @@ class AsyncFactorService:
                                 failed_count += 1
                     except Exception as e:
                         failed_count += 1
-                        print(f"Mining task error: {e}")
+                        logger.error(f"Mining task error: {e}")
 
                     # Update progress in database
                     progress = ((i + 1) / target_count) * 100
@@ -1639,7 +1642,7 @@ class AsyncFactorService:
 
         except Exception as e:
             # Fallback if data not available
-            print(f"Warning: Factor comparison using fallback: {e}")
+            logger.warning(f"Factor comparison using fallback: {e}")
             for f1 in factors:
                 correlation_matrix[f1.id] = {}
                 for f2 in factors:
@@ -1739,7 +1742,7 @@ class SyncFactorService:
                 target_task=target_task,
             )
         except Exception as e:
-            print(f"Warning: LLM generation failed ({e}), using fallback")
+            logger.warning(f"LLM generation failed ({e}), using fallback")
             name = self._generate_name(description, family)
             code = f'''def {name}(df):
     """

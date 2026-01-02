@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class FactorGenerateRequest(BaseModel):
@@ -139,6 +139,19 @@ class MiningDataConfig(BaseModel):
     train_ratio: float = Field(default=0.6, ge=0.1, le=0.9, description="Training set ratio")
     valid_ratio: float = Field(default=0.2, ge=0.0, le=0.4, description="Validation set ratio")
     test_ratio: float = Field(default=0.2, ge=0.1, le=0.4, description="Test set ratio")
+
+    @model_validator(mode="after")
+    def validate_ratios_and_dates(self) -> "MiningDataConfig":
+        """Validate that ratios sum to 1.0 and dates are valid."""
+        ratio_sum = self.train_ratio + self.valid_ratio + self.test_ratio
+        if abs(ratio_sum - 1.0) > 0.001:
+            raise ValueError(f"Ratios must sum to 1.0, got {ratio_sum:.3f}")
+
+        # Validate date ordering
+        if self.start_date >= self.end_date:
+            raise ValueError("start_date must be before end_date")
+
+        return self
 
 
 class MiningBenchmarkConfig(BaseModel):

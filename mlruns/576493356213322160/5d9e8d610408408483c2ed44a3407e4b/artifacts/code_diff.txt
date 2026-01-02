@@ -1,0 +1,1074 @@
+diff --git a/src/iqfmp/agents/field_capability.py b/src/iqfmp/agents/field_capability.py
+index a701fb0..d2b2a57 100644
+--- a/src/iqfmp/agents/field_capability.py
++++ b/src/iqfmp/agents/field_capability.py
+@@ -872,23 +872,34 @@ async def detect_available_sources_from_db(
+     Returns:
+         List of available DataSourceType values
+     """
+-    # Core OHLCV always available
++    import logging
++    from sqlalchemy import select, func
++
++    logger = logging.getLogger(__name__)
++
++    # Core OHLCV and derivatives always available
+     available = [DataSourceType.OHLCV, DataSourceType.DERIVATIVES]
+ 
+-    # TODO: Query database to check for:
+-    # - Order book data presence
+-    # - On-chain metrics availability
+-    # - Sentiment data availability
+-
+-    # Placeholder: In production, query the actual database
+-    # Example query pattern:
+-    # result = await session.execute(
+-    #     select(func.count())
+-    #     .select_from(OrderBookSnapshot)
+-    #     .where(OrderBookSnapshot.instrument == instrument)
+-    # )
+-    # if result.scalar() > 0:
+-    #     available.append(DataSourceType.ORDERBOOK)
++    if session is None:
++        return available
++
++    # Check for order book data availability
++    try:
++        from iqfmp.db.models import OrderBookSnapshotORM
++
++        result = await session.execute(
++            select(func.count())
++            .select_from(OrderBookSnapshotORM)
++            .where(OrderBookSnapshotORM.symbol == instrument)
++            .limit(1)
++        )
++        if (result.scalar() or 0) > 0:
++            available.append(DataSourceType.ORDERBOOK)
++    except Exception as e:
++        logger.warning(f"Failed to check OrderBook availability for {instrument}: {e}")
++
++    # OnChain and Sentiment data sources are not yet implemented in the database schema.
++    # When these models are added, extend this function to check their availability.
+ 
+     return available
+ 
+diff --git a/src/iqfmp/api/main.py b/src/iqfmp/api/main.py
+index 7921f1a..82ebe08 100644
+--- a/src/iqfmp/api/main.py
++++ b/src/iqfmp/api/main.py
+@@ -1,6 +1,7 @@
+ """FastAPI application entry point."""
+ 
+ import logging
++import os
+ import time
+ from collections import defaultdict
+ from contextlib import asynccontextmanager
+@@ -37,7 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+     # Startup: Initialize ConfigService first to restore API keys from config
+     from iqfmp.api.config.service import ConfigService
+     config_service = ConfigService()  # This restores env vars from saved config
+-    print(f"Config initialized from {config_service._config_file}")
++    logger.info(f"Config initialized from {config_service._config_file}")
+ 
+     # M2 FIX: Initialize Qlib for factor evaluation
+     try:
+@@ -59,13 +60,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+ # =============================================================================
+ # P0 SECURITY: Rate Limiting Middleware
+ # Prevents API abuse and DoS attacks per 8.2 API Security requirements
++# Uses Redis for distributed rate limiting across multiple instances
+ # =============================================================================
+ class RateLimitMiddleware(BaseHTTPMiddleware):
+-    """Simple in-memory rate limiter.
++    """Redis-backed rate limiter with in-memory fallback.
+ 
+-    For production, replace with Redis-based rate limiting.
++    Uses Redis sliding window counters for distributed rate limiting.
++    Falls back to in-memory limiting if Redis is unavailable.
+     """
+ 
++    REDIS_PREFIX = "ratelimit:"
++
+     def __init__(
+         self,
+         app: FastAPI,
+@@ -75,8 +80,93 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
+         super().__init__(app)
+         self.requests_per_minute = requests_per_minute
+         self.requests_per_second = requests_per_second
++        # Fallback in-memory storage (used when Redis unavailable)
+         self._minute_requests: dict[str, list[float]] = defaultdict(list)
+         self._second_requests: dict[str, list[float]] = defaultdict(list)
++        self._redis_available: bool | None = None
++
++    async def _get_redis_client(self):
++        """Get Redis client, caching availability status."""
++        if self._redis_available is False:
++            return None
++        try:
++            from iqfmp.db.database import get_redis_client
++            client = get_redis_client()
++            await client.ping()
++            self._redis_available = True
++            return client
++        except Exception:
++            self._redis_available = False
++            logger.warning("Redis unavailable for rate limiting, using in-memory fallback")
++            return None
++
++    async def _check_rate_limit_redis(
++        self, client_ip: str, redis_client
++    ) -> tuple[bool, str, int]:
++        """Check rate limits using Redis sliding window.
++
++        Returns:
++            (is_limited, message, retry_after_seconds)
++        """
++        now = int(time.time())
++
++        # Per-second limit using Redis INCR with TTL
++        second_key = f"{self.REDIS_PREFIX}sec:{client_ip}:{now}"
++        try:
++            count = await redis_client.incr(second_key)
++            if count == 1:
++                await redis_client.expire(second_key, 2)  # Expire after 2 seconds
++            if count > self.requests_per_second:
++                return True, "Rate limit exceeded. Please slow down.", 1
++        except Exception as e:
++            logger.warning(f"Redis rate limit check failed (second): {e}")
++
++        # Per-minute limit using sorted set sliding window
++        minute_key = f"{self.REDIS_PREFIX}min:{client_ip}"
++        window_start = now - 60
++        try:
++            pipe = redis_client.pipeline()
++            # Remove old entries
++            pipe.zremrangebyscore(minute_key, 0, window_start)
++            # Add current request
++            pipe.zadd(minute_key, {str(now): now})
++            # Count requests in window
++            pipe.zcard(minute_key)
++            # Set expiry
++            pipe.expire(minute_key, 70)
++            results = await pipe.execute()
++            request_count = results[2]
++
++            if request_count > self.requests_per_minute:
++                return True, "Rate limit exceeded. Try again in a minute.", 60
++        except Exception as e:
++            logger.warning(f"Redis rate limit check failed (minute): {e}")
++
++        return False, "", 0
++
++    async def _check_rate_limit_memory(self, client_ip: str) -> tuple[bool, str, int]:
++        """Fallback in-memory rate limiting."""
++        now = time.time()
++
++        # Per-second limit
++        self._second_requests[client_ip] = [
++            t for t in self._second_requests[client_ip] if now - t < 1
++        ]
++        if len(self._second_requests[client_ip]) >= self.requests_per_second:
++            return True, "Rate limit exceeded. Please slow down.", 1
++
++        # Per-minute limit
++        self._minute_requests[client_ip] = [
++            t for t in self._minute_requests[client_ip] if now - t < 60
++        ]
++        if len(self._minute_requests[client_ip]) >= self.requests_per_minute:
++            return True, "Rate limit exceeded. Try again in a minute.", 60
++
++        # Record request
++        self._second_requests[client_ip].append(now)
++        self._minute_requests[client_ip].append(now)
++
++        return False, "", 0
+ 
+     async def dispatch(self, request: Request, call_next):
+         # Skip rate limiting for health check
+@@ -84,38 +174,30 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
+             return await call_next(request)
+ 
+         # Get client IP (use X-Forwarded-For if behind proxy)
+-        client_ip = request.headers.get("X-Forwarded-For", request.client.host if request.client else "unknown")
++        client_ip = request.headers.get(
++            "X-Forwarded-For", request.client.host if request.client else "unknown"
++        )
+         if "," in client_ip:
+             client_ip = client_ip.split(",")[0].strip()
+ 
+-        now = time.time()
+-
+-        # Clean old entries and check per-second limit
+-        self._second_requests[client_ip] = [
+-            t for t in self._second_requests[client_ip] if now - t < 1
+-        ]
+-        if len(self._second_requests[client_ip]) >= self.requests_per_second:
+-            return JSONResponse(
+-                status_code=429,
+-                content={"detail": "Rate limit exceeded. Please slow down."},
+-                headers={"Retry-After": "1"},
++        # Try Redis first, fall back to in-memory
++        redis_client = await self._get_redis_client()
++        if redis_client:
++            is_limited, message, retry_after = await self._check_rate_limit_redis(
++                client_ip, redis_client
++            )
++        else:
++            is_limited, message, retry_after = await self._check_rate_limit_memory(
++                client_ip
+             )
+ 
+-        # Clean old entries and check per-minute limit
+-        self._minute_requests[client_ip] = [
+-            t for t in self._minute_requests[client_ip] if now - t < 60
+-        ]
+-        if len(self._minute_requests[client_ip]) >= self.requests_per_minute:
++        if is_limited:
+             return JSONResponse(
+                 status_code=429,
+-                content={"detail": "Rate limit exceeded. Try again in a minute."},
+-                headers={"Retry-After": "60"},
++                content={"detail": message},
++                headers={"Retry-After": str(retry_after)},
+             )
+ 
+-        # Record this request
+-        self._second_requests[client_ip].append(now)
+-        self._minute_requests[client_ip].append(now)
+-
+         response = await call_next(request)
+         return response
+ 
+@@ -132,13 +214,23 @@ def create_app() -> FastAPI:
+         openapi_url="/openapi.json",
+     )
+ 
+-    # CORS middleware
++    # CORS middleware - configure via environment for security
++    # CORS_ORIGINS: comma-separated list of allowed origins
++    # Default: localhost development origins only
++    cors_origins_str = os.environ.get(
++        "CORS_ORIGINS",
++        "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173"
++    )
++    cors_origins = [origin.strip() for origin in cors_origins_str.split(",") if origin.strip()]
++
++    # In production, CORS_ORIGINS must be explicitly set to allowed domains
++    # Never use allow_origins=["*"] with allow_credentials=True (security vulnerability)
+     app.add_middleware(
+         CORSMiddleware,
+-        allow_origins=["*"],  # Configure appropriately in production
++        allow_origins=cors_origins,
+         allow_credentials=True,
+-        allow_methods=["*"],
+-        allow_headers=["*"],
++        allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
++        allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+     )
+ 
+     # P0 SECURITY: Rate limiting middleware per 8.2 API Security
+diff --git a/src/iqfmp/api/trading/schemas.py b/src/iqfmp/api/trading/schemas.py
+index 4f1462b..95cabe1 100644
+--- a/src/iqfmp/api/trading/schemas.py
++++ b/src/iqfmp/api/trading/schemas.py
+@@ -7,7 +7,7 @@ from datetime import datetime
+ from enum import Enum
+ from typing import Any, Optional
+ 
+-from pydantic import BaseModel, Field
++from pydantic import BaseModel, Field, model_validator
+ 
+ 
+ # ============== Enums ==============
+@@ -130,17 +130,26 @@ class OrderResponse(BaseModel):
+ 
+ class CreateOrderRequest(BaseModel):
+     """Request to create an order."""
+-    symbol: str
++    symbol: str = Field(..., min_length=1, description="Trading pair symbol (e.g., BTCUSDT)")
+     side: OrderSide
+     type: OrderType
+-    size: float
+-    price: Optional[float] = None
+-    stop_price: Optional[float] = None
+-    leverage: int = 1
++    size: float = Field(..., gt=0, description="Order size, must be positive")
++    price: Optional[float] = Field(None, gt=0, description="Limit price, required for LIMIT orders")
++    stop_price: Optional[float] = Field(None, gt=0, description="Stop trigger price")
++    leverage: int = Field(1, ge=1, le=125, description="Leverage multiplier (1-125)")
+     reduce_only: bool = False
+     post_only: bool = False
+     client_order_id: Optional[str] = None
+ 
++    @model_validator(mode="after")
++    def validate_order_type_requirements(self) -> "CreateOrderRequest":
++        """Validate that LIMIT and STOP_LIMIT orders have price, STOP orders have stop_price."""
++        if self.type in (OrderType.LIMIT, OrderType.STOP_LIMIT) and self.price is None:
++            raise ValueError(f"{self.type.value} orders require a price")
++        if self.type in (OrderType.STOP, OrderType.STOP_LIMIT) and self.stop_price is None:
++            raise ValueError(f"{self.type.value} orders require a stop_price")
++        return self
++
+ 
+ class CreateOrderResponse(BaseModel):
+     """Response after creating an order."""
+diff --git a/src/iqfmp/db/database.py b/src/iqfmp/db/database.py
+index 04f58fe..47827a6 100644
+--- a/src/iqfmp/db/database.py
++++ b/src/iqfmp/db/database.py
+@@ -1,5 +1,6 @@
+ """Database connection and session management for TimescaleDB + Redis."""
+ 
++import logging
+ import os
+ from contextlib import asynccontextmanager, contextmanager
+ from typing import AsyncGenerator, Generator, Optional
+@@ -17,6 +18,8 @@ from sqlalchemy.ext.asyncio import (
+ from sqlalchemy.orm import Session, sessionmaker
+ from sqlalchemy.pool import NullPool
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ class DatabaseSettings(BaseSettings):
+     """Database configuration from environment variables."""
+@@ -124,15 +127,15 @@ async def init_db() -> None:
+     try:
+         async with _engine.begin() as conn:
+             await conn.execute(text("SELECT 1"))
+-        print(f"Connected to TimescaleDB: {settings.PGHOST}:{settings.PGPORT}/{settings.PGDATABASE}")
++        logger.info(f"Connected to TimescaleDB: {settings.PGHOST}:{settings.PGPORT}/{settings.PGDATABASE}")
+     except Exception as e:
+-        print(f"Warning: Failed to connect to TimescaleDB: {e}")
++        logger.error(f"Failed to connect to TimescaleDB: {e}")
+ 
+     try:
+         await _redis_client.ping()
+-        print(f"Connected to Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
++        logger.info(f"Connected to Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+     except Exception as e:
+-        print(f"Warning: Failed to connect to Redis: {e}")
++        logger.error(f"Failed to connect to Redis: {e}")
+ 
+ 
+ async def close_db() -> None:
+@@ -206,7 +209,7 @@ async def get_optional_db() -> AsyncGenerator[AsyncSession | None, None]:
+         async with get_async_session() as session:
+             yield session
+     except Exception as e:
+-        print(f"Warning: Database unavailable, using in-memory fallback: {e}")
++        logger.warning(f"Database unavailable, using in-memory fallback: {e}")
+         yield None
+ 
+ 
+@@ -220,7 +223,7 @@ async def get_optional_redis() -> Optional[redis.Redis]:
+         await client.ping()
+         return client
+     except Exception as e:
+-        print(f"Warning: Redis unavailable, using no-cache mode: {e}")
++        logger.warning(f"Redis unavailable, using no-cache mode: {e}")
+         return None
+ 
+ 
+diff --git a/src/iqfmp/db/repositories.py b/src/iqfmp/db/repositories.py
+index c1625c9..b24240f 100644
+--- a/src/iqfmp/db/repositories.py
++++ b/src/iqfmp/db/repositories.py
+@@ -1,6 +1,7 @@
+ """Repository layer for database operations."""
+ 
+ import json
++import logging
+ from datetime import datetime
+ from typing import Optional
+ 
+@@ -18,6 +19,8 @@ from iqfmp.db.models import (
+ )
+ from iqfmp.models.factor import Factor, FactorMetrics, FactorStatus, StabilityReport
+ 
++logger = logging.getLogger(__name__)
++
+ 
+ class FactorRepository:
+     """Repository for Factor database operations."""
+@@ -40,8 +43,8 @@ class FactorRepository:
+             data = await self.redis.get(f"{self.CACHE_PREFIX}{factor_id}")
+             if data:
+                 return json.loads(data)
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Redis cache get failed for factor {factor_id}: {e}")
+         return None
+ 
+     async def _set_cache(self, factor_id: str, data: dict) -> None:
+@@ -54,8 +57,8 @@ class FactorRepository:
+                 self.CACHE_TTL,
+                 json.dumps(data, default=str),
+             )
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Redis cache set failed for factor {factor_id}: {e}")
+ 
+     async def _invalidate_cache(self, factor_id: str) -> None:
+         """Invalidate factor cache."""
+@@ -63,8 +66,8 @@ class FactorRepository:
+             return
+         try:
+             await self.redis.delete(f"{self.CACHE_PREFIX}{factor_id}")
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Redis cache invalidate failed for factor {factor_id}: {e}")
+ 
+     # ==================== CRUD Operations ====================
+ 
+@@ -432,8 +435,8 @@ class StrategyRepository:
+             data = await self.redis.get(f"{self.CACHE_PREFIX}{strategy_id}")
+             if data:
+                 return json.loads(data)
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Redis cache get failed for strategy {strategy_id}: {e}")
+         return None
+ 
+     async def _set_cache(self, strategy_id: str, data: dict) -> None:
+@@ -446,8 +449,8 @@ class StrategyRepository:
+                 self.CACHE_TTL,
+                 json.dumps(data, default=str),
+             )
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Redis cache set failed for strategy {strategy_id}: {e}")
+ 
+     async def _invalidate_cache(self, strategy_id: str) -> None:
+         """Invalidate strategy cache."""
+@@ -455,8 +458,8 @@ class StrategyRepository:
+             return
+         try:
+             await self.redis.delete(f"{self.CACHE_PREFIX}{strategy_id}")
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Redis cache invalidate failed for strategy {strategy_id}: {e}")
+ 
+     async def create(
+         self,
+@@ -890,8 +893,8 @@ class MiningTaskRepository:
+                 cached = await self.redis.get(f"{self.CACHE_PREFIX}{task_id}")
+                 if cached:
+                     return json.loads(cached)
+-            except Exception:
+-                pass
++            except Exception as e:
++                logger.warning(f"Redis cache get failed for mining task {task_id}: {e}")
+ 
+         # Query database
+         result = await self.session.execute(
+diff --git a/src/iqfmp/exchange/adapter.py b/src/iqfmp/exchange/adapter.py
+index cc186cc..4d4bbe3 100644
+--- a/src/iqfmp/exchange/adapter.py
++++ b/src/iqfmp/exchange/adapter.py
+@@ -324,10 +324,23 @@ class ExchangeAdapter(ABC):
+         symbol: str,
+         side: OrderSide,
+         order_type: OrderType,
+-        amount: float,
+-        price: Optional[float] = None,
++        amount: Decimal,
++        price: Optional[Decimal] = None,
++        **kwargs: Any,
+     ) -> Order:
+-        """Create an order."""
++        """Create an order.
++
++        Args:
++            symbol: Trading pair symbol
++            side: Order side (buy/sell)
++            order_type: Order type (limit/market/stop)
++            amount: Order amount (Decimal for financial precision)
++            price: Limit price (Decimal for financial precision)
++            **kwargs: Additional order parameters (reduceOnly, postOnly, etc.)
++
++        Returns:
++            Created order
++        """
+         pass
+ 
+     @abstractmethod
+@@ -504,8 +517,9 @@ class BinanceAdapter(ExchangeAdapter):
+         symbol: str,
+         side: OrderSide,
+         order_type: OrderType,
+-        amount: float,
+-        price: Optional[float] = None,
++        amount: Decimal,
++        price: Optional[Decimal] = None,
++        **kwargs: Any,
+     ) -> Order:
+         """Create order on Binance.
+ 
+@@ -513,19 +527,28 @@ class BinanceAdapter(ExchangeAdapter):
+             symbol: Trading pair
+             side: Buy or sell
+             order_type: Order type
+-            amount: Order amount
+-            price: Limit price (optional)
++            amount: Order amount (Decimal for financial precision)
++            price: Limit price (Decimal for financial precision)
++            **kwargs: Additional order parameters
+ 
+         Returns:
+             Created order
+         """
+         try:
++            # Convert Decimal to float for ccxt (ccxt uses float internally)
++            params = {}
++            if kwargs.get("reduceOnly"):
++                params["reduceOnly"] = True
++            if kwargs.get("postOnly"):
++                params["postOnly"] = True
++
+             data = await self._exchange.create_order(
+                 symbol=symbol,
+                 type=order_type.value,
+                 side=side.value,
+-                amount=amount,
+-                price=price,
++                amount=float(amount),
++                price=float(price) if price else None,
++                params=params,
+             )
+             return self._parse_order(data)
+         except Exception as e:
+@@ -756,17 +779,38 @@ class OKXAdapter(ExchangeAdapter):
+         symbol: str,
+         side: OrderSide,
+         order_type: OrderType,
+-        amount: float,
+-        price: Optional[float] = None,
++        amount: Decimal,
++        price: Optional[Decimal] = None,
++        **kwargs: Any,
+     ) -> Order:
+-        """Create order on OKX."""
++        """Create order on OKX.
++
++        Args:
++            symbol: Trading pair
++            side: Buy or sell
++            order_type: Order type
++            amount: Order amount (Decimal for financial precision)
++            price: Limit price (Decimal for financial precision)
++            **kwargs: Additional order parameters
++
++        Returns:
++            Created order
++        """
+         try:
++            # Convert Decimal to float for ccxt (ccxt uses float internally)
++            params = {}
++            if kwargs.get("reduceOnly"):
++                params["reduceOnly"] = True
++            if kwargs.get("postOnly"):
++                params["postOnly"] = True
++
+             data = await self._exchange.create_order(
+                 symbol=symbol,
+                 type=order_type.value,
+                 side=side.value,
+-                amount=amount,
+-                price=price,
++                amount=float(amount),
++                price=float(price) if price else None,
++                params=params,
+             )
+             return self._parse_order(data)
+         except Exception as e:
+diff --git a/src/iqfmp/exchange/execution.py b/src/iqfmp/exchange/execution.py
+index 07cb2ea..8962526 100644
+--- a/src/iqfmp/exchange/execution.py
++++ b/src/iqfmp/exchange/execution.py
+@@ -508,9 +508,19 @@ class OrderExecutor:
+                 status=order.status,
+                 action=stop_request.action,
+             )
+-        except Exception:
+-            # Log error but don't fail the main order
+-            return None
++        except Exception as e:
++            order_type_name = "stop_loss" if is_stop_loss else "take_profit"
++            logger.error(
++                f"Failed to create {order_type_name} order for {request.symbol}: {e}. "
++                f"Parent order may be unprotected."
++            )
++            # Return failure result instead of silently failing
++            return ExecutionResult(
++                success=False,
++                error=f"Failed to create {order_type_name} order: {e}",
++                status=OrderStatus.REJECTED,
++                action=OrderAction.CLOSE_LONG if request.action == OrderAction.OPEN_LONG else OrderAction.CLOSE_SHORT,
++            )
+ 
+     async def execute_with_stop_loss(
+         self,
+@@ -559,39 +569,122 @@ class OrderExecutor:
+ # ==================== OrderManager ====================
+ 
+ 
++class OrderManagerError(OrderExecutionError):
++    """Raised when order manager operations fail."""
++
++    pass
++
++
+ class OrderManager:
+-    """Manage order lifecycle and tracking."""
++    """Manage order lifecycle and tracking with Redis persistence.
+ 
+-    def __init__(self, adapter: ExchangeAdapter) -> None:
+-        """Initialize order manager.
++    Critical state per CLAUDE.md: Order tracking must be persistent to survive
++    service restarts. Uses Redis for persistence.
++    """
++
++    REDIS_KEY_PREFIX = "iqfmp:orders:"
++    REDIS_ACTIVE_KEY = "iqfmp:active_orders"
++
++    def __init__(self, adapter: ExchangeAdapter, redis_client: Any = None) -> None:
++        """Initialize order manager with Redis persistence.
+ 
+         Args:
+             adapter: Exchange adapter
++            redis_client: Optional Redis client for dependency injection (testing)
++
++        Raises:
++            OrderManagerError: If Redis is unavailable and no client injected
+         """
+         self._adapter = adapter
+-        self._orders: dict[str, Order] = {}
+-        self._active_orders: set[str] = set()
++        self._redis = redis_client if redis_client is not None else self._get_redis_client()
++
++    def _get_redis_client(self):
++        """Get Redis client. Raises if unavailable (critical state requires persistence)."""
++        try:
++            from iqfmp.db import get_redis_client
++            client = get_redis_client()
++            if client is None:
++                raise OrderManagerError(
++                    "Redis unavailable. Order tracking requires persistent storage "
++                    "per CLAUDE.md critical state rules."
++                )
++            return client
++        except OrderManagerError:
++            raise
++        except Exception as e:
++            raise OrderManagerError(
++                f"Failed to connect to Redis for order tracking: {e}"
++            ) from e
++
++    def _serialize_order(self, order: Order) -> str:
++        """Serialize Order to JSON for Redis storage."""
++        return json.dumps({
++            "id": order.id,
++            "symbol": order.symbol,
++            "side": order.side.value,
++            "type": order.type.value,
++            "amount": str(order.amount),
++            "status": order.status.value,
++            "price": str(order.price) if order.price else None,
++            "filled": str(order.filled),
++            "remaining": str(order.remaining),
++            "cost": str(order.cost),
++            "fee": str(order.fee),
++            "timestamp": order.timestamp.isoformat() if order.timestamp else None,
++            "metadata": order.metadata,
++        })
++
++    def _deserialize_order(self, data: str) -> Order:
++        """Deserialize JSON to Order."""
++        obj = json.loads(data)
++        return Order(
++            id=obj["id"],
++            symbol=obj["symbol"],
++            side=OrderSide(obj["side"]),
++            type=OrderType(obj["type"]),
++            amount=Decimal(obj["amount"]),
++            status=OrderStatus(obj["status"]),
++            price=Decimal(obj["price"]) if obj.get("price") else None,
++            filled=Decimal(obj["filled"]),
++            remaining=Decimal(obj["remaining"]),
++            cost=Decimal(obj["cost"]),
++            fee=Decimal(obj["fee"]),
++            timestamp=datetime.fromisoformat(obj["timestamp"]) if obj.get("timestamp") else None,
++            metadata=obj.get("metadata", {}),
++        )
+ 
+     @property
+     def active_orders(self) -> set[str]:
+-        """Get active order IDs."""
+-        return self._active_orders.copy()
++        """Get active order IDs from Redis."""
++        try:
++            members = self._redis.smembers(self.REDIS_ACTIVE_KEY)
++            return set(members) if members else set()
++        except Exception as e:
++            logger.error(f"Failed to get active orders from Redis: {e}")
++            return set()
+ 
+     def track(self, order: Order) -> None:
+-        """Track an order.
++        """Track an order with Redis persistence.
+ 
+         Args:
+             order: Order to track
+         """
+-        self._orders[order.id] = order
++        try:
++            key = f"{self.REDIS_KEY_PREFIX}{order.id}"
++            self._redis.set(key, self._serialize_order(order))
+ 
+-        if order.status in (OrderStatus.OPEN,):
+-            self._active_orders.add(order.id)
+-        else:
+-            self._active_orders.discard(order.id)
++            if order.status == OrderStatus.OPEN:
++                self._redis.sadd(self.REDIS_ACTIVE_KEY, order.id)
++            else:
++                self._redis.srem(self.REDIS_ACTIVE_KEY, order.id)
++
++            logger.debug(f"Tracked order {order.id} with status {order.status.value}")
++        except Exception as e:
++            logger.error(f"Failed to track order {order.id} in Redis: {e}")
++            raise OrderManagerError(f"Failed to track order: {e}") from e
+ 
+     def get_order(self, order_id: str) -> Optional[Order]:
+-        """Get order by ID.
++        """Get order by ID from Redis.
+ 
+         Args:
+             order_id: Order ID
+@@ -599,7 +692,18 @@ class OrderManager:
+         Returns:
+             Order or None
+         """
+-        return self._orders.get(order_id)
++        try:
++            key = f"{self.REDIS_KEY_PREFIX}{order_id}"
++            data = self._redis.get(key)
++            if data:
++                return self._deserialize_order(data)
++            return None
++        except json.JSONDecodeError as e:
++            logger.error(f"Corrupted order data for {order_id}: {e}")
++            return None
++        except Exception as e:
++            logger.error(f"Failed to get order {order_id} from Redis: {e}")
++            return None
+ 
+     async def update_status(self, order_id: str) -> Order:
+         """Update order status from exchange.
+@@ -609,8 +713,11 @@ class OrderManager:
+ 
+         Returns:
+             Updated order
++
++        Raises:
++            ValueError: If order not found
+         """
+-        order = self._orders.get(order_id)
++        order = self.get_order(order_id)
+         if order is None:
+             raise ValueError(f"Order {order_id} not found")
+ 
+@@ -626,17 +733,22 @@ class OrderManager:
+ 
+         Returns:
+             Cancelled order
++
++        Raises:
++            ValueError: If order not found
+         """
+-        order = self._orders.get(order_id)
++        order = self.get_order(order_id)
+         if order is None:
+             raise ValueError(f"Order {order_id} not found")
+ 
+-        cancelled = await self._adapter.cancel_order(order_id, order.symbol)
+-        self.track(cancelled)
+-        return cancelled
++        await self._adapter.cancel_order(order_id, order.symbol)
++        # Update order status
++        updated = await self._adapter.fetch_order(order_id, order.symbol)
++        self.track(updated)
++        return updated
+ 
+     def get_orders_by_symbol(self, symbol: str) -> list[Order]:
+-        """Get orders by symbol.
++        """Get orders by symbol from Redis.
+ 
+         Args:
+             symbol: Trading symbol
+@@ -644,23 +756,63 @@ class OrderManager:
+         Returns:
+             List of orders
+         """
+-        return [o for o in self._orders.values() if o.symbol == symbol]
++        try:
++            # Scan for all order keys
++            cursor = 0
++            orders = []
++            while True:
++                cursor, keys = self._redis.scan(cursor, match=f"{self.REDIS_KEY_PREFIX}*", count=100)
++                for key in keys:
++                    data = self._redis.get(key)
++                    if data:
++                        try:
++                            order = self._deserialize_order(data)
++                            if order.symbol == symbol:
++                                orders.append(order)
++                        except Exception:
++                            continue
++                if cursor == 0:
++                    break
++            return orders
++        except Exception as e:
++            logger.error(f"Failed to get orders by symbol {symbol}: {e}")
++            return []
+ 
+     def get_history(self, limit: int = 100) -> list[Order]:
+-        """Get order history.
++        """Get order history from Redis.
+ 
+         Args:
+             limit: Maximum number of orders
+ 
+         Returns:
+-            List of orders
++            List of orders sorted by timestamp descending
+         """
+-        orders = sorted(
+-            self._orders.values(),
+-            key=lambda o: o.timestamp,
+-            reverse=True,
+-        )
+-        return orders[:limit]
++        try:
++            # Scan for all order keys
++            cursor = 0
++            orders = []
++            while True:
++                cursor, keys = self._redis.scan(cursor, match=f"{self.REDIS_KEY_PREFIX}*", count=100)
++                for key in keys:
++                    data = self._redis.get(key)
++                    if data:
++                        try:
++                            order = self._deserialize_order(data)
++                            orders.append(order)
++                        except Exception:
++                            continue
++                if cursor == 0:
++                    break
++
++            # Sort by timestamp descending (None timestamps go last)
++            orders.sort(
++                key=lambda o: o.timestamp if o.timestamp else datetime.min,
++                reverse=True,
++            )
++            return orders[:limit]
++        except Exception as e:
++            logger.error(f"Failed to get order history: {e}")
++            return []
+ 
+ 
+ # ==================== PartialFillHandler ====================
+@@ -838,9 +990,11 @@ class TimeoutHandler:
+         try:
+             await self._adapter.cancel_order(order_id, symbol)
+             self.unregister(order_id)
++            logger.info(f"Cancelled expired order {order_id} on {symbol}")
+             return True
+-        except Exception:
+-            return False
++        except Exception as e:
++            logger.error(f"Failed to cancel expired order {order_id} on {symbol}: {e}")
++            raise OrderExecutionError(f"Failed to cancel expired order {order_id}: {e}") from e
+ 
+     async def check_and_cancel_expired(self) -> list[str]:
+         """Check all timeouts and cancel expired orders.
+@@ -857,12 +1011,13 @@ class TimeoutHandler:
+                     await self._adapter.cancel_order(order_id, symbol)
+                     cancelled.append(order_id)
+                     self.unregister(order_id)
++                    logger.info(f"Cancelled expired order {order_id}")
+ 
+                     # Call callback if set
+                     if timeout.callback:
+                         timeout.callback(order_id)
+-                except Exception:
+-                    pass
++                except Exception as e:
++                    logger.error(f"Failed to cancel expired order {order_id} on {symbol}: {e}")
+ 
+         return cancelled
+ 
+@@ -875,7 +1030,9 @@ __all__ = [
+     "OrderAction",
+     "OrderDirection",
+     # Exceptions
++    "IdempotencyCacheError",
+     "OrderExecutionError",
++    "OrderManagerError",
+     # Models
+     "ExecutionResult",
+     "IdempotencyCacheEntry",
+diff --git a/src/iqfmp/llm/cache.py b/src/iqfmp/llm/cache.py
+index 177d336..cd06343 100644
+--- a/src/iqfmp/llm/cache.py
++++ b/src/iqfmp/llm/cache.py
+@@ -21,10 +21,13 @@ from __future__ import annotations
+ import asyncio
+ import hashlib
+ import json
++import logging
+ import time
+ from dataclasses import dataclass, field
+ from typing import Any, Optional, Protocol
+ 
++logger = logging.getLogger(__name__)
++
+ import redis.asyncio as aioredis
+ from sqlalchemy import select, delete, func, update
+ 
+@@ -230,9 +233,9 @@ class PromptCache:
+                 self._session_hits += 1
+                 self._l1_hits += 1
+                 return cached_value
+-        except Exception:
++        except Exception as e:
+             # Redis unavailable, continue to L2
+-            pass
++            logger.warning(f"L1 Redis cache get failed for key {key[:8]}...: {e}")
+ 
+         # L2: Check PostgreSQL
+         try:
+@@ -257,14 +260,14 @@ class PromptCache:
+                     try:
+                         redis_client = get_redis_client()
+                         await redis_client.setex(redis_key, self.redis_ttl, row)
+-                    except Exception:
+-                        pass  # Redis unavailable, skip promotion
++                    except Exception as e:
++                        logger.warning(f"Failed to promote cache entry to L1 Redis: {e}")
+ 
+                     self._session_hits += 1
+                     self._l2_hits += 1
+                     return row
+-        except Exception:
+-            pass  # Database unavailable
++        except Exception as e:
++            logger.warning(f"L2 PostgreSQL cache get failed for key {key[:8]}...: {e}")
+ 
+         self._session_misses += 1
+         return None
+@@ -297,8 +300,8 @@ class PromptCache:
+         try:
+             redis_client = get_redis_client()
+             await redis_client.setex(redis_key, self.redis_ttl, response)
+-        except Exception:
+-            pass  # Redis unavailable
++        except Exception as e:
++            logger.warning(f"L1 Redis cache set failed for key {key[:8]}...: {e}")
+ 
+         # L2: Write to PostgreSQL
+         try:
+@@ -318,8 +321,8 @@ class PromptCache:
+                         tokens_saved=tokens_saved,
+                     )
+                     session.add(entry)
+-        except Exception:
+-            pass  # Database unavailable
++        except Exception as e:
++            logger.warning(f"L2 PostgreSQL cache set failed for key {key[:8]}...: {e}")
+ 
+     async def get_stats(self) -> PromptCacheStats:
+         """Get cache statistics.
+@@ -344,8 +347,8 @@ class PromptCache:
+                 total_entries = row[0] or 0
+                 total_tokens_saved = row[1] or 0
+                 total_hits = row[2] or 0
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Failed to get cache stats from PostgreSQL: {e}")
+ 
+         # Calculate session hit rate
+         total_requests = self._session_hits + self._session_misses
+@@ -415,8 +418,8 @@ class PromptCache:
+                 )
+                 after_count = result.scalar() or 0
+                 removed = before_count - after_count
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Failed to cleanup cache entries: {e}")
+ 
+         return removed
+ 
+@@ -435,15 +438,15 @@ class PromptCache:
+                     await redis_client.delete(*keys)
+                 if cursor == 0:
+                     break
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Failed to clear L1 Redis cache: {e}")
+ 
+         # Clear PostgreSQL (L2)
+         try:
+             async with get_async_session() as session:
+                 await session.execute(delete(PromptCacheORM))
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Failed to clear L2 PostgreSQL cache: {e}")
+ 
+         # Reset session stats
+         self._session_hits = 0
+@@ -475,7 +478,8 @@ class PromptCache:
+                 return loop.run_until_complete(
+                     self.get(messages, model, seed, temperature)
+                 )
+-        except Exception:
++        except Exception as e:
++            logger.warning(f"Sync cache get failed: {e}")
+             return None
+ 
+     def set_sync(
+@@ -502,8 +506,8 @@ class PromptCache:
+                 loop.run_until_complete(
+                     self.set(messages, model, response, tokens_saved, seed, temperature)
+                 )
+-        except Exception:
+-            pass
++        except Exception as e:
++            logger.warning(f"Sync cache set failed: {e}")
+ 
+     def get_stats_sync(self) -> PromptCacheStats:
+         """Synchronous wrapper for get_stats()."""
+@@ -516,7 +520,8 @@ class PromptCache:
+                     return future.result(timeout=5.0)
+             else:
+                 return loop.run_until_complete(self.get_stats())
+-        except Exception:
++        except Exception as e:
++            logger.warning(f"Sync get_stats failed: {e}")
+             return PromptCacheStats(
+                 total_entries=0,
+                 total_tokens_saved=0,

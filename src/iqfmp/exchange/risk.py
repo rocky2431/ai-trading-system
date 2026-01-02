@@ -58,9 +58,17 @@ class RiskActionType(Enum):
 # ==================== Data Models ====================
 
 
+class RiskConfigError(Exception):
+    """Raised when RiskConfig validation fails."""
+    pass
+
+
 @dataclass
 class RiskConfig:
-    """Risk configuration parameters."""
+    """Risk configuration parameters.
+
+    Validates all constraints at construction per CLAUDE.md critical state rules.
+    """
 
     max_drawdown: Decimal = Decimal("0.20")  # 20%
     max_single_loss: Decimal = Decimal("0.02")  # 2%
@@ -71,15 +79,38 @@ class RiskConfig:
     auto_close_enabled: bool = True
     warning_threshold_ratio: Decimal = Decimal("0.5")  # Alert at 50% of limit
 
+    def __post_init__(self) -> None:
+        """Validate config at construction time."""
+        errors = []
+
+        if not (Decimal("0") < self.max_drawdown <= Decimal("1")):
+            errors.append(f"max_drawdown must be in (0, 1], got {self.max_drawdown}")
+
+        if not (Decimal("0") < self.max_single_loss <= Decimal("1")):
+            errors.append(f"max_single_loss must be in (0, 1], got {self.max_single_loss}")
+
+        if not (Decimal("0") < self.max_position_concentration <= Decimal("1")):
+            errors.append(f"max_position_concentration must be in (0, 1], got {self.max_position_concentration}")
+
+        if not (Decimal("0") < self.daily_loss_limit <= Decimal("1")):
+            errors.append(f"daily_loss_limit must be in (0, 1], got {self.daily_loss_limit}")
+
+        if self.emergency_close_threshold < self.max_drawdown:
+            errors.append(
+                f"emergency_close_threshold ({self.emergency_close_threshold}) "
+                f"must be >= max_drawdown ({self.max_drawdown})"
+            )
+
+        if not (Decimal("0") < self.warning_threshold_ratio < Decimal("1")):
+            errors.append(f"warning_threshold_ratio must be in (0, 1), got {self.warning_threshold_ratio}")
+
+        if errors:
+            raise RiskConfigError("Invalid risk configuration: " + "; ".join(errors))
+
     @property
     def is_valid(self) -> bool:
-        """Check if config is valid."""
-        return (
-            Decimal("0") < self.max_drawdown <= Decimal("1")
-            and Decimal("0") < self.max_single_loss <= Decimal("1")
-            and Decimal("0") < self.max_position_concentration <= Decimal("1")
-            and Decimal("0") < self.daily_loss_limit <= Decimal("1")
-        )
+        """Check if config is valid. Always True after construction."""
+        return True
 
 
 @dataclass

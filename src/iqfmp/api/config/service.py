@@ -1,5 +1,6 @@
 """Config service for managing IQFMP system configuration."""
 
+import logging
 import os
 import json
 import time
@@ -7,6 +8,8 @@ import httpx
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
 
 from iqfmp.api.config.schemas import (
     AgentConfigResponse,
@@ -147,7 +150,7 @@ class ConfigService:
         api_key = self._config.get("api_key")
         if api_key and not os.getenv("OPENROUTER_API_KEY"):
             os.environ["OPENROUTER_API_KEY"] = api_key
-            print(f"Restored OPENROUTER_API_KEY from config: {self._mask_api_key(api_key)}")
+            logger.info(f"Restored OPENROUTER_API_KEY from config: {self._mask_api_key(api_key)}")
 
     def _load_config(self) -> dict:
         """Load configuration from file."""
@@ -155,7 +158,14 @@ class ConfigService:
             try:
                 with open(self._config_file, "r") as f:
                     return json.load(f)
-            except Exception:
+            except json.JSONDecodeError as e:
+                logger.error(f"Config file corrupted at {self._config_file}: {e}")
+                return {}
+            except IOError as e:
+                logger.error(f"Cannot read config file {self._config_file}: {e}")
+                return {}
+            except Exception as e:
+                logger.error(f"Unexpected error loading config from {self._config_file}: {e}")
                 return {}
         return {}
 

@@ -6,10 +6,13 @@ utilizing funding rates, open interest, liquidations, and other derivative data.
 These factors are designed for perpetual futures trading strategies.
 """
 
+import logging
 from typing import Callable
 
 import numpy as np
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 
 # Registry for derivative alpha factors
@@ -472,7 +475,7 @@ def compute_derivative_factors(
             try:
                 results[name] = DERIVATIVE_FACTORS[name](df)
             except Exception as e:
-                print(f"Warning: Failed to compute {name}: {e}")
+                logger.warning(f"Failed to compute {name}: {e}")
                 results[name] = pd.Series(np.nan, index=df.index)
 
     return pd.DataFrame(results)

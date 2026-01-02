@@ -1,0 +1,22 @@
+On branch fix/redis-idempotency-cache
+Your branch is up to date with 'origin/fix/redis-idempotency-cache'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/iqfmp/agents/field_capability.py
+	modified:   src/iqfmp/api/main.py
+	modified:   src/iqfmp/api/trading/schemas.py
+	modified:   src/iqfmp/db/database.py
+	modified:   src/iqfmp/db/repositories.py
+	modified:   src/iqfmp/exchange/adapter.py
+	modified:   src/iqfmp/exchange/execution.py
+	modified:   src/iqfmp/llm/cache.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	CLAUDE.md
+	Users/
+	mlruns/
+
+no changes added to commit (use "git add" and/or "git commit -a")

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -9,6 +10,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from iqfmp.api.system.service import SystemService
+
+logger = logging.getLogger(__name__)
 
 
 class WebSocketMessage(BaseModel):
@@ -42,7 +45,7 @@ class ConnectionManager:
         """
         await websocket.accept()
         self._active_connections.append(websocket)
-        print(f"WebSocket connected. Total connections: {self.connection_count}")
+        logger.debug(f"WebSocket connected. Total connections: {self.connection_count}")
 
         # Start broadcast task if not running
         if not self._running and self._broadcast_task is None:
@@ -57,7 +60,7 @@ class ConnectionManager:
         """
         if websocket in self._active_connections:
             self._active_connections.remove(websocket)
-            print(f"WebSocket disconnected. Total connections: {self.connection_count}")
+            logger.debug(f"WebSocket disconnected. Total connections: {self.connection_count}")
 
         # Stop broadcast task if no connections
         if self.connection_count == 0 and self._broadcast_task is not None:
@@ -75,7 +78,7 @@ class ConnectionManager:
         try:
             await websocket.send_json(message.model_dump(mode="json"))
         except Exception as e:
-            print(f"Error sending personal message: {e}")
+            logger.warning(f"Error sending personal message: {e}")
             self.disconnect(websocket)
 
     async def broadcast(self, message: WebSocketMessage) -> None:
@@ -130,7 +133,7 @@ class ConnectionManager:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"Error in broadcast loop: {e}")
+                logger.error(f"Error in broadcast loop: {e}")
                 await asyncio.sleep(self._broadcast_interval)
 
         self._broadcast_task = None

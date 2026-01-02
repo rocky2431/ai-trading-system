@@ -6,6 +6,7 @@ This module provides real-time system status from:
 - System resources (CPU, memory, disk)
 """
 
+import logging
 import os
 import time
 import uuid
@@ -15,6 +16,8 @@ from functools import lru_cache
 from typing import Optional
 
 import psutil
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -203,7 +206,7 @@ class SystemService:
                             "started_at": task.started_at,
                         }
             except Exception as e:
-                print(f"Warning: Failed to query mining tasks: {e}")
+                logger.warning(f"Failed to query mining tasks: {e}")
 
             # Query active pipeline runs
             try:
@@ -231,7 +234,7 @@ class SystemService:
                             "started_at": run.started_at,
                         }
             except Exception as e:
-                print(f"Warning: Failed to query pipeline runs: {e}")
+                logger.warning(f"Failed to query pipeline runs: {e}")
 
             # Query active RD Loop runs (evaluator agent status)
             try:
@@ -256,7 +259,7 @@ class SystemService:
                     }
                     break  # Use the most recent one
             except Exception as e:
-                print(f"Warning: Failed to query RD Loop runs: {e}")
+                logger.warning(f"Failed to query RD Loop runs: {e}")
 
         # Build agent responses
         for agent_id, name, agent_type in agent_defs:
@@ -342,7 +345,7 @@ class SystemService:
                 ))
 
         except Exception as e:
-            print(f"Warning: Failed to query task queue: {e}")
+            logger.warning(f"Failed to query task queue: {e}")
 
         return tasks
 
@@ -491,7 +494,7 @@ class SystemService:
             )
 
         except Exception as e:
-            print(f"Warning: Failed to query database stats: {e}")
+            logger.warning(f"Failed to query database stats: {e}")
             return None
 
     async def get_status(self) -> SystemStatusResponse:
@@ -548,7 +551,7 @@ class SystemService:
             )
 
         except Exception as e:
-            print(f"Warning: Failed to query agent configs: {e}")
+            logger.warning(f"Failed to query agent configs: {e}")
             return AgentConfigListResponse(configs=[], total=0)
 
     async def get_agent_config(
@@ -582,7 +585,7 @@ class SystemService:
             )
 
         except Exception as e:
-            print(f"Warning: Failed to query agent config: {e}")
+            logger.warning(f"Failed to query agent config: {e}")
             return None
 
     async def update_agent_config(

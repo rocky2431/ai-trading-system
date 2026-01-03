@@ -388,11 +388,62 @@ class TestUserService:
     """Tests for user service."""
 
     @pytest.fixture
-    def user_service(self):
-        """Create user service with mock storage."""
+    def mock_redis(self) -> MagicMock:
+        """Create mock Redis client with in-memory storage for UserService.
+
+        UserService uses these Redis operations:
+        - set/get: Store and retrieve user JSON data
+        - hset/hget: Username and email indexes
+        - delete/hdel: Remove user data and indexes
+        """
+        redis = MagicMock()
+        # In-memory storage simulating Redis
+        strings: dict[str, str] = {}
+        hashes: dict[str, dict[str, str]] = {}
+
+        def mock_set(key: str, value: str) -> bool:
+            strings[key] = value
+            return True
+
+        def mock_get(key: str) -> str | None:
+            return strings.get(key)
+
+        def mock_hset(name: str, field: str, value: str) -> int:
+            if name not in hashes:
+                hashes[name] = {}
+            is_new = field not in hashes[name]
+            hashes[name][field] = value
+            return 1 if is_new else 0
+
+        def mock_hget(name: str, field: str) -> str | None:
+            return hashes.get(name, {}).get(field)
+
+        def mock_delete(key: str) -> int:
+            if key in strings:
+                del strings[key]
+                return 1
+            return 0
+
+        def mock_hdel(name: str, field: str) -> int:
+            if name in hashes and field in hashes[name]:
+                del hashes[name][field]
+                return 1
+            return 0
+
+        redis.set.side_effect = mock_set
+        redis.get.side_effect = mock_get
+        redis.hset.side_effect = mock_hset
+        redis.hget.side_effect = mock_hget
+        redis.delete.side_effect = mock_delete
+        redis.hdel.side_effect = mock_hdel
+        return redis
+
+    @pytest.fixture
+    def user_service(self, mock_redis: MagicMock):
+        """Create user service with mock Redis storage."""
         from iqfmp.api.auth.service import UserService
 
-        return UserService()
+        return UserService(redis_client=mock_redis)
 
     def test_create_user(self, user_service):
         """Test creating a new user."""

@@ -19,6 +19,8 @@ import numpy as np
 import pandas as pd
 
 # Qlib imports with fallback
+# Define risk_analysis at module level for monkeypatching in tests
+risk_analysis = None
 try:
     from qlib.contrib.evaluate import risk_analysis
     from qlib.data.ops import Operators

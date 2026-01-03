@@ -5,11 +5,11 @@ Python code. It serves as the second layer of the three-layer security
 architecture.
 
 Security Layers:
-1. AST Security Checker - Static analysis (pre-execution)
+1. AST Security Checker - Static analysis (pre-execution) - see iqfmp.core.security
 2. Sandbox Executor (this module) - Runtime isolation with RestrictedPython
-3. Human Review Gate - Manual approval
+3. Human Review Gate - Manual approval - see iqfmp.core.review.HumanReviewGate
 
-P0 Security Enhancement (2025-12-26):
+Features:
 - RestrictedPython integration for bytecode-level restrictions
 - CPU/Memory resource limits via resource.setrlimit
 - Subprocess isolation for additional safety
@@ -39,6 +39,72 @@ from RestrictedPython.Eval import default_guarded_getattr, default_guarded_getit
 from iqfmp.core.security import ASTSecurityChecker
 
 logger = logging.getLogger(__name__)
+
+
+# Module import configuration - maps module names to (import_func, aliases)
+# This centralizes module import logic for both subprocess and main process execution
+def _build_module_import_map() -> dict[str, tuple[callable, list[str]]]:
+    """Build the module import map. Returns dict of module_name -> (import_func, aliases)."""
+    return {
+        "pandas": (lambda: __import__("pandas"), ["pandas", "pd"]),
+        "numpy": (lambda: __import__("numpy"), ["numpy", "np"]),
+        "math": (lambda: __import__("math"), ["math"]),
+        "statistics": (lambda: __import__("statistics"), ["statistics"]),
+        "datetime": (lambda: __import__("datetime"), ["datetime"]),
+        "time": (lambda: __import__("time"), ["time"]),
+        "collections": (lambda: __import__("collections"), ["collections"]),
+        "itertools": (lambda: __import__("itertools"), ["itertools"]),
+        "functools": (lambda: __import__("functools"), ["functools"]),
+        "operator": (lambda: __import__("operator"), ["operator"]),
+        "typing": (lambda: __import__("typing"), ["typing"]),
+        "dataclasses": (lambda: __import__("dataclasses"), ["dataclasses"]),
+        "enum": (lambda: __import__("enum"), ["enum"]),
+        "abc": (lambda: __import__("abc"), ["abc"]),
+        "copy": (lambda: __import__("copy"), ["copy"]),
+        "re": (lambda: __import__("re"), ["re"]),
+        "json": (lambda: __import__("json"), ["json"]),
+        "hashlib": (lambda: __import__("hashlib"), ["hashlib"]),
+        "base64": (lambda: __import__("base64"), ["base64"]),
+        "decimal": (lambda: __import__("decimal"), ["decimal"]),
+        "fractions": (lambda: __import__("fractions"), ["fractions"]),
+    }
+
+
+def _import_modules_shared(module_names: list[str], log_failures: bool = False) -> dict[str, Any]:
+    """Import allowed modules - shared implementation for subprocess and main process.
+
+    Args:
+        module_names: List of module names to import
+        log_failures: Whether to log import failures (False for subprocess)
+
+    Returns:
+        Dictionary mapping module names/aliases to imported modules
+    """
+    exec_globals: dict[str, Any] = {}
+    import_map = _build_module_import_map()
+
+    for module_name in module_names:
+        try:
+            # Special handling for qlib_stats
+            if module_name == "iqfmp.evaluation.qlib_stats":
+                try:
+                    from iqfmp.evaluation import qlib_stats
+                    exec_globals["qlib_stats"] = qlib_stats
+                except ImportError:
+                    if log_failures:
+                        logger.warning(f"Failed to import: {module_name}")
+                continue
+
+            if module_name in import_map:
+                import_func, aliases = import_map[module_name]
+                module = import_func()
+                for alias in aliases:
+                    exec_globals[alias] = module
+        except ImportError:
+            if log_failures:
+                logger.warning(f"Failed to import allowed module: {module_name}")
+
+    return exec_globals
 
 
 class ExecutionStatus(str, Enum):
@@ -226,86 +292,8 @@ def _subprocess_worker(
 
 
 def _import_modules_for_subprocess(module_names: list[str]) -> dict[str, Any]:
-    """Import allowed modules in subprocess context."""
-    exec_globals: dict[str, Any] = {}
-
-    for module_name in module_names:
-        try:
-            if module_name == "pandas":
-                import pandas as pd
-                exec_globals["pandas"] = pd
-                exec_globals["pd"] = pd
-            elif module_name == "numpy":
-                import numpy as np
-                exec_globals["numpy"] = np
-                exec_globals["np"] = np
-            elif module_name == "iqfmp.evaluation.qlib_stats":
-                try:
-                    from iqfmp.evaluation import qlib_stats
-                    exec_globals["qlib_stats"] = qlib_stats
-                except ImportError:
-                    pass  # May not be available in subprocess
-            elif module_name == "math":
-                import math
-                exec_globals["math"] = math
-            elif module_name == "statistics":
-                import statistics
-                exec_globals["statistics"] = statistics
-            elif module_name == "datetime":
-                import datetime
-                exec_globals["datetime"] = datetime
-            elif module_name == "time":
-                import time as time_module
-                exec_globals["time"] = time_module
-            elif module_name == "collections":
-                import collections
-                exec_globals["collections"] = collections
-            elif module_name == "itertools":
-                import itertools
-                exec_globals["itertools"] = itertools
-            elif module_name == "functools":
-                import functools
-                exec_globals["functools"] = functools
-            elif module_name == "operator":
-                import operator
-                exec_globals["operator"] = operator
-            elif module_name == "typing":
-                import typing
-                exec_globals["typing"] = typing
-            elif module_name == "dataclasses":
-                import dataclasses
-                exec_globals["dataclasses"] = dataclasses
-            elif module_name == "enum":
-                import enum
-                exec_globals["enum"] = enum
-            elif module_name == "abc":
-                import abc
-                exec_globals["abc"] = abc
-            elif module_name == "copy":
-                import copy
-                exec_globals["copy"] = copy
-            elif module_name == "re":
-                import re
-                exec_globals["re"] = re
-            elif module_name == "json":
-                import json
-                exec_globals["json"] = json
-            elif module_name == "hashlib":
-                import hashlib
-                exec_globals["hashlib"] = hashlib
-            elif module_name == "base64":
-                import base64
-                exec_globals["base64"] = base64
-            elif module_name == "decimal":
-                import decimal
-                exec_globals["decimal"] = decimal
-            elif module_name == "fractions":
-                import fractions
-                exec_globals["fractions"] = fractions
-        except ImportError:
-            pass
-
-    return exec_globals
+    """Import allowed modules in subprocess context (no logging)."""
+    return _import_modules_shared(module_names, log_failures=False)
 
 
 def _execute_in_subprocess(
@@ -741,80 +729,5 @@ class SandboxExecutor:
                 pass
 
     def _import_allowed_modules(self) -> dict[str, Any]:
-        """Import allowed modules and return as globals dict."""
-        exec_globals: dict[str, Any] = {}
-
-        for module_name in self.config.allowed_modules:
-            try:
-                if module_name == "pandas":
-                    import pandas as pd
-                    exec_globals["pandas"] = pd
-                    exec_globals["pd"] = pd
-                elif module_name == "numpy":
-                    import numpy as np
-                    exec_globals["numpy"] = np
-                    exec_globals["np"] = np
-                elif module_name == "iqfmp.evaluation.qlib_stats":
-                    from iqfmp.evaluation import qlib_stats
-                    exec_globals["qlib_stats"] = qlib_stats
-                elif module_name == "math":
-                    import math
-                    exec_globals["math"] = math
-                elif module_name == "statistics":
-                    import statistics
-                    exec_globals["statistics"] = statistics
-                elif module_name == "datetime":
-                    import datetime
-                    exec_globals["datetime"] = datetime
-                elif module_name == "time":
-                    import time as time_module
-                    exec_globals["time"] = time_module
-                elif module_name == "collections":
-                    import collections
-                    exec_globals["collections"] = collections
-                elif module_name == "itertools":
-                    import itertools
-                    exec_globals["itertools"] = itertools
-                elif module_name == "functools":
-                    import functools
-                    exec_globals["functools"] = functools
-                elif module_name == "operator":
-                    import operator
-                    exec_globals["operator"] = operator
-                elif module_name == "typing":
-                    import typing
-                    exec_globals["typing"] = typing
-                elif module_name == "dataclasses":
-                    import dataclasses
-                    exec_globals["dataclasses"] = dataclasses
-                elif module_name == "enum":
-                    import enum
-                    exec_globals["enum"] = enum
-                elif module_name == "abc":
-                    import abc
-                    exec_globals["abc"] = abc
-                elif module_name == "copy":
-                    import copy
-                    exec_globals["copy"] = copy
-                elif module_name == "re":
-                    import re
-                    exec_globals["re"] = re
-                elif module_name == "json":
-                    import json
-                    exec_globals["json"] = json
-                elif module_name == "hashlib":
-                    import hashlib
-                    exec_globals["hashlib"] = hashlib
-                elif module_name == "base64":
-                    import base64
-                    exec_globals["base64"] = base64
-                elif module_name == "decimal":
-                    import decimal
-                    exec_globals["decimal"] = decimal
-                elif module_name == "fractions":
-                    import fractions
-                    exec_globals["fractions"] = fractions
-            except ImportError:
-                logger.warning(f"Failed to import allowed module: {module_name}")
-
-        return exec_globals
+        """Import allowed modules and return as globals dict (with logging)."""
+        return _import_modules_shared(list(self.config.allowed_modules), log_failures=True)

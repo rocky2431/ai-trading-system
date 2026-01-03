@@ -366,14 +366,21 @@ class ExchangeAdapter(ABC):
         pass
 
 
-# ============ Binance Adapter ============
+# ============ CCXT Base Adapter ============
 
 
-class BinanceAdapter(ExchangeAdapter):
-    """Binance Futures (USDT-M) adapter."""
+class CCXTBaseAdapter(ExchangeAdapter):
+    """Base adapter with shared CCXT implementation.
+
+    Subclasses only need to implement _setup_exchange() to configure
+    the specific exchange instance (Binance, OKX, etc.).
+    """
+
+    # Override in subclass for exchange-specific error messages
+    _exchange_name: str = "Exchange"
 
     def __init__(self, config: ExchangeConfig) -> None:
-        """Initialize Binance adapter.
+        """Initialize adapter.
 
         Args:
             config: Exchange configuration
@@ -381,8 +388,200 @@ class BinanceAdapter(ExchangeAdapter):
         super().__init__(config)
         self._setup_exchange()
 
+    @abstractmethod
     def _setup_exchange(self) -> None:
-        """Setup ccxt exchange instance."""
+        """Setup ccxt exchange instance. Must be implemented by subclass."""
+        pass
+
+    async def connect(self) -> None:
+        """Connect to exchange."""
+        try:
+            await self._exchange.load_markets()
+        except Exception as e:
+            raise ConnectionError(f"Failed to connect to {self._exchange_name}: {e}")
+
+    async def disconnect(self) -> None:
+        """Disconnect from exchange."""
+        if hasattr(self._exchange, "close"):
+            await self._exchange.close()
+
+    async def fetch_ticker(self, symbol: str) -> Ticker:
+        """Fetch ticker data."""
+        try:
+            data = await self._exchange.fetch_ticker(symbol)
+            return Ticker(
+                symbol=data["symbol"],
+                bid=Decimal(str(data.get("bid", 0))),
+                ask=Decimal(str(data.get("ask", 0))),
+                last=Decimal(str(data.get("last", 0))),
+                volume=Decimal(str(data.get("baseVolume", 0))),
+                timestamp=datetime.fromtimestamp(
+                    data["timestamp"] / 1000
+                ) if data.get("timestamp") else None,
+            )
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch ticker: {e}")
+
+    async def fetch_orderbook(self, symbol: str, limit: int = 20) -> OrderBook:
+        """Fetch order book data."""
+        try:
+            data = await self._exchange.fetch_order_book(symbol, limit)
+            return OrderBook(
+                symbol=data.get("symbol", symbol),
+                bids=data.get("bids", []),
+                asks=data.get("asks", []),
+            )
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch orderbook: {e}")
+
+    async def fetch_ohlcv(
+        self, symbol: str, timeframe: str = "1m", limit: int = 100
+    ) -> list[OHLCV]:
+        """Fetch OHLCV candle data."""
+        try:
+            data = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+            return [
+                OHLCV(
+                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
+                    open=float(candle[1]),
+                    high=float(candle[2]),
+                    low=float(candle[3]),
+                    close=float(candle[4]),
+                    volume=float(candle[5]),
+                )
+                for candle in data
+            ]
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch OHLCV: {e}")
+
+    async def fetch_balance(self) -> dict[str, Balance]:
+        """Fetch account balance."""
+        try:
+            data = await self._exchange.fetch_balance()
+            result = {}
+            for currency, balance in data.items():
+                if isinstance(balance, dict) and "free" in balance:
+                    result[currency] = Balance(
+                        currency=currency,
+                        free=Decimal(str(balance.get("free", 0))),
+                        used=Decimal(str(balance.get("used", 0))),
+                        total=Decimal(str(balance.get("total", 0))),
+                    )
+            return result
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch balance: {e}")
+
+    async def create_order(
+        self,
+        symbol: str,
+        side: OrderSide,
+        order_type: OrderType,
+        amount: Decimal,
+        price: Optional[Decimal] = None,
+        **kwargs: Any,
+    ) -> Order:
+        """Create an order."""
+        try:
+            params = {}
+            if kwargs.get("reduceOnly"):
+                params["reduceOnly"] = True
+            if kwargs.get("postOnly"):
+                params["postOnly"] = True
+
+            data = await self._exchange.create_order(
+                symbol=symbol,
+                type=order_type.value,
+                side=side.value,
+                amount=float(amount),
+                price=float(price) if price else None,
+                params=params,
+            )
+            return self._parse_order(data)
+        except Exception as e:
+            if "insufficient" in str(e).lower():
+                raise InsufficientFundsError(str(e))
+            raise ExchangeError(f"Failed to create order: {e}")
+
+    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+        """Cancel an order."""
+        try:
+            await self._exchange.cancel_order(order_id, symbol)
+            return True
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise OrderNotFoundError(f"Order {order_id} not found")
+            raise ExchangeError(f"Failed to cancel order: {e}")
+
+    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+        """Fetch order status."""
+        try:
+            data = await self._exchange.fetch_order(order_id, symbol)
+            return self._parse_order(data)
+        except Exception as e:
+            if "not found" in str(e).lower():
+                raise OrderNotFoundError(f"Order {order_id} not found")
+            raise ExchangeError(f"Failed to fetch order: {e}")
+
+    def _parse_order(self, data: dict[str, Any]) -> Order:
+        """Parse order data from ccxt format."""
+        status_map = {
+            "open": OrderStatus.OPEN,
+            "closed": OrderStatus.CLOSED,
+            "canceled": OrderStatus.CANCELED,
+            "expired": OrderStatus.EXPIRED,
+            "rejected": OrderStatus.REJECTED,
+        }
+        return Order(
+            id=str(data["id"]),
+            symbol=data["symbol"],
+            side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
+            type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
+            price=Decimal(str(data["price"])) if data.get("price") else None,
+            amount=Decimal(str(data["amount"])),
+            status=status_map.get(data["status"], OrderStatus.OPEN),
+            filled=Decimal(str(data.get("filled", 0))),
+        )
+
+    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+        """Fetch open positions."""
+        try:
+            positions = await self._exchange.fetch_positions(
+                symbols=[symbol] if symbol else None
+            )
+            result = []
+            for pos in positions:
+                size = Decimal(str(pos.get("contracts", 0) or pos.get("contractSize", 0) or 0))
+                if size == Decimal("0"):
+                    continue
+
+                side = OrderSide.BUY if pos.get("side") == "long" else OrderSide.SELL
+                result.append(Position(
+                    symbol=pos["symbol"],
+                    side=side,
+                    size=size,
+                    entry_price=Decimal(str(pos.get("entryPrice", 0) or 0)),
+                    unrealized_pnl=Decimal(str(pos.get("unrealizedPnl", 0) or 0)),
+                    realized_pnl=Decimal(str(pos.get("realizedPnl", 0) or 0)),
+                    leverage=int(pos.get("leverage", 1) or 1),
+                    liquidation_price=Decimal(str(pos.get("liquidationPrice"))) if pos.get("liquidationPrice") else None,
+                    margin=Decimal(str(pos.get("initialMargin", 0) or pos.get("margin", 0) or 0)),
+                    timestamp=datetime.fromtimestamp(pos["timestamp"] / 1000) if pos.get("timestamp") else None,
+                ))
+            return result
+        except Exception as e:
+            raise ExchangeError(f"Failed to fetch positions: {e}")
+
+
+# ============ Binance Adapter ============
+
+
+class BinanceAdapter(CCXTBaseAdapter):
+    """Binance Futures (USDT-M) adapter."""
+
+    _exchange_name = "Binance"
+
+    def _setup_exchange(self) -> None:
+        """Setup Binance ccxt instance."""
         if ccxt is None:
             raise ImportError("ccxt is required for exchange connections")
 
@@ -401,278 +600,17 @@ class BinanceAdapter(ExchangeAdapter):
             "options": options,
         })
 
-    async def connect(self) -> None:
-        """Connect to Binance."""
-        try:
-            await self._exchange.load_markets()
-        except Exception as e:
-            raise ConnectionError(f"Failed to connect to Binance: {e}")
-
-    async def disconnect(self) -> None:
-        """Disconnect from Binance."""
-        if hasattr(self._exchange, "close"):
-            await self._exchange.close()
-
-    async def fetch_ticker(self, symbol: str) -> Ticker:
-        """Fetch ticker from Binance.
-
-        Args:
-            symbol: Trading pair symbol
-
-        Returns:
-            Ticker data
-        """
-        try:
-            data = await self._exchange.fetch_ticker(symbol)
-            return Ticker(
-                symbol=data["symbol"],
-                bid=Decimal(str(data.get("bid", 0))),
-                ask=Decimal(str(data.get("ask", 0))),
-                last=Decimal(str(data.get("last", 0))),
-                volume=Decimal(str(data.get("baseVolume", 0))),
-                timestamp=datetime.fromtimestamp(
-                    data["timestamp"] / 1000
-                ) if data.get("timestamp") else None,
-            )
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch ticker: {e}")
-
-    async def fetch_orderbook(
-        self, symbol: str, limit: int = 20
-    ) -> OrderBook:
-        """Fetch order book from Binance.
-
-        Args:
-            symbol: Trading pair symbol
-            limit: Number of levels
-
-        Returns:
-            Order book data
-        """
-        try:
-            data = await self._exchange.fetch_order_book(symbol, limit)
-            return OrderBook(
-                symbol=data.get("symbol", symbol),
-                bids=data.get("bids", []),
-                asks=data.get("asks", []),
-            )
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch orderbook: {e}")
-
-    async def fetch_ohlcv(
-        self,
-        symbol: str,
-        timeframe: str = "1m",
-        limit: int = 100,
-    ) -> list[OHLCV]:
-        """Fetch OHLCV from Binance.
-
-        Args:
-            symbol: Trading pair symbol
-            timeframe: Candle timeframe
-            limit: Number of candles
-
-        Returns:
-            List of OHLCV data
-        """
-        try:
-            data = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            return [
-                OHLCV(
-                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
-                    open=float(candle[1]),
-                    high=float(candle[2]),
-                    low=float(candle[3]),
-                    close=float(candle[4]),
-                    volume=float(candle[5]),
-                )
-                for candle in data
-            ]
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch OHLCV: {e}")
-
-    async def fetch_balance(self) -> dict[str, Balance]:
-        """Fetch balance from Binance.
-
-        Returns:
-            Dictionary of balances by currency
-        """
-        try:
-            data = await self._exchange.fetch_balance()
-            result = {}
-            for currency, balance in data.items():
-                if isinstance(balance, dict) and "free" in balance:
-                    result[currency] = Balance(
-                        currency=currency,
-                        free=Decimal(str(balance.get("free", 0))),
-                        used=Decimal(str(balance.get("used", 0))),
-                        total=Decimal(str(balance.get("total", 0))),
-                    )
-            return result
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch balance: {e}")
-
-    async def create_order(
-        self,
-        symbol: str,
-        side: OrderSide,
-        order_type: OrderType,
-        amount: Decimal,
-        price: Optional[Decimal] = None,
-        **kwargs: Any,
-    ) -> Order:
-        """Create order on Binance.
-
-        Args:
-            symbol: Trading pair
-            side: Buy or sell
-            order_type: Order type
-            amount: Order amount (Decimal for financial precision)
-            price: Limit price (Decimal for financial precision)
-            **kwargs: Additional order parameters
-
-        Returns:
-            Created order
-        """
-        try:
-            # Convert Decimal to float for ccxt (ccxt uses float internally)
-            params = {}
-            if kwargs.get("reduceOnly"):
-                params["reduceOnly"] = True
-            if kwargs.get("postOnly"):
-                params["postOnly"] = True
-
-            data = await self._exchange.create_order(
-                symbol=symbol,
-                type=order_type.value,
-                side=side.value,
-                amount=float(amount),
-                price=float(price) if price else None,
-                params=params,
-            )
-            return self._parse_order(data)
-        except Exception as e:
-            if "insufficient" in str(e).lower():
-                raise InsufficientFundsError(str(e))
-            raise ExchangeError(f"Failed to create order: {e}")
-
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        """Cancel order on Binance.
-
-        Args:
-            order_id: Order ID
-            symbol: Trading pair
-
-        Returns:
-            True if canceled successfully
-        """
-        try:
-            await self._exchange.cancel_order(order_id, symbol)
-            return True
-        except Exception as e:
-            if "not found" in str(e).lower():
-                raise OrderNotFoundError(f"Order {order_id} not found")
-            raise ExchangeError(f"Failed to cancel order: {e}")
-
-    async def fetch_order(self, order_id: str, symbol: str) -> Order:
-        """Fetch order from Binance.
-
-        Args:
-            order_id: Order ID
-            symbol: Trading pair
-
-        Returns:
-            Order data
-        """
-        try:
-            data = await self._exchange.fetch_order(order_id, symbol)
-            return self._parse_order(data)
-        except Exception as e:
-            if "not found" in str(e).lower():
-                raise OrderNotFoundError(f"Order {order_id} not found")
-            raise ExchangeError(f"Failed to fetch order: {e}")
-
-    def _parse_order(self, data: dict[str, Any]) -> Order:
-        """Parse order data from ccxt format.
-
-        Args:
-            data: Raw order data
-
-        Returns:
-            Parsed Order object
-        """
-        status_map = {
-            "open": OrderStatus.OPEN,
-            "closed": OrderStatus.CLOSED,
-            "canceled": OrderStatus.CANCELED,
-            "expired": OrderStatus.EXPIRED,
-            "rejected": OrderStatus.REJECTED,
-        }
-
-        return Order(
-            id=str(data["id"]),
-            symbol=data["symbol"],
-            side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
-            type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
-            price=Decimal(str(data["price"])) if data.get("price") else None,
-            amount=Decimal(str(data["amount"])),
-            status=status_map.get(data["status"], OrderStatus.OPEN),
-            filled=Decimal(str(data.get("filled", 0))),
-        )
-
-    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
-        """Fetch open positions from Binance.
-
-        Args:
-            symbol: Optional symbol filter
-
-        Returns:
-            List of open positions
-        """
-        try:
-            positions = await self._exchange.fetch_positions(symbols=[symbol] if symbol else None)
-            result = []
-            for pos in positions:
-                # Skip positions with zero size
-                size = Decimal(str(pos.get("contracts", 0) or pos.get("contractSize", 0) or 0))
-                if size == Decimal("0"):
-                    continue
-
-                side = OrderSide.BUY if pos.get("side") == "long" else OrderSide.SELL
-                result.append(Position(
-                    symbol=pos["symbol"],
-                    side=side,
-                    size=size,
-                    entry_price=Decimal(str(pos.get("entryPrice", 0) or 0)),
-                    unrealized_pnl=Decimal(str(pos.get("unrealizedPnl", 0) or 0)),
-                    realized_pnl=Decimal(str(pos.get("realizedPnl", 0) or 0)),
-                    leverage=int(pos.get("leverage", 1) or 1),
-                    liquidation_price=Decimal(str(pos.get("liquidationPrice"))) if pos.get("liquidationPrice") else None,
-                    margin=Decimal(str(pos.get("initialMargin", 0) or pos.get("margin", 0) or 0)),
-                    timestamp=datetime.fromtimestamp(pos["timestamp"] / 1000) if pos.get("timestamp") else None,
-                ))
-            return result
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch positions: {e}")
-
 
 # ============ OKX Adapter ============
 
 
-class OKXAdapter(ExchangeAdapter):
+class OKXAdapter(CCXTBaseAdapter):
     """OKX Swap adapter."""
 
-    def __init__(self, config: ExchangeConfig) -> None:
-        """Initialize OKX adapter.
-
-        Args:
-            config: Exchange configuration
-        """
-        super().__init__(config)
-        self._setup_exchange()
+    _exchange_name = "OKX"
 
     def _setup_exchange(self) -> None:
-        """Setup ccxt exchange instance."""
+        """Setup OKX ccxt instance."""
         if ccxt is None:
             raise ImportError("ccxt is required for exchange connections")
 
@@ -690,209 +628,6 @@ class OKXAdapter(ExchangeAdapter):
             "enableRateLimit": self.config.rate_limit,
             "options": options,
         })
-
-    async def connect(self) -> None:
-        """Connect to OKX."""
-        try:
-            await self._exchange.load_markets()
-        except Exception as e:
-            raise ConnectionError(f"Failed to connect to OKX: {e}")
-
-    async def disconnect(self) -> None:
-        """Disconnect from OKX."""
-        if hasattr(self._exchange, "close"):
-            await self._exchange.close()
-
-    async def fetch_ticker(self, symbol: str) -> Ticker:
-        """Fetch ticker from OKX."""
-        try:
-            data = await self._exchange.fetch_ticker(symbol)
-            return Ticker(
-                symbol=data["symbol"],
-                bid=Decimal(str(data.get("bid", 0))),
-                ask=Decimal(str(data.get("ask", 0))),
-                last=Decimal(str(data.get("last", 0))),
-                volume=Decimal(str(data.get("baseVolume", 0))),
-                timestamp=datetime.fromtimestamp(
-                    data["timestamp"] / 1000
-                ) if data.get("timestamp") else None,
-            )
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch ticker: {e}")
-
-    async def fetch_orderbook(
-        self, symbol: str, limit: int = 20
-    ) -> OrderBook:
-        """Fetch order book from OKX."""
-        try:
-            data = await self._exchange.fetch_order_book(symbol, limit)
-            return OrderBook(
-                symbol=data.get("symbol", symbol),
-                bids=data.get("bids", []),
-                asks=data.get("asks", []),
-            )
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch orderbook: {e}")
-
-    async def fetch_ohlcv(
-        self,
-        symbol: str,
-        timeframe: str = "1m",
-        limit: int = 100,
-    ) -> list[OHLCV]:
-        """Fetch OHLCV from OKX."""
-        try:
-            data = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            return [
-                OHLCV(
-                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
-                    open=float(candle[1]),
-                    high=float(candle[2]),
-                    low=float(candle[3]),
-                    close=float(candle[4]),
-                    volume=float(candle[5]),
-                )
-                for candle in data
-            ]
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch OHLCV: {e}")
-
-    async def fetch_balance(self) -> dict[str, Balance]:
-        """Fetch balance from OKX."""
-        try:
-            data = await self._exchange.fetch_balance()
-            result = {}
-            for currency, balance in data.items():
-                if isinstance(balance, dict) and "free" in balance:
-                    result[currency] = Balance(
-                        currency=currency,
-                        free=Decimal(str(balance.get("free", 0))),
-                        used=Decimal(str(balance.get("used", 0))),
-                        total=Decimal(str(balance.get("total", 0))),
-                    )
-            return result
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch balance: {e}")
-
-    async def create_order(
-        self,
-        symbol: str,
-        side: OrderSide,
-        order_type: OrderType,
-        amount: Decimal,
-        price: Optional[Decimal] = None,
-        **kwargs: Any,
-    ) -> Order:
-        """Create order on OKX.
-
-        Args:
-            symbol: Trading pair
-            side: Buy or sell
-            order_type: Order type
-            amount: Order amount (Decimal for financial precision)
-            price: Limit price (Decimal for financial precision)
-            **kwargs: Additional order parameters
-
-        Returns:
-            Created order
-        """
-        try:
-            # Convert Decimal to float for ccxt (ccxt uses float internally)
-            params = {}
-            if kwargs.get("reduceOnly"):
-                params["reduceOnly"] = True
-            if kwargs.get("postOnly"):
-                params["postOnly"] = True
-
-            data = await self._exchange.create_order(
-                symbol=symbol,
-                type=order_type.value,
-                side=side.value,
-                amount=float(amount),
-                price=float(price) if price else None,
-                params=params,
-            )
-            return self._parse_order(data)
-        except Exception as e:
-            if "insufficient" in str(e).lower():
-                raise InsufficientFundsError(str(e))
-            raise ExchangeError(f"Failed to create order: {e}")
-
-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
-        """Cancel order on OKX."""
-        try:
-            await self._exchange.cancel_order(order_id, symbol)
-            return True
-        except Exception as e:
-            if "not found" in str(e).lower():
-                raise OrderNotFoundError(f"Order {order_id} not found")
-            raise ExchangeError(f"Failed to cancel order: {e}")
-
-    async def fetch_order(self, order_id: str, symbol: str) -> Order:
-        """Fetch order from OKX."""
-        try:
-            data = await self._exchange.fetch_order(order_id, symbol)
-            return self._parse_order(data)
-        except Exception as e:
-            if "not found" in str(e).lower():
-                raise OrderNotFoundError(f"Order {order_id} not found")
-            raise ExchangeError(f"Failed to fetch order: {e}")
-
-    def _parse_order(self, data: dict[str, Any]) -> Order:
-        """Parse order data from ccxt format."""
-        status_map = {
-            "open": OrderStatus.OPEN,
-            "closed": OrderStatus.CLOSED,
-            "canceled": OrderStatus.CANCELED,
-            "expired": OrderStatus.EXPIRED,
-            "rejected": OrderStatus.REJECTED,
-        }
-
-        return Order(
-            id=str(data["id"]),
-            symbol=data["symbol"],
-            side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
-            type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
-            price=Decimal(str(data["price"])) if data.get("price") else None,
-            amount=Decimal(str(data["amount"])),
-            status=status_map.get(data["status"], OrderStatus.OPEN),
-            filled=Decimal(str(data.get("filled", 0))),
-        )
-
-    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
-        """Fetch open positions from OKX.
-
-        Args:
-            symbol: Optional symbol filter
-
-        Returns:
-            List of open positions
-        """
-        try:
-            positions = await self._exchange.fetch_positions(symbols=[symbol] if symbol else None)
-            result = []
-            for pos in positions:
-                # Skip positions with zero size
-                size = Decimal(str(pos.get("contracts", 0) or pos.get("contractSize", 0) or 0))
-                if size == Decimal("0"):
-                    continue
-
-                side = OrderSide.BUY if pos.get("side") == "long" else OrderSide.SELL
-                result.append(Position(
-                    symbol=pos["symbol"],
-                    side=side,
-                    size=size,
-                    entry_price=Decimal(str(pos.get("entryPrice", 0) or 0)),
-                    unrealized_pnl=Decimal(str(pos.get("unrealizedPnl", 0) or 0)),
-                    realized_pnl=Decimal(str(pos.get("realizedPnl", 0) or 0)),
-                    leverage=int(pos.get("leverage", 1) or 1),
-                    liquidation_price=Decimal(str(pos.get("liquidationPrice"))) if pos.get("liquidationPrice") else None,
-                    margin=Decimal(str(pos.get("initialMargin", 0) or pos.get("margin", 0) or 0)),
-                    timestamp=datetime.fromtimestamp(pos["timestamp"] / 1000) if pos.get("timestamp") else None,
-                ))
-            return result
-        except Exception as e:
-            raise ExchangeError(f"Failed to fetch positions: {e}")
 
 
 # ============ Connection Manager ============

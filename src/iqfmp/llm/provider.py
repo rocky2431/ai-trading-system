@@ -181,6 +181,25 @@ class LLMConfig:
 
 # === Rate Limiter ===
 
+def _deduplicate_candidates(candidates: list[str]) -> list[str]:
+    """Remove duplicate candidates based on normalized content.
+
+    Args:
+        candidates: List of candidate strings
+
+    Returns:
+        Deduplicated list preserving original order
+    """
+    seen: set[str] = set()
+    unique: list[str] = []
+    for c in candidates:
+        normalized = c.strip().lower()
+        if normalized not in seen:
+            seen.add(normalized)
+            unique.append(c)
+    return unique
+
+
 class RateLimiter:
     """Token bucket rate limiter for API requests."""
 
@@ -463,17 +482,8 @@ class LLMProvider:
 
             candidates = response if isinstance(response, list) else [response.content]
 
-            # Deduplicate if requested
             if deduplicate:
-                seen = set()
-                unique_candidates = []
-                for c in candidates:
-                    # Normalize for comparison
-                    normalized = c.strip().lower()
-                    if normalized not in seen:
-                        seen.add(normalized)
-                        unique_candidates.append(c)
-                candidates = unique_candidates
+                candidates = _deduplicate_candidates(candidates)
 
             return candidates
 
@@ -517,14 +527,7 @@ class LLMProvider:
                 )
 
             if deduplicate:
-                seen = set()
-                unique_candidates = []
-                for c in candidates:
-                    normalized = c.strip().lower()
-                    if normalized not in seen:
-                        seen.add(normalized)
-                        unique_candidates.append(c)
-                candidates = unique_candidates
+                candidates = _deduplicate_candidates(candidates)
 
             return candidates
 

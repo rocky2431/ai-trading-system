@@ -155,6 +155,34 @@ class IdempotencyCacheError(OrderExecutionError):
     pass
 
 
+def get_required_redis_client(error_cls: type[Exception], purpose: str):
+    """Get Redis client or raise error. Critical state requires persistence.
+
+    Args:
+        error_cls: Exception class to raise on failure
+        purpose: Description of why Redis is needed (for error messages)
+
+    Returns:
+        Redis client instance
+
+    Raises:
+        error_cls: If Redis is unavailable
+    """
+    try:
+        from iqfmp.db import get_redis_client
+        client = get_redis_client()
+        if client is None:
+            raise error_cls(
+                f"Redis unavailable. {purpose} requires persistent storage "
+                "per CLAUDE.md critical state rules."
+            )
+        return client
+    except error_cls:
+        raise
+    except Exception as e:
+        raise error_cls(f"Failed to connect to Redis for {purpose}: {e}") from e
+
+
 class IdempotencyCache:
     """Redis-backed cache for preventing duplicate order execution.
 
@@ -185,22 +213,7 @@ class IdempotencyCache:
 
     def _get_redis_client(self):
         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
-        try:
-            from iqfmp.db import get_redis_client
-            client = get_redis_client()
-            if client is None:
-                raise IdempotencyCacheError(
-                    "Redis unavailable. Idempotency cache requires persistent storage "
-                    "per CLAUDE.md critical state rules. Cannot operate with in-memory only."
-                )
-            return client
-        except IdempotencyCacheError:
-            raise
-        except Exception as e:
-            raise IdempotencyCacheError(
-                f"Failed to connect to Redis for idempotency cache: {e}. "
-                "Critical state requires persistent storage."
-            ) from e
+        return get_required_redis_client(IdempotencyCacheError, "Idempotency cache")
 
     def _compute_hash(self, request: "OrderRequest") -> str:
         """Compute hash of request for validation."""
@@ -368,6 +381,9 @@ class OrderExecutor:
 
         Returns:
             Execution result
+
+        Raises:
+            IdempotencyCacheError: If Redis idempotency cache is unavailable or fails.
 
         Note:
             - If client_order_id is provided, the request is idempotent.
@@ -600,21 +616,7 @@ class OrderManager:
 
     def _get_redis_client(self):
         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
-        try:
-            from iqfmp.db import get_redis_client
-            client = get_redis_client()
-            if client is None:
-                raise OrderManagerError(
-                    "Redis unavailable. Order tracking requires persistent storage "
-                    "per CLAUDE.md critical state rules."
-                )
-            return client
-        except OrderManagerError:
-            raise
-        except Exception as e:
-            raise OrderManagerError(
-                f"Failed to connect to Redis for order tracking: {e}"
-            ) from e
+        return get_required_redis_client(OrderManagerError, "Order tracking")
 
     def _serialize_order(self, order: Order) -> str:
         """Serialize Order to JSON for Redis storage."""
@@ -849,21 +851,7 @@ class PartialFillHandler:
 
     def _get_redis_client(self) -> Any:
         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
-        try:
-            from iqfmp.db import get_redis_client
-            client = get_redis_client()
-            if client is None:
-                raise PartialFillHandlerError(
-                    "Redis unavailable. Partial fills require persistent storage "
-                    "per CLAUDE.md critical state rules."
-                )
-            return client
-        except PartialFillHandlerError:
-            raise
-        except Exception as e:
-            raise PartialFillHandlerError(
-                f"Failed to connect to Redis for partial fills: {e}"
-            ) from e
+        return get_required_redis_client(PartialFillHandlerError, "Partial fills")
 
     def _serialize_fill(self, fill: PartialFill) -> str:
         """Serialize PartialFill to JSON."""
@@ -1049,21 +1037,7 @@ class TimeoutHandler:
 
     def _get_redis_client(self) -> Any:
         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
-        try:
-            from iqfmp.db import get_redis_client
-            client = get_redis_client()
-            if client is None:
-                raise TimeoutHandlerError(
-                    "Redis unavailable. Timeout data requires persistent storage "
-                    "per CLAUDE.md critical state rules."
-                )
-            return client
-        except TimeoutHandlerError:
-            raise
-        except Exception as e:
-            raise TimeoutHandlerError(
-                f"Failed to connect to Redis for timeout storage: {e}"
-            ) from e
+        return get_required_redis_client(TimeoutHandlerError, "Timeout storage")
 
     def _serialize_timeout(self, timeout: OrderTimeout) -> str:
         """Serialize timeout to JSON (excluding callback)."""

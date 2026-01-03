@@ -1,10 +1,25 @@
 """Risk management module for IQFMP.
 
-Provides risk control and monitoring:
-- RiskController: Main risk management controller
-- DrawdownMonitor: Monitor and alert on drawdown
-- LossLimiter: Limit single and daily losses
-- ConcentrationChecker: Check position concentration
+This module implements a two-tier risk threshold system:
+
+1. HARD THRESHOLDS (immutable, defined as class constants in RiskController):
+   - MAX_DRAWDOWN_THRESHOLD: 15% - triggers emergency close
+   - MAX_POSITION_RATIO: 30% - single position concentration limit
+   - MAX_LEVERAGE: 3x - maximum allowed leverage
+   - EMERGENCY_LOSS_THRESHOLD: 5% - single-day loss triggers emergency close
+   These cannot be adjusted at runtime and enforce absolute safety limits.
+
+2. SOFT THRESHOLDS (configurable via RiskConfig):
+   - max_drawdown, max_single_loss, max_position_concentration, daily_loss_limit
+   These can be customized per strategy but must remain within hard limits.
+
+Components:
+- RiskController: Main controller integrating both threshold tiers + MarginCalculator
+- DrawdownMonitor: Track equity peaks and drawdown with tiered alerts
+- LossLimiter: Track single-trade and daily losses
+- ConcentrationChecker: Monitor position concentration by symbol
+
+Alert levels follow a tiered pattern: CRITICAL (>100%), DANGER (>75%), WARNING (>50%).
 """
 
 from dataclasses import dataclass, field
@@ -214,6 +229,37 @@ class LossRecord:
     timestamp: datetime
 
 
+# ==================== Alert Level Helpers ====================
+
+
+def _determine_alert_level(
+    current_value: Decimal,
+    threshold: Decimal,
+    warning_ratio: Decimal = Decimal("0.5"),
+    danger_ratio: Decimal = Decimal("0.75"),
+) -> RiskLevel | None:
+    """Determine alert level based on threshold ratios.
+
+    Standard tiered alert pattern used across all risk monitors.
+
+    Args:
+        current_value: Current metric value
+        threshold: Maximum allowed threshold
+        warning_ratio: Ratio of threshold for WARNING (default 0.5 = 50%)
+        danger_ratio: Ratio of threshold for DANGER (default 0.75 = 75%)
+
+    Returns:
+        RiskLevel if threshold exceeded, None if safe
+    """
+    if current_value > threshold:
+        return RiskLevel.CRITICAL
+    elif current_value > threshold * danger_ratio:
+        return RiskLevel.DANGER
+    elif current_value > threshold * warning_ratio:
+        return RiskLevel.WARNING
+    return None
+
+
 # ==================== DrawdownMonitor ====================
 
 
@@ -291,40 +337,28 @@ class DrawdownMonitor:
         """Check and generate drawdown alerts.
 
         Returns:
-            List of drawdown alerts
+            List of drawdown alerts (empty if below warning threshold)
         """
-        alerts: list[DrawdownAlert] = []
         drawdown = self.current_drawdown
+        level = _determine_alert_level(drawdown, self._max_drawdown)
 
-        if drawdown > self._max_drawdown:
-            alerts.append(
-                DrawdownAlert(
-                    level=RiskLevel.CRITICAL,
-                    current_drawdown=drawdown,
-                    max_allowed=self._max_drawdown,
-                    message=f"Max drawdown breached: {drawdown * 100:.1f}% > {self._max_drawdown * 100:.1f}%",
-                )
-            )
-        elif drawdown > self._max_drawdown * Decimal("0.75"):
-            alerts.append(
-                DrawdownAlert(
-                    level=RiskLevel.DANGER,
-                    current_drawdown=drawdown,
-                    max_allowed=self._max_drawdown,
-                    message=f"Drawdown approaching limit: {drawdown * 100:.1f}%",
-                )
-            )
-        elif drawdown > self._max_drawdown * Decimal("0.5"):
-            alerts.append(
-                DrawdownAlert(
-                    level=RiskLevel.WARNING,
-                    current_drawdown=drawdown,
-                    max_allowed=self._max_drawdown,
-                    message=f"Drawdown warning: {drawdown * 100:.1f}%",
-                )
-            )
+        if level is None:
+            return []
 
-        return alerts
+        messages = {
+            RiskLevel.CRITICAL: f"Max drawdown breached: {drawdown * 100:.1f}% > {self._max_drawdown * 100:.1f}%",
+            RiskLevel.DANGER: f"Drawdown approaching limit: {drawdown * 100:.1f}%",
+            RiskLevel.WARNING: f"Drawdown warning: {drawdown * 100:.1f}%",
+        }
+
+        return [
+            DrawdownAlert(
+                level=level,
+                current_drawdown=drawdown,
+                max_allowed=self._max_drawdown,
+                message=messages[level],
+            )
+        ]
 
 
 # ==================== LossLimiter ====================
@@ -410,43 +444,29 @@ class LossLimiter:
         """Check and generate loss alerts.
 
         Returns:
-            List of loss alerts
+            List of loss alerts (empty if below warning threshold)
         """
-        alerts: list[LossAlert] = []
         loss_pct = self.daily_loss_percent
+        level = _determine_alert_level(loss_pct, self._daily_loss_limit)
 
-        if loss_pct > self._daily_loss_limit:
-            alerts.append(
-                LossAlert(
-                    level=RiskLevel.CRITICAL,
-                    loss_amount=self._daily_loss,
-                    loss_percent=loss_pct,
-                    limit=self._daily_loss_limit,
-                    message=f"Daily loss limit breached: {loss_pct * 100:.1f}%",
-                )
-            )
-        elif loss_pct > self._daily_loss_limit * Decimal("0.75"):
-            alerts.append(
-                LossAlert(
-                    level=RiskLevel.DANGER,
-                    loss_amount=self._daily_loss,
-                    loss_percent=loss_pct,
-                    limit=self._daily_loss_limit,
-                    message=f"Daily loss approaching limit: {loss_pct * 100:.1f}%",
-                )
-            )
-        elif loss_pct > self._daily_loss_limit * Decimal("0.5"):
-            alerts.append(
-                LossAlert(
-                    level=RiskLevel.WARNING,
-                    loss_amount=self._daily_loss,
-                    loss_percent=loss_pct,
-                    limit=self._daily_loss_limit,
-                    message=f"Daily loss warning: {loss_pct * 100:.1f}%",
-                )
-            )
+        if level is None:
+            return []
 
-        return alerts
+        messages = {
+            RiskLevel.CRITICAL: f"Daily loss limit breached: {loss_pct * 100:.1f}%",
+            RiskLevel.DANGER: f"Daily loss approaching limit: {loss_pct * 100:.1f}%",
+            RiskLevel.WARNING: f"Daily loss warning: {loss_pct * 100:.1f}%",
+        }
+
+        return [
+            LossAlert(
+                level=level,
+                loss_amount=self._daily_loss,
+                loss_percent=loss_pct,
+                limit=self._daily_loss_limit,
+                message=messages[level],
+            )
+        ]
 
 
 # ==================== ConcentrationChecker ====================
@@ -527,37 +547,45 @@ class ConcentrationChecker:
     ) -> list[ConcentrationAlert]:
         """Check and generate concentration alerts.
 
+        Uses higher warning threshold (85%) than other monitors since
+        concentration issues require earlier intervention.
+
         Args:
             positions: Position values by symbol
             total_equity: Total account equity
 
         Returns:
-            List of concentration alerts
+            List of concentration alerts (empty if all positions below 85%)
         """
         alerts: list[ConcentrationAlert] = []
         concentrations = self.check_concentration(positions, total_equity)
 
         for symbol, conc in concentrations.items():
-            if conc > self._max_single:
-                alerts.append(
-                    ConcentrationAlert(
-                        level=RiskLevel.CRITICAL,
-                        symbol=symbol,
-                        concentration=conc,
-                        max_allowed=self._max_single,
-                        message=f"{symbol} concentration breached: {conc * 100:.1f}%",
-                    )
+            # Concentration uses 85% warning threshold (no danger tier)
+            level = _determine_alert_level(
+                conc, self._max_single,
+                warning_ratio=Decimal("0.85"),
+                danger_ratio=Decimal("1.0"),  # Skip danger level
+            )
+
+            if level is None:
+                continue
+
+            message = (
+                f"{symbol} concentration breached: {conc * 100:.1f}%"
+                if level == RiskLevel.CRITICAL
+                else f"{symbol} concentration high: {conc * 100:.1f}%"
+            )
+
+            alerts.append(
+                ConcentrationAlert(
+                    level=level,
+                    symbol=symbol,
+                    concentration=conc,
+                    max_allowed=self._max_single,
+                    message=message,
                 )
-            elif conc > self._max_single * Decimal("0.85"):
-                alerts.append(
-                    ConcentrationAlert(
-                        level=RiskLevel.WARNING,
-                        symbol=symbol,
-                        concentration=conc,
-                        max_allowed=self._max_single,
-                        message=f"{symbol} concentration high: {conc * 100:.1f}%",
-                    )
-                )
+            )
 
         return alerts
 

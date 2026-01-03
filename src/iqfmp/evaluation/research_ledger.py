@@ -2,12 +2,12 @@
 
 This module provides:
 - TrialRecord: Data structure for recording individual trials
-- DynamicThreshold: Calculator for adjusting significance thresholds
+- DynamicThreshold: Calculator for adjusting significance thresholds (Deflated Sharpe Ratio)
 - ResearchLedger: Main ledger for trial tracking and querying
-- Storage backends: MemoryStorage and FileStorage
+- Storage backends: PostgresStorage (production), MemoryStorage (testing), FileStorage (legacy)
 
-The dynamic threshold uses a simplified Deflated Sharpe Ratio approach
-to account for multiple hypothesis testing.
+The dynamic threshold uses Deflated Sharpe Ratio methodology to account for
+multiple hypothesis testing and prevent p-hacking in factor research.
 """
 
 from __future__ import annotations
@@ -443,18 +443,15 @@ class LedgerStorage(ABC):
 
 
 class MemoryStorage(LedgerStorage):
-    """In-memory storage backend."""
+    """In-memory storage backend for testing. Not thread-safe, not persistent."""
 
     def __init__(self) -> None:
-        """Initialize empty storage."""
         self._trials: list[TrialRecord] = []
 
     def save(self, trials: list[TrialRecord]) -> None:
-        """Save trials to memory."""
         self._trials = trials.copy()
 
     def load(self) -> list[TrialRecord]:
-        """Load trials from memory."""
         return self._trials.copy()
 
 

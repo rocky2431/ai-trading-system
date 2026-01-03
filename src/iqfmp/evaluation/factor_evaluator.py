@@ -1,11 +1,11 @@
-"""Factor Evaluator - Qlib-native evaluation engine.
+"""Factor Evaluator - Qlib-integrated evaluation engine.
 
-This module uses Qlib as the SOLE computational backend for factor evaluation:
-- IC/Rank IC calculation via Qlib's correlation engine
-- IR/Sharpe calculation via Qlib's risk metrics
-- MaxDD/Win Rate via Qlib's backtest analytics
+This module uses Qlib as the primary computational backend for factor evaluation:
+- IC/Rank IC calculation via Qlib's correlation engine (with pandas fallback)
+- IR/Sharpe/MaxDD via standard financial metrics using numpy
+- Unified statistical functions via iqfmp.evaluation.qlib_stats
 
-All computations MUST go through Qlib. No local numpy/scipy calculations.
+Note: scipy is intentionally excluded; numpy/pandas are used for core calculations.
 """
 
 from __future__ import annotations

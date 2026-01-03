@@ -57,6 +57,17 @@ function getProgressColor(value: number, thresholds: [number, number, number]): 
   return '[&>div]:bg-emerald-500'
 }
 
+// Alert severity style configuration
+const alertStyles: Record<string, { bg: string; badge: 'destructive' | 'warning' }> = {
+  critical: { bg: 'bg-red-500/10 text-red-500', badge: 'destructive' },
+  danger: { bg: 'bg-orange-500/10 text-orange-500', badge: 'destructive' },
+  warning: { bg: 'bg-amber-500/10 text-amber-500', badge: 'warning' },
+}
+
+function getAlertStyle(severity: string) {
+  return alertStyles[severity] || alertStyles.warning
+}
+
 export function RiskStatusCard({ risk }: RiskStatusCardProps) {
   const config = riskConfig[risk.level]
   const StatusIcon = config.Icon
@@ -161,32 +172,22 @@ export function RiskStatusCard({ risk }: RiskStatusCardProps) {
               Active Alerts ({risk.alerts.length})
             </h4>
             <div className="space-y-2">
-              {risk.alerts.map((alert) => (
-                <div
-                  key={alert.id}
-                  className={`p-3 rounded-lg text-sm ${
-                    alert.severity === 'critical'
-                      ? 'bg-red-500/10 text-red-500'
-                      : alert.severity === 'danger'
-                      ? 'bg-orange-500/10 text-orange-500'
-                      : 'bg-amber-500/10 text-amber-500'
-                  }`}
-                >
-                  <div className="flex items-start justify-between">
-                    <span>{alert.message}</span>
-                    <Badge
-                      variant={
-                        alert.severity === 'critical' || alert.severity === 'danger'
-                          ? 'destructive'
-                          : 'warning'
-                      }
-                      className="text-xs ml-2"
-                    >
-                      {alert.severity}
-                    </Badge>
+              {risk.alerts.map((alert) => {
+                const style = getAlertStyle(alert.severity)
+                return (
+                  <div
+                    key={alert.id}
+                    className={`p-3 rounded-lg text-sm ${style.bg}`}
+                  >
+                    <div className="flex items-start justify-between">
+                      <span>{alert.message}</span>
+                      <Badge variant={style.badge} className="text-xs ml-2">
+                        {alert.severity}
+                      </Badge>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           </div>
         )}

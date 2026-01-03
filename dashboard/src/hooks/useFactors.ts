@@ -1,6 +1,6 @@
 /**
- * Factors Hook - 提供因子列表和筛选功能
- * 使用真实 API 数据
+ * Factors Hook - Factor list and filtering functionality
+ * Uses real API data from backend
  */
 
 import { useState, useEffect, useMemo, useCallback } from 'react'
@@ -8,7 +8,25 @@ import { factorsApi } from '@/api'
 import type { FactorResponse } from '@/api'
 import type { Factor, FactorFilter, FactorFamily, FactorStatus } from '@/types/factor'
 
-// 将 API 响应转换为前端类型
+/**
+ * Calculate stability score from IC values across data splits.
+ * Stability = (average IC across splits) / (overall IC mean)
+ * Higher values indicate more consistent factor performance across train/valid/test.
+ * Returns 0.7 as default when data is unavailable.
+ */
+function calculateStability(metrics: FactorResponse['metrics']): number {
+  if (!metrics || !metrics.ic_by_split || metrics.ic_mean === 0) {
+    return 0.7
+  }
+  const icValues = Object.values(metrics.ic_by_split)
+  if (icValues.length === 0) {
+    return 0.7
+  }
+  const avgIcAcrossSplits = icValues.reduce((a, b) => a + b, 0) / icValues.length
+  return avgIcAcrossSplits / metrics.ic_mean || 0.7
+}
+
+// Transform API response to frontend Factor type
 function apiToFactor(response: FactorResponse): Factor {
   return {
     id: response.id,
@@ -28,21 +46,19 @@ function apiToFactor(response: FactorResponse): Factor {
       maxDrawdown: response.metrics.max_drawdown * 100,
       winRate: 50 + response.metrics.ir * 5,
       turnover: response.metrics.turnover * 100,
-      stability: Object.values(response.metrics.ic_by_split).reduce((a, b) => a + b, 0) /
-        Math.max(Object.values(response.metrics.ic_by_split).length, 1) / response.metrics.ic_mean || 0.7,
+      stability: calculateStability(response.metrics),
     } : null,
     evaluationCount: response.experiment_number,
     tags: response.family || [],
   }
 }
 
-// Direct passthrough - backend FactorStatus matches frontend FactorStatus type
+// Validated status mapping - returns status if valid, defaults to 'candidate' for unknown values
 function mapApiStatus(status: string): FactorStatus {
   const validStatuses: FactorStatus[] = ['candidate', 'rejected', 'core', 'redundant']
   if (validStatuses.includes(status as FactorStatus)) {
     return status as FactorStatus
   }
-  // Fallback for unknown status
   return 'candidate'
 }
 
@@ -58,7 +74,7 @@ export function useFactors(initialFilter?: FactorFilter) {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<Error | null>(null)
 
-  // 加载因子数据
+  // Load factor data from API
   const loadFactors = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -82,7 +98,7 @@ export function useFactors(initialFilter?: FactorFilter) {
     loadFactors()
   }, [loadFactors])
 
-  // 生成新因子
+  // Generate new factor via LLM
   const generateFactor = useCallback(async (description: string, family?: string[]) => {
     setLoading(true)
     try {
@@ -101,13 +117,13 @@ export function useFactors(initialFilter?: FactorFilter) {
     }
   }, [])
 
-  // 评估因子
+  // Evaluate factor performance
   const evaluateFactor = useCallback(async (factorId: string) => {
     try {
       const response = await factorsApi.evaluate(factorId, {
         splits: ['train', 'valid', 'test'],
       })
-      // 重新加载因子列表以获取更新后的数据
+      // Reload factor list to get updated metrics
       await loadFactors()
       return response
     } catch (err) {
@@ -116,7 +132,7 @@ export function useFactors(initialFilter?: FactorFilter) {
     }
   }, [loadFactors])
 
-  // 更新因子状态
+  // Update factor status (candidate/core/rejected/redundant)
   const updateFactorStatus = useCallback(async (factorId: string, status: string) => {
     try {
       await factorsApi.updateStatus(factorId, status)
@@ -127,7 +143,7 @@ export function useFactors(initialFilter?: FactorFilter) {
     }
   }, [loadFactors])
 
-  // 删除因子
+  // Delete factor
   const deleteFactor = useCallback(async (factorId: string) => {
     try {
       await factorsApi.delete(factorId)
@@ -138,7 +154,7 @@ export function useFactors(initialFilter?: FactorFilter) {
     }
   }, [])
 
-  // 过滤和排序
+  // Filter and sort factors
   const filteredFactors = useMemo(() => {
     let result = [...factors]
 
@@ -203,7 +219,7 @@ export function useFactors(initialFilter?: FactorFilter) {
     return result
   }, [factors, filter])
 
-  // 统计信息
+  // Statistics by family and status
   const stats = useMemo(() => {
     const byFamily: Record<FactorFamily, number> = {
       momentum: 0,

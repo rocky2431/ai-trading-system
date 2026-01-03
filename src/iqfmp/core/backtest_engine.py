@@ -86,7 +86,12 @@ class BacktestResult:
     factor_contributions: dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
+        """Convert to dictionary for serialization.
+
+        Note: Large collections are truncated to limit response size:
+        - equity_curve: last 100 entries (full data in self.equity_curve)
+        - trades: last 50 trades (full data in self.trades)
+        """
         return {
             "total_return": self.total_return,
             "annual_return": self.annual_return,

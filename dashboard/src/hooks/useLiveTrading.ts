@@ -155,54 +155,45 @@ export function useLiveTrading() {
         wsRef.current.onmessage = (event) => {
           try {
             const message = JSON.parse(event.data) as TradingWebSocketMessage
+            const { type, data, timestamp } = message
 
-            // Handle trading-related messages
-            switch (message.type) {
+            // Consolidated handler for trading-related messages
+            switch (type) {
               case 'trading_state_update':
-                // Full state update
-                if (message.data) {
+                if (data) {
                   setState((prev) => ({
                     ...prev,
-                    ...(message.data as Partial<TradingState>),
-                    lastUpdated: message.timestamp,
+                    ...(data as Partial<TradingState>),
+                    lastUpdated: timestamp,
                   }))
                 }
                 break
 
               case 'position_update':
-                // Position update
-                fetchState()
-                break
-
               case 'order_update':
-                // Order update
+                // Both trigger a full state refresh
                 fetchState()
                 break
 
               case 'account_update':
-                // Account update
-                if (message.data?.account) {
+                if (data?.account) {
                   setState((prev) => ({
                     ...prev,
-                    account: message.data.account as AccountInfo,
-                    lastUpdated: message.timestamp,
+                    account: data.account as AccountInfo,
+                    lastUpdated: timestamp,
                   }))
                 }
                 break
 
               case 'risk_alert':
-                // Risk alert
-                if (message.data?.alert) {
+                if (data?.alert) {
                   setState((prev) => ({
                     ...prev,
                     risk: {
                       ...prev.risk,
-                      alerts: [
-                        message.data.alert as RiskAlert,
-                        ...prev.risk.alerts.slice(0, 9),
-                      ],
+                      alerts: [data.alert as RiskAlert, ...prev.risk.alerts.slice(0, 9)],
                     },
-                    lastUpdated: message.timestamp,
+                    lastUpdated: timestamp,
                   }))
                 }
                 break

@@ -4,7 +4,8 @@
  */
 
 export type PositionSide = 'long' | 'short'
-export type OrderStatus = 'open' | 'filled' | 'cancelled' | 'partial'
+// Aligned with backend: src/iqfmp/api/trading/schemas.py OrderStatus enum
+export type OrderStatus = 'open' | 'closed' | 'canceled' | 'expired' | 'rejected' | 'partially_filled'
 export type RiskLevel = 'normal' | 'warning' | 'danger' | 'critical'
 
 export interface Position {

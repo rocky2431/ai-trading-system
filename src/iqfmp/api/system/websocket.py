@@ -4,11 +4,13 @@ import asyncio
 import json
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Optional
 
-from fastapi import WebSocket, WebSocketDisconnect
+from fastapi import Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel
 
+from iqfmp.api.auth.config import JWTConfig
+from iqfmp.api.auth.token import TokenExpiredError, TokenService
 from iqfmp.api.system.service import SystemService
 
 logger = logging.getLogger(__name__)
@@ -150,12 +152,41 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def websocket_endpoint(websocket: WebSocket) -> None:
+async def websocket_endpoint(
+    websocket: WebSocket,
+    token: Optional[str] = Query(None, description="JWT access token for authentication"),
+) -> None:
     """Main WebSocket endpoint for system status updates.
 
     Args:
         websocket: WebSocket connection
+        token: JWT access token (query parameter)
+
+    Note:
+        Token should be passed as query parameter: /api/v1/system/ws?token=xxx
+        If no token is provided, connection will be rejected with 4001 (Unauthorized).
     """
+    # Verify token before accepting connection
+    if not token:
+        logger.warning("WebSocket connection rejected: No token provided")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    try:
+        jwt_config = JWTConfig()
+        token_service = TokenService(jwt_config)
+        payload = token_service.decode_token(token)
+        user_id = payload.get("sub")
+        logger.debug(f"WebSocket authenticated for user: {user_id}")
+    except TokenExpiredError:
+        logger.warning("WebSocket connection rejected: Token expired")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    except Exception as e:
+        logger.warning(f"WebSocket connection rejected: Invalid token - {e}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     await manager.connect(websocket)
 
     try:

@@ -24,12 +24,12 @@ const familyConfig: Record<FactorFamily, { label: string; className: string }> =
   fundamental: { label: 'Fundamental', className: 'bg-cyan-500/10 text-cyan-500' },
 }
 
+// Status config aligned with backend: src/iqfmp/models/factor.py FactorStatus enum
 const statusConfig: Record<FactorStatus, { label: string; variant: 'default' | 'secondary' | 'destructive' | 'success' | 'warning' }> = {
-  draft: { label: 'Draft', variant: 'secondary' },
-  evaluating: { label: 'Evaluating', variant: 'warning' },
-  approved: { label: 'Approved', variant: 'success' },
+  candidate: { label: 'Candidate', variant: 'warning' },
   rejected: { label: 'Rejected', variant: 'destructive' },
-  archived: { label: 'Archived', variant: 'secondary' },
+  core: { label: 'Core', variant: 'success' },
+  redundant: { label: 'Redundant', variant: 'secondary' },
 }
 
 function formatDate(dateString: string): string {

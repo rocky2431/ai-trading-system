@@ -36,14 +36,14 @@ function apiToFactor(response: FactorResponse): Factor {
   }
 }
 
+// Direct passthrough - backend FactorStatus matches frontend FactorStatus type
 function mapApiStatus(status: string): FactorStatus {
-  const statusMap: Record<string, FactorStatus> = {
-    candidate: 'evaluating',
-    core: 'approved',
-    rejected: 'rejected',
-    redundant: 'archived',
+  const validStatuses: FactorStatus[] = ['candidate', 'rejected', 'core', 'redundant']
+  if (validStatuses.includes(status as FactorStatus)) {
+    return status as FactorStatus
   }
-  return statusMap[status] || 'draft'
+  // Fallback for unknown status
+  return 'candidate'
 }
 
 export function useFactors(initialFilter?: FactorFilter) {
@@ -214,11 +214,10 @@ export function useFactors(initialFilter?: FactorFilter) {
       fundamental: 0,
     }
     const byStatus: Record<FactorStatus, number> = {
-      draft: 0,
-      evaluating: 0,
-      approved: 0,
+      candidate: 0,
       rejected: 0,
-      archived: 0,
+      core: 0,
+      redundant: 0,
     }
 
     factors.forEach(f => {

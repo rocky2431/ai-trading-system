@@ -820,6 +820,12 @@ class OrderManager:
 # ==================== PartialFillHandler ====================
 
 
+class PartialFillHandlerError(Exception):
+    """Raised when partial fill handler operations fail."""
+
+    pass
+
+
 class PartialFillHandler:
     """Handle partial fills for orders.
 
@@ -831,23 +837,33 @@ class PartialFillHandler:
     TTL_SECONDS = 86400 * 7  # 7 days
 
     def __init__(self, redis_client: Any = None) -> None:
-        """Initialize partial fill handler with Redis persistence."""
+        """Initialize partial fill handler with Redis persistence.
+
+        Args:
+            redis_client: Optional Redis client for dependency injection (testing)
+
+        Raises:
+            PartialFillHandlerError: If Redis is unavailable and no client injected
+        """
         self._redis = redis_client if redis_client is not None else self._get_redis_client()
 
     def _get_redis_client(self) -> Any:
-        """Get Redis client. Returns None if unavailable (logs warning)."""
+        """Get Redis client. Raises if unavailable (critical state requires persistence)."""
         try:
             from iqfmp.db import get_redis_client
             client = get_redis_client()
             if client is None:
-                logger.warning(
-                    "Redis unavailable for PartialFillHandler. "
-                    "Partial fills will not be persisted."
+                raise PartialFillHandlerError(
+                    "Redis unavailable. Partial fills require persistent storage "
+                    "per CLAUDE.md critical state rules."
                 )
             return client
+        except PartialFillHandlerError:
+            raise
         except Exception as e:
-            logger.warning(f"Failed to connect to Redis for partial fills: {e}")
-            return None
+            raise PartialFillHandlerError(
+                f"Failed to connect to Redis for partial fills: {e}"
+            ) from e
 
     def _serialize_fill(self, fill: PartialFill) -> str:
         """Serialize PartialFill to JSON."""
@@ -877,17 +893,20 @@ class PartialFillHandler:
 
         Args:
             fill: Partial fill to record
-        """
-        if self._redis is None:
-            logger.warning(f"Cannot persist partial fill for order {fill.order_id}: Redis unavailable")
-            return
 
+        Raises:
+            PartialFillHandlerError: If persistence fails
+        """
         try:
             key = f"{self.REDIS_PREFIX}{fill.order_id}"
             self._redis.rpush(key, self._serialize_fill(fill))
             self._redis.expire(key, self.TTL_SECONDS)
         except Exception as e:
             logger.error(f"Failed to record partial fill for order {fill.order_id}: {e}")
+            raise PartialFillHandlerError(
+                f"Failed to record partial fill for order {fill.order_id}: {e}. "
+                "Order reconciliation will be incomplete."
+            ) from e
 
     def get_fills(self, order_id: str) -> list[PartialFill]:
         """Get fills for an order.
@@ -897,10 +916,10 @@ class PartialFillHandler:
 
         Returns:
             List of partial fills
-        """
-        if self._redis is None:
-            return []
 
+        Raises:
+            PartialFillHandlerError: If Redis operation fails
+        """
         try:
             key = f"{self.REDIS_PREFIX}{order_id}"
             fills_data = self._redis.lrange(key, 0, -1)
@@ -910,10 +929,18 @@ class PartialFillHandler:
                     fills.append(self._deserialize_fill(data))
                 except Exception as e:
                     logger.error(f"Failed to deserialize partial fill: {e}")
+                    raise PartialFillHandlerError(
+                        f"Failed to deserialize partial fill: {e}"
+                    ) from e
             return fills
+        except PartialFillHandlerError:
+            raise
         except Exception as e:
             logger.error(f"Failed to get partial fills for order {order_id}: {e}")
-            return []
+            raise PartialFillHandlerError(
+                f"Failed to get partial fills for order {order_id}: {e}. "
+                "Order fill status unknown."
+            ) from e
 
     def get_total_filled(self, order_id: str) -> Decimal:
         """Get total filled quantity.
@@ -984,33 +1011,162 @@ class PartialFillHandler:
 # ==================== TimeoutHandler ====================
 
 
-class TimeoutHandler:
-    """Handle order timeouts."""
+class TimeoutHandlerError(Exception):
+    """Raised when timeout handler operations fail."""
 
-    def __init__(self, adapter: ExchangeAdapter) -> None:
-        """Initialize timeout handler.
+    pass
+
+
+class TimeoutHandler:
+    """Handle order timeouts with Redis persistence.
+
+    Critical state per CLAUDE.md: Timeouts must be persistent to survive
+    service restarts. Uses Redis for persistence.
+    """
+
+    REDIS_KEY_PREFIX = "iqfmp:timeouts:"
+    REDIS_INDEX_KEY = "iqfmp:timeouts:index"
+
+    def __init__(
+        self, adapter: ExchangeAdapter, redis_client: Any = None
+    ) -> None:
+        """Initialize timeout handler with Redis persistence.
 
         Args:
             adapter: Exchange adapter
+            redis_client: Optional Redis client for dependency injection (testing)
+
+        Raises:
+            TimeoutHandlerError: If Redis is unavailable and no client injected
         """
         self._adapter = adapter
-        self._timeouts: dict[str, OrderTimeout] = {}
+        self._redis = redis_client if redis_client is not None else self._get_redis_client()
+        # Callbacks cannot be serialized to Redis, store in memory only
+        # On restart, callbacks must be re-registered by callers
+        self._callbacks: dict[str, Callable[[str], None]] = {}
+        # Load existing timeouts from Redis
+        self._load_timeouts()
+
+    def _get_redis_client(self) -> Any:
+        """Get Redis client. Raises if unavailable (critical state requires persistence)."""
+        try:
+            from iqfmp.db import get_redis_client
+            client = get_redis_client()
+            if client is None:
+                raise TimeoutHandlerError(
+                    "Redis unavailable. Timeout data requires persistent storage "
+                    "per CLAUDE.md critical state rules."
+                )
+            return client
+        except TimeoutHandlerError:
+            raise
+        except Exception as e:
+            raise TimeoutHandlerError(
+                f"Failed to connect to Redis for timeout storage: {e}"
+            ) from e
+
+    def _serialize_timeout(self, timeout: OrderTimeout) -> str:
+        """Serialize timeout to JSON (excluding callback)."""
+        return json.dumps({
+            "order_id": timeout.order_id,
+            "timeout_seconds": timeout.timeout_seconds,
+            "created_at": timeout.created_at.isoformat(),
+            "symbol": timeout.symbol,
+        })
+
+    def _deserialize_timeout(self, data: str) -> OrderTimeout:
+        """Deserialize JSON to OrderTimeout (without callback)."""
+        obj = json.loads(data)
+        return OrderTimeout(
+            order_id=obj["order_id"],
+            timeout_seconds=obj["timeout_seconds"],
+            created_at=datetime.fromisoformat(obj["created_at"]),
+            symbol=obj.get("symbol"),
+            callback=None,  # Callbacks must be re-registered after restart
+        )
+
+    def _load_timeouts(self) -> None:
+        """Load existing timeouts from Redis on startup."""
+        try:
+            order_ids = self._redis.smembers(self.REDIS_INDEX_KEY)
+            if order_ids:
+                for order_id in order_ids:
+                    if isinstance(order_id, bytes):
+                        order_id = order_id.decode("utf-8")
+                    key = f"{self.REDIS_KEY_PREFIX}{order_id}"
+                    data = self._redis.get(key)
+                    if data:
+                        # Just verify it exists and is valid
+                        self._deserialize_timeout(data)
+                logger.info(f"Loaded {len(order_ids)} timeouts from Redis")
+        except Exception as e:
+            logger.warning(f"Failed to load timeouts from Redis: {e}")
 
     def register(self, timeout: OrderTimeout) -> None:
         """Register order timeout.
 
         Args:
             timeout: Timeout configuration
+
+        Raises:
+            TimeoutHandlerError: If persistence fails
         """
-        self._timeouts[timeout.order_id] = timeout
+        try:
+            key = f"{self.REDIS_KEY_PREFIX}{timeout.order_id}"
+            self._redis.set(key, self._serialize_timeout(timeout))
+            self._redis.sadd(self.REDIS_INDEX_KEY, timeout.order_id)
+            # Store callback in memory if provided
+            if timeout.callback:
+                self._callbacks[timeout.order_id] = timeout.callback
+            logger.debug(f"Registered timeout for order {timeout.order_id}")
+        except Exception as e:
+            logger.error(f"Failed to register timeout for order {timeout.order_id}: {e}")
+            raise TimeoutHandlerError(
+                f"Failed to register timeout: {e}"
+            ) from e
 
     def unregister(self, order_id: str) -> None:
         """Unregister order timeout.
 
         Args:
             order_id: Order ID
+
+        Raises:
+            TimeoutHandlerError: If persistence fails
         """
-        self._timeouts.pop(order_id, None)
+        try:
+            key = f"{self.REDIS_KEY_PREFIX}{order_id}"
+            self._redis.delete(key)
+            self._redis.srem(self.REDIS_INDEX_KEY, order_id)
+            self._callbacks.pop(order_id, None)
+            logger.debug(f"Unregistered timeout for order {order_id}")
+        except Exception as e:
+            logger.error(f"Failed to unregister timeout for order {order_id}: {e}")
+            raise TimeoutHandlerError(
+                f"Failed to unregister timeout: {e}"
+            ) from e
+
+    def _get_timeout(self, order_id: str) -> Optional[OrderTimeout]:
+        """Get timeout from Redis.
+
+        Args:
+            order_id: Order ID
+
+        Returns:
+            OrderTimeout if found, None otherwise
+        """
+        try:
+            key = f"{self.REDIS_KEY_PREFIX}{order_id}"
+            data = self._redis.get(key)
+            if data:
+                timeout = self._deserialize_timeout(data)
+                # Restore callback from memory if available
+                timeout.callback = self._callbacks.get(order_id)
+                return timeout
+        except Exception as e:
+            logger.error(f"Failed to get timeout for order {order_id}: {e}")
+            raise TimeoutHandlerError(f"Failed to get timeout: {e}") from e
+        return None
 
     def has_timeout(self, order_id: str) -> bool:
         """Check if order has timeout registered.
@@ -1021,7 +1177,11 @@ class TimeoutHandler:
         Returns:
             True if timeout registered
         """
-        return order_id in self._timeouts
+        try:
+            return self._redis.sismember(self.REDIS_INDEX_KEY, order_id)
+        except Exception as e:
+            logger.error(f"Failed to check timeout for order {order_id}: {e}")
+            raise TimeoutHandlerError(f"Failed to check timeout: {e}") from e
 
     def is_expired(self, order_id: str) -> bool:
         """Check if order timeout has expired.
@@ -1032,7 +1192,7 @@ class TimeoutHandler:
         Returns:
             True if expired
         """
-        timeout = self._timeouts.get(order_id)
+        timeout = self._get_timeout(order_id)
         if timeout is None:
             return False
 
@@ -1073,18 +1233,30 @@ class TimeoutHandler:
         """
         cancelled: list[str] = []
 
-        for order_id, timeout in list(self._timeouts.items()):
+        try:
+            order_ids = self._redis.smembers(self.REDIS_INDEX_KEY)
+        except Exception as e:
+            logger.error(f"Failed to get timeout list: {e}")
+            raise TimeoutHandlerError(f"Failed to check timeouts: {e}") from e
+
+        # Create a copy to avoid modifying set during iteration
+        for order_id in list(order_ids):
+            if isinstance(order_id, bytes):
+                order_id = order_id.decode("utf-8")
+
             if self.is_expired(order_id):
-                symbol = timeout.symbol or ""
+                timeout = self._get_timeout(order_id)
+                symbol = timeout.symbol if timeout else ""
                 try:
-                    await self._adapter.cancel_order(order_id, symbol)
+                    await self._adapter.cancel_order(order_id, symbol or "")
                     cancelled.append(order_id)
                     self.unregister(order_id)
                     logger.info(f"Cancelled expired order {order_id}")
 
                     # Call callback if set
-                    if timeout.callback:
-                        timeout.callback(order_id)
+                    callback = self._callbacks.get(order_id)
+                    if callback:
+                        callback(order_id)
                 except Exception as e:
                     logger.error(f"Failed to cancel expired order {order_id} on {symbol}: {e}")
 
@@ -1102,6 +1274,8 @@ __all__ = [
     "IdempotencyCacheError",
     "OrderExecutionError",
     "OrderManagerError",
+    "PartialFillHandlerError",
+    "TimeoutHandlerError",
     # Models
     "ExecutionResult",
     "IdempotencyCacheEntry",

@@ -645,24 +645,41 @@ class PositionManager:
             ) from e
 
     def _init_capital(self) -> None:
-        """Initialize capital from Redis or config default."""
-        if self._redis:
-            try:
-                stored_capital = self._redis.get(self.REDIS_CAPITAL_KEY)
-                if stored_capital:
-                    self.capital = Decimal(stored_capital)
-                    return
-            except Exception as e:
-                logger.warning(f"Failed to load capital from Redis: {e}")
+        """Initialize capital from Redis or config default.
+
+        Raises:
+            PositionStorageError: If Redis operation fails
+        """
+        try:
+            stored_capital = self._redis.get(self.REDIS_CAPITAL_KEY)
+            if stored_capital:
+                self.capital = Decimal(stored_capital)
+                logger.info(f"Loaded capital from Redis: {self.capital}")
+                return
+        except Exception as e:
+            logger.error(f"Failed to load capital from Redis: {e}")
+            raise PositionStorageError(
+                f"Failed to load capital from Redis: {e}. "
+                "Capital state is critical - wrong capital leads to wrong position sizing."
+            ) from e
+        # No stored capital, use config default (first-time init)
         self.capital: Decimal = self.config.initial_capital
+        logger.info(f"Initialized capital to config default: {self.capital}")
 
     def _save_capital(self) -> None:
-        """Save capital to Redis."""
-        if self._redis:
-            try:
-                self._redis.set(self.REDIS_CAPITAL_KEY, str(self.capital))
-            except Exception as e:
-                logger.warning(f"Failed to save capital to Redis: {e}")
+        """Save capital to Redis.
+
+        Raises:
+            PositionStorageError: If persistence fails
+        """
+        try:
+            self._redis.set(self.REDIS_CAPITAL_KEY, str(self.capital))
+        except Exception as e:
+            logger.error(f"Failed to save capital to Redis: {e}")
+            raise PositionStorageError(
+                f"Failed to save capital to Redis: {e}. "
+                "Capital state desync may cause incorrect position sizing."
+            ) from e
 
     def _serialize_position(self, position: Position) -> str:
         """Serialize Position to JSON for Redis storage."""
@@ -697,63 +714,98 @@ class PositionManager:
 
     @property
     def positions(self) -> dict[str, Position]:
-        """Get all open positions from Redis."""
+        """Get all open positions from Redis.
+
+        Raises:
+            PositionStorageError: If Redis operation fails
+        """
         positions = {}
-        if self._redis:
-            try:
-                cursor = 0
-                while True:
-                    cursor, keys = self._redis.scan(cursor, match=f"{self.REDIS_KEY_PREFIX}*", count=100)
-                    for key in keys:
-                        data = self._redis.get(key)
-                        if data:
-                            position = self._deserialize_position(data)
-                            if position.status == PositionStatus.OPEN:
-                                positions[position.symbol] = position
-                    if cursor == 0:
-                        break
-            except Exception as e:
-                logger.warning(f"Failed to load positions from Redis: {e}")
+        try:
+            cursor = 0
+            while True:
+                cursor, keys = self._redis.scan(cursor, match=f"{self.REDIS_KEY_PREFIX}*", count=100)
+                for key in keys:
+                    data = self._redis.get(key)
+                    if data:
+                        position = self._deserialize_position(data)
+                        if position.status == PositionStatus.OPEN:
+                            positions[position.symbol] = position
+                if cursor == 0:
+                    break
+        except Exception as e:
+            logger.error(f"Failed to load positions from Redis: {e}")
+            raise PositionStorageError(
+                f"Failed to load positions from Redis: {e}. "
+                "Position state unknown - cannot make trading decisions."
+            ) from e
         return positions
 
     @property
     def closed_positions(self) -> list[Position]:
-        """Get all closed positions from Redis."""
+        """Get all closed positions from Redis.
+
+        Raises:
+            PositionStorageError: If Redis operation fails
+        """
         closed = []
-        if self._redis:
-            try:
-                data_list = self._redis.lrange(self.REDIS_CLOSED_KEY, 0, -1)
-                for data in data_list:
-                    closed.append(self._deserialize_position(data))
-            except Exception as e:
-                logger.warning(f"Failed to load closed positions from Redis: {e}")
+        try:
+            data_list = self._redis.lrange(self.REDIS_CLOSED_KEY, 0, -1)
+            for data in data_list:
+                closed.append(self._deserialize_position(data))
+        except Exception as e:
+            logger.error(f"Failed to load closed positions from Redis: {e}")
+            raise PositionStorageError(
+                f"Failed to load closed positions from Redis: {e}. "
+                "Trade history unknown - cannot calculate PnL or performance metrics."
+            ) from e
         return closed
 
     def _save_position(self, position: Position) -> None:
-        """Save position to Redis."""
-        if self._redis:
-            try:
-                key = f"{self.REDIS_KEY_PREFIX}{position.symbol}"
-                self._redis.set(key, self._serialize_position(position))
-            except Exception as e:
-                logger.warning(f"Failed to save position {position.symbol}: {e}")
+        """Save position to Redis.
+
+        Raises:
+            PositionStorageError: If persistence fails
+        """
+        try:
+            key = f"{self.REDIS_KEY_PREFIX}{position.symbol}"
+            self._redis.set(key, self._serialize_position(position))
+        except Exception as e:
+            logger.error(f"Failed to save position {position.symbol}: {e}")
+            raise PositionStorageError(
+                f"Failed to save position {position.symbol}: {e}. "
+                "Position exists on exchange but not in system - state desync."
+            ) from e
 
     def _delete_position(self, symbol: str) -> None:
-        """Delete position from Redis."""
-        if self._redis:
-            try:
-                key = f"{self.REDIS_KEY_PREFIX}{symbol}"
-                self._redis.delete(key)
-            except Exception as e:
-                logger.warning(f"Failed to delete position {symbol}: {e}")
+        """Delete position from Redis.
+
+        Raises:
+            PositionStorageError: If persistence fails
+        """
+        try:
+            key = f"{self.REDIS_KEY_PREFIX}{symbol}"
+            self._redis.delete(key)
+        except Exception as e:
+            logger.error(f"Failed to delete position {symbol}: {e}")
+            raise PositionStorageError(
+                f"Failed to delete position {symbol}: {e}. "
+                "Position may be orphaned - cleanup failed."
+            ) from e
 
     def _add_closed_position(self, position: Position) -> None:
-        """Add closed position to Redis list."""
-        if self._redis:
-            try:
-                self._redis.lpush(self.REDIS_CLOSED_KEY, self._serialize_position(position))
-            except Exception as e:
-                logger.warning(f"Failed to save closed position {position.symbol}: {e}")
+        """Add closed position to Redis list.
+
+        Raises:
+            PositionStorageError: If persistence fails
+        """
+        try:
+            self._redis.lpush(self.REDIS_CLOSED_KEY, self._serialize_position(position))
+        except Exception as e:
+            logger.error(f"Failed to save closed position {position.symbol}: {e}")
+            raise PositionStorageError(
+                f"Failed to save closed position {position.symbol}: {e}. "
+                "Trade history incomplete - PnL calculations will be wrong."
+            ) from e
 
     def open_position(
         self,

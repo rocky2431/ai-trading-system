@@ -12,6 +12,7 @@ through OpenRouter, with support for:
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
@@ -20,6 +21,8 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 from iqfmp.llm.cache import PromptCache, PromptCacheStats, get_prompt_cache
 from iqfmp.llm.retry import (
@@ -398,8 +401,9 @@ class LLMProvider:
                     request_id=response.request_id,
                 )
                 await get_llm_trace_store().record(record)
-            except Exception:
-                pass
+            except Exception as e:
+                # Log but don't fail the main operation - trace is for audit, not critical path
+                logger.warning(f"Failed to record LLM trace for cost tracking: {e}")
 
         return response
 
@@ -477,6 +481,7 @@ class LLMProvider:
             # Fallback: generate sequentially
             logger.warning(f"Multi-candidate API failed: {e}. Falling back to sequential generation.")
             candidates = []
+            failed_count = 0
             for i in range(n_candidates):
                 try:
                     current_seed = seed + i if seed is not None else None
@@ -491,8 +496,25 @@ class LLMProvider:
                         **{k: v for k, v in api_kwargs.items() if k != "n"},
                     )
                     candidates.append(resp.content)
-                except Exception:
-                    pass
+                except Exception as candidate_error:
+                    failed_count += 1
+                    logger.warning(
+                        f"Candidate {i + 1}/{n_candidates} generation failed: {candidate_error}"
+                    )
+
+            # Log summary of failures
+            if failed_count > 0:
+                logger.warning(
+                    f"Candidate generation: {failed_count}/{n_candidates} failed, "
+                    f"{len(candidates)} candidates generated"
+                )
+
+            # If all candidates failed, raise an error instead of returning empty list
+            if not candidates and n_candidates > 0:
+                raise LLMError(
+                    f"All {n_candidates} candidate generations failed. "
+                    "Strategy selection may be suboptimal."
+                )
 
             if deduplicate:
                 seen = set()

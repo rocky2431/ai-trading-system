@@ -660,9 +660,39 @@ class TestPartialFillHandler:
     """Test PartialFillHandler class."""
 
     @pytest.fixture
-    def handler(self) -> PartialFillHandler:
-        """Create partial fill handler."""
-        return PartialFillHandler()
+    def mock_redis(self) -> MagicMock:
+        """Create mock Redis client for PartialFillHandler with in-memory storage."""
+        redis = MagicMock()
+        # In-memory storage to simulate Redis list behavior
+        lists: dict[str, list[str]] = {}
+
+        def mock_rpush(key: str, value: str) -> int:
+            if key not in lists:
+                lists[key] = []
+            lists[key].append(value)
+            return len(lists[key])
+
+        def mock_lrange(key: str, start: int, end: int) -> list[str]:
+            if key not in lists:
+                return []
+            data = lists[key]
+            if end == -1:
+                return data[start:]
+            return data[start:end + 1]
+
+        def mock_expire(key: str, seconds: int) -> bool:
+            return True
+
+        redis.rpush.side_effect = mock_rpush
+        redis.lrange.side_effect = mock_lrange
+        redis.expire.side_effect = mock_expire
+
+        return redis
+
+    @pytest.fixture
+    def handler(self, mock_redis: MagicMock) -> PartialFillHandler:
+        """Create partial fill handler with mock Redis."""
+        return PartialFillHandler(redis_client=mock_redis)
 
     def test_record_partial_fill(self, handler: PartialFillHandler) -> None:
         """Test recording a partial fill."""
@@ -778,9 +808,68 @@ class TestTimeoutHandler:
         return adapter
 
     @pytest.fixture
-    def handler(self, mock_adapter: MagicMock) -> TimeoutHandler:
-        """Create timeout handler."""
-        return TimeoutHandler(adapter=mock_adapter)
+    def mock_redis(self) -> MagicMock:
+        """Create mock Redis client for TimeoutHandler with in-memory storage."""
+        redis = MagicMock()
+        # In-memory storage to simulate Redis behavior
+        storage: dict[str, str] = {}
+        sets: dict[str, set[str]] = {}
+
+        def mock_get(key: str) -> str | None:
+            return storage.get(key)
+
+        def mock_set(key: str, value: str, *args, **kwargs) -> bool:
+            storage[key] = value
+            return True
+
+        def mock_delete(*keys: str) -> int:
+            count = 0
+            for key in keys:
+                if key in storage:
+                    del storage[key]
+                    count += 1
+            return count
+
+        def mock_smembers(key: str) -> set[str]:
+            return sets.get(key, set())
+
+        def mock_sadd(key: str, *values: str) -> int:
+            if key not in sets:
+                sets[key] = set()
+            added = 0
+            for v in values:
+                if v not in sets[key]:
+                    sets[key].add(v)
+                    added += 1
+            return added
+
+        def mock_srem(key: str, *values: str) -> int:
+            if key not in sets:
+                return 0
+            removed = 0
+            for v in values:
+                if v in sets[key]:
+                    sets[key].discard(v)
+                    removed += 1
+            return removed
+
+        def mock_sismember(key: str, value: str) -> bool:
+            return value in sets.get(key, set())
+
+        redis.get.side_effect = mock_get
+        redis.set.side_effect = mock_set
+        redis.delete.side_effect = mock_delete
+        redis.smembers.side_effect = mock_smembers
+        redis.sadd.side_effect = mock_sadd
+        redis.srem.side_effect = mock_srem
+        redis.sismember.side_effect = mock_sismember
+
+        return redis
+
+    @pytest.fixture
+    def handler(self, mock_adapter: MagicMock, mock_redis: MagicMock) -> TimeoutHandler:
+        """Create timeout handler with mock Redis."""
+        return TimeoutHandler(adapter=mock_adapter, redis_client=mock_redis)
 
     def test_register_timeout(self, handler: TimeoutHandler) -> None:
         """Test registering order timeout."""
@@ -1155,13 +1244,95 @@ class TestOrderExecutionIntegration:
         adapter = MagicMock(spec=ExchangeAdapter)
         return adapter
 
+    @pytest.fixture
+    def mock_redis(self) -> MagicMock:
+        """Create mock Redis client for integration tests with in-memory storage."""
+        redis = MagicMock()
+        # In-memory storage to simulate Redis behavior
+        storage: dict[str, str] = {}
+        sets: dict[str, set[str]] = {}
+        lists: dict[str, list[str]] = {}
+
+        def mock_get(key: str) -> str | None:
+            return storage.get(key)
+
+        def mock_set(key: str, value: str, *args, **kwargs) -> bool:
+            storage[key] = value
+            return True
+
+        def mock_delete(*keys: str) -> int:
+            count = 0
+            for key in keys:
+                if key in storage:
+                    del storage[key]
+                    count += 1
+            return count
+
+        def mock_smembers(key: str) -> set[str]:
+            return sets.get(key, set())
+
+        def mock_sadd(key: str, *values: str) -> int:
+            if key not in sets:
+                sets[key] = set()
+            added = 0
+            for v in values:
+                if v not in sets[key]:
+                    sets[key].add(v)
+                    added += 1
+            return added
+
+        def mock_srem(key: str, *values: str) -> int:
+            if key not in sets:
+                return 0
+            removed = 0
+            for v in values:
+                if v in sets[key]:
+                    sets[key].discard(v)
+                    removed += 1
+            return removed
+
+        def mock_rpush(key: str, value: str) -> int:
+            if key not in lists:
+                lists[key] = []
+            lists[key].append(value)
+            return len(lists[key])
+
+        def mock_lrange(key: str, start: int, end: int) -> list[str]:
+            if key not in lists:
+                return []
+            data = lists[key]
+            if end == -1:
+                return data[start:]
+            return data[start:end + 1]
+
+        def mock_expire(key: str, seconds: int) -> bool:
+            return True
+
+        def mock_scan(cursor: int, match: str = "*", count: int = 100):
+            import fnmatch
+            matched = [k for k in storage.keys() if fnmatch.fnmatch(k, match)]
+            return (0, matched)
+
+        redis.get.side_effect = mock_get
+        redis.set.side_effect = mock_set
+        redis.delete.side_effect = mock_delete
+        redis.smembers.side_effect = mock_smembers
+        redis.sadd.side_effect = mock_sadd
+        redis.srem.side_effect = mock_srem
+        redis.rpush.side_effect = mock_rpush
+        redis.lrange.side_effect = mock_lrange
+        redis.expire.side_effect = mock_expire
+        redis.scan.side_effect = mock_scan
+
+        return redis
+
     @pytest.mark.asyncio
     async def test_full_long_position_lifecycle(
-        self, mock_adapter: MagicMock
+        self, mock_adapter: MagicMock, mock_redis: MagicMock
     ) -> None:
         """Test full long position lifecycle: open -> close."""
         executor = OrderExecutor(adapter=mock_adapter)
-        manager = OrderManager(adapter=mock_adapter)
+        manager = OrderManager(adapter=mock_adapter, redis_client=mock_redis)
 
         # Open long
         mock_adapter.create_order = AsyncMock(
@@ -1272,12 +1443,12 @@ class TestOrderExecutionIntegration:
 
     @pytest.mark.asyncio
     async def test_partial_fill_to_complete(
-        self, mock_adapter: MagicMock
+        self, mock_adapter: MagicMock, mock_redis: MagicMock
     ) -> None:
         """Test partial fill then complete fill."""
         executor = OrderExecutor(adapter=mock_adapter)
-        manager = OrderManager(adapter=mock_adapter)
-        fill_handler = PartialFillHandler()
+        manager = OrderManager(adapter=mock_adapter, redis_client=mock_redis)
+        fill_handler = PartialFillHandler(redis_client=mock_redis)
 
         # Initial partial fill
         mock_adapter.create_order = AsyncMock(

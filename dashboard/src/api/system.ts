@@ -153,11 +153,12 @@ export const systemApi = {
 
   /**
    * 创建系统 WebSocket 连接
+   * @param token JWT access token for authentication
    */
-  createWebSocket: (): WebSocket => {
+  createWebSocket: (token: string): WebSocket => {
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsHost = window.location.host
-    return new WebSocket(`${wsProtocol}//${wsHost}/api/v1/system/ws`)
+    return new WebSocket(`${wsProtocol}//${wsHost}/api/v1/system/ws?token=${encodeURIComponent(token)}`)
   },
 
   /**

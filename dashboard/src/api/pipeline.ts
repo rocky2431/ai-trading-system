@@ -5,6 +5,7 @@
  */
 
 import { api } from './client'
+import { tokenStorage } from './auth'
 
 // ============== Pipeline Types ==============
 
@@ -246,11 +247,17 @@ export const pipelineApi = {
 
   /**
    * 创建流水线 WebSocket 连接
+   * @param runId Pipeline run ID
+   * @throws Error if no auth token is available
    */
   createWebSocket: (runId: string): WebSocket => {
+    const token = tokenStorage.getAccessToken()
+    if (!token) {
+      throw new Error('No auth token available for WebSocket connection')
+    }
     const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const wsHost = window.location.host
-    return new WebSocket(`${wsProtocol}//${wsHost}/api/v1/pipeline/${runId}/ws`)
+    return new WebSocket(`${wsProtocol}//${wsHost}/api/v1/pipeline/${runId}/ws?token=${encodeURIComponent(token)}`)
   },
 
   /**

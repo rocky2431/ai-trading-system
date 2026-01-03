@@ -352,7 +352,9 @@ class TestPipelineWebSocket:
 
     @pytest.fixture
     def client(self):
-        """Create test client."""
+        """Create test client with mocked token validation."""
+        from unittest.mock import patch
+
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
 
@@ -360,7 +362,11 @@ class TestPipelineWebSocket:
 
         app = FastAPI()
         app.include_router(pipeline_router, prefix="/api/v1/pipeline")
-        return TestClient(app)
+
+        # Mock TokenService.decode_token to always return a valid payload
+        with patch("iqfmp.api.pipeline.router.TokenService") as mock_token_service:
+            mock_token_service.return_value.decode_token.return_value = {"sub": "test_user"}
+            yield TestClient(app)
 
     def test_websocket_connection(self, client):
         """Test WebSocket connection."""
@@ -371,8 +377,8 @@ class TestPipelineWebSocket:
         )
         run_id = create_resp.json()["run_id"]
 
-        # Test WebSocket connection
-        with client.websocket_connect(f"/api/v1/pipeline/{run_id}/ws") as websocket:
+        # Test WebSocket connection with test token
+        with client.websocket_connect(f"/api/v1/pipeline/{run_id}/ws?token=test_token") as websocket:
             # Connection should be established
             assert websocket is not None
 
@@ -385,7 +391,7 @@ class TestPipelineWebSocket:
         )
         run_id = create_resp.json()["run_id"]
 
-        with client.websocket_connect(f"/api/v1/pipeline/{run_id}/ws") as websocket:
+        with client.websocket_connect(f"/api/v1/pipeline/{run_id}/ws?token=test_token") as websocket:
             # Should receive initial status message
             data = websocket.receive_json()
             assert "type" in data

@@ -14,6 +14,9 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, W
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from iqfmp.api.auth.config import JWTConfig
+from iqfmp.api.auth.token import TokenExpiredError, TokenService
+
 from iqfmp.api.pipeline.schemas import (
     PipelineListResponse,
     PipelineRunRequest,
@@ -165,13 +168,39 @@ async def cancel_pipeline(run_id: str) -> dict:
 
 
 @router.websocket("/{run_id}/ws")
-async def pipeline_websocket(websocket: WebSocket, run_id: str) -> None:
+async def pipeline_websocket(
+    websocket: WebSocket,
+    run_id: str,
+    token: Optional[str] = Query(None, description="JWT access token for authentication"),
+) -> None:
     """WebSocket endpoint for pipeline progress updates.
 
     Args:
         websocket: WebSocket connection
         run_id: Pipeline run ID
+        token: JWT access token (query parameter)
     """
+    # Verify token before accepting connection
+    if not token:
+        logger.warning("Pipeline WebSocket connection rejected: No token provided")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    try:
+        jwt_config = JWTConfig()
+        token_service = TokenService(jwt_config)
+        payload = token_service.decode_token(token)
+        user_id = payload.get("sub")
+        logger.debug(f"Pipeline WebSocket authenticated for user: {user_id}, run: {run_id}")
+    except TokenExpiredError:
+        logger.warning("Pipeline WebSocket connection rejected: Token expired")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    except Exception as e:
+        logger.warning(f"Pipeline WebSocket connection rejected: Invalid token - {e}")
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
     service = get_pipeline_service()
 
     # Check if run exists

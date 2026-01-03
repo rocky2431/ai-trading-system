@@ -58,7 +58,11 @@ class TestRiskConfig:
     def test_config_validation_max_drawdown(self) -> None:
         """Test config validates max_drawdown range."""
         # Valid range: 0 < max_drawdown <= 1
-        config = RiskConfig(max_drawdown=Decimal("0.50"))
+        # emergency_close_threshold must be >= max_drawdown
+        config = RiskConfig(
+            max_drawdown=Decimal("0.50"),
+            emergency_close_threshold=Decimal("0.60"),
+        )
         assert config.is_valid is True
 
     def test_config_with_emergency_settings(self) -> None:

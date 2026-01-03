@@ -12,6 +12,7 @@ import {
   ReviewQueueStats,
   ReviewConfig,
 } from '@/api/review'
+import { tokenStorage } from '@/api/auth'
 
 // WebSocket 消息类型
 interface ReviewWebSocketMessage {
@@ -199,10 +200,17 @@ export function useReviewQueue(): UseReviewQueueResult {
     const BASE_DELAY = 1000 // 1 second
 
     const connectWebSocket = () => {
+      // Get authentication token
+      const token = tokenStorage.getAccessToken()
+      if (!token) {
+        console.warn('No auth token available for WebSocket connection')
+        return
+      }
+
       // 使用系统 WebSocket 端点
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const wsHost = window.location.host
-      const wsUrl = `${wsProtocol}//${wsHost}/api/v1/system/ws`
+      const wsUrl = `${wsProtocol}//${wsHost}/api/v1/system/ws?token=${encodeURIComponent(token)}`
 
       try {
         wsRef.current = new WebSocket(wsUrl)

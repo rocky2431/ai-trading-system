@@ -1,17 +1,23 @@
 """Reinforcement Learning Agents for Trading.
 
 This module provides:
-- PPO (Proximal Policy Optimization)
-- A2C (Advantage Actor-Critic)
-- SAC (Soft Actor-Critic)
+- PPO (Proximal Policy Optimization) - On-policy, supports discrete/continuous
+- A2C (Advantage Actor-Critic) - On-policy, supports discrete/continuous
+- SAC (Soft Actor-Critic) - Off-policy, continuous actions only
 
-Implementations use PyTorch and support both discrete and continuous actions.
+Key components:
+- RolloutBuffer: For on-policy algorithms (PPO, A2C)
+- ReplayBuffer: For off-policy algorithms (SAC)
+- GaussianActor: Gaussian policy network with reparameterization
+- TwinQNetwork: Twin Q-networks for SAC
+
+Implementations use PyTorch and follow the Stable-Baselines3 conventions.
 """
 
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union  # noqa: F401
 
 import numpy as np
 
@@ -23,8 +29,8 @@ try:
     TORCH_AVAILABLE = True
 except ImportError:
     TORCH_AVAILABLE = False
-    torch = None
-    nn = None
+    torch = None  # type: ignore[assignment]
+    nn = None  # type: ignore[assignment]
 
 
 logger = logging.getLogger(__name__)
@@ -79,7 +85,7 @@ class RolloutBuffer:
     log_probs: List[float] = field(default_factory=list)
     dones: List[bool] = field(default_factory=list)
 
-    def clear(self):
+    def clear(self) -> None:
         """Clear buffer."""
         self.observations.clear()
         self.actions.clear()
@@ -96,7 +102,7 @@ class RolloutBuffer:
         value: float,
         log_prob: float,
         done: bool,
-    ):
+    ) -> None:
         """Add transition to buffer."""
         self.observations.append(obs)
         self.actions.append(action)
@@ -107,6 +113,93 @@ class RolloutBuffer:
 
     def __len__(self) -> int:
         return len(self.observations)
+
+
+@dataclass
+class ReplayBuffer:
+    """Replay buffer for off-policy algorithms (SAC, DDPG, TD3).
+
+    Stores transitions in a circular buffer with efficient sampling.
+    """
+
+    capacity: int = 100000
+    _observations: np.ndarray = field(init=False, repr=False)
+    _actions: np.ndarray = field(init=False, repr=False)
+    _rewards: np.ndarray = field(init=False, repr=False)
+    _next_observations: np.ndarray = field(init=False, repr=False)
+    _dones: np.ndarray = field(init=False, repr=False)
+    _size: int = field(default=0, init=False)
+    _ptr: int = field(default=0, init=False)
+    _initialized: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        """Validate capacity at construction."""
+        if self.capacity <= 0:
+            raise ValueError(f"capacity must be positive, got {self.capacity}")
+
+    def _init_buffers(self, obs_dim: int, action_dim: int) -> None:
+        """Initialize numpy arrays for storage."""
+        self._observations = np.zeros((self.capacity, obs_dim), dtype=np.float32)
+        self._actions = np.zeros((self.capacity, action_dim), dtype=np.float32)
+        self._rewards = np.zeros(self.capacity, dtype=np.float32)
+        self._next_observations = np.zeros((self.capacity, obs_dim), dtype=np.float32)
+        self._dones = np.zeros(self.capacity, dtype=np.float32)
+        self._initialized = True
+
+    def add(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: float,
+        next_obs: np.ndarray,
+        done: bool,
+    ) -> None:
+        """Add transition to buffer."""
+        if not self._initialized:
+            obs_dim = obs.shape[0] if obs.ndim > 0 else 1
+            action_dim = action.shape[0] if action.ndim > 0 else 1
+            self._init_buffers(obs_dim, action_dim)
+
+        self._observations[self._ptr] = obs
+        self._actions[self._ptr] = action
+        self._rewards[self._ptr] = reward
+        self._next_observations[self._ptr] = next_obs
+        self._dones[self._ptr] = float(done)
+
+        self._ptr = (self._ptr + 1) % self.capacity
+        self._size = min(self._size + 1, self.capacity)
+
+    def sample(
+        self, batch_size: int
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Sample batch of transitions.
+
+        Returns:
+            (observations, actions, rewards, next_observations, dones)
+
+        Raises:
+            ValueError: If buffer has fewer samples than batch_size.
+        """
+        if not self.is_ready(batch_size):
+            raise ValueError(
+                f"Cannot sample {batch_size} transitions from buffer "
+                f"with only {self._size} samples"
+            )
+        indices = np.random.randint(0, self._size, size=batch_size)
+        return (
+            self._observations[indices],
+            self._actions[indices],
+            self._rewards[indices],
+            self._next_observations[indices],
+            self._dones[indices],
+        )
+
+    def __len__(self) -> int:
+        return self._size
+
+    def is_ready(self, batch_size: int) -> bool:
+        """Check if buffer has enough samples."""
+        return self._size >= batch_size
 
 
 def get_activation(name: str) -> nn.Module:
@@ -121,7 +214,11 @@ def get_activation(name: str) -> nn.Module:
         "elu": nn.ELU(),
         "gelu": nn.GELU(),
     }
-    return activations.get(name, nn.ReLU())
+    if name not in activations:
+        raise ValueError(
+            f"Unknown activation: '{name}'. Supported: {list(activations.keys())}"
+        )
+    return activations[name]
 
 
 class MLP(nn.Module):
@@ -137,7 +234,7 @@ class MLP(nn.Module):
     ):
         super().__init__()
 
-        layers = []
+        layers: List[nn.Module] = []
         prev_dim = input_dim
 
         for hidden_dim in hidden_dims:
@@ -152,7 +249,7 @@ class MLP(nn.Module):
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: "torch.Tensor") -> "torch.Tensor":
-        return self.net(x)
+        return self.net(x)  # type: ignore[no-any-return]
 
 
 class ActorCriticNetwork(nn.Module):
@@ -229,6 +326,118 @@ class ActorCriticNetwork(nn.Module):
         return action, log_prob, entropy, value.squeeze(-1)
 
 
+# =============================================================================
+# SAC-specific Networks
+# =============================================================================
+
+
+LOG_STD_MIN = -20
+LOG_STD_MAX = 2
+
+
+class GaussianActor(nn.Module):
+    """Gaussian policy network for SAC with reparameterization trick.
+
+    Outputs mean and log_std for a Gaussian distribution, then samples
+    using the reparameterization trick and applies tanh squashing.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dims: List[int],
+        activation: str = "relu",
+    ):
+        super().__init__()
+
+        self.action_dim = action_dim
+
+        # Shared feature extractor
+        self.shared = MLP(obs_dim, hidden_dims[-1], hidden_dims[:-1], activation, activation)
+
+        # Mean and log_std heads
+        self.mean_head = nn.Linear(hidden_dims[-1], action_dim)
+        self.log_std_head = nn.Linear(hidden_dims[-1], action_dim)
+
+    def forward(
+        self,
+        obs: "torch.Tensor",
+        deterministic: bool = False,
+    ) -> Tuple["torch.Tensor", "torch.Tensor"]:
+        """Forward pass returning action and log_prob.
+
+        Args:
+            obs: Observation tensor
+            deterministic: If True, return mean action without sampling
+
+        Returns:
+            (action, log_prob) - action is squashed to [-1, 1]
+        """
+        features = self.shared(obs)
+        mean = self.mean_head(features)
+        log_std = self.log_std_head(features)
+        log_std = torch.clamp(log_std, LOG_STD_MIN, LOG_STD_MAX)
+        std = torch.exp(log_std)
+
+        if deterministic:
+            action = torch.tanh(mean)
+            # Log prob is 0 for deterministic (not used)
+            log_prob = torch.zeros(obs.shape[0], device=obs.device)
+        else:
+            # Reparameterization trick
+            dist = Normal(mean, std)
+            x_t = dist.rsample()  # Differentiable sampling
+            action = torch.tanh(x_t)
+
+            # Log prob with tanh correction (Appendix C of SAC paper)
+            log_prob = dist.log_prob(x_t).sum(-1)
+            # Correction for tanh squashing
+            log_prob -= (2 * (np.log(2) - x_t - F.softplus(-2 * x_t))).sum(-1)
+
+        return action, log_prob
+
+    def get_action(self, obs: "torch.Tensor", deterministic: bool = False) -> "torch.Tensor":
+        """Get action without log_prob (for inference)."""
+        action, _ = self.forward(obs, deterministic)
+        return action
+
+
+class TwinQNetwork(nn.Module):
+    """Twin Q-network for SAC (clipped double Q-learning).
+
+    Uses two independent Q-networks and takes the minimum to reduce
+    overestimation bias.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dims: List[int],
+        activation: str = "relu",
+    ):
+        super().__init__()
+
+        input_dim = obs_dim + action_dim
+
+        # Two independent Q-networks
+        self.q1 = MLP(input_dim, 1, hidden_dims, activation)
+        self.q2 = MLP(input_dim, 1, hidden_dims, activation)
+
+    def forward(
+        self, obs: "torch.Tensor", action: "torch.Tensor"
+    ) -> Tuple["torch.Tensor", "torch.Tensor"]:
+        """Forward pass returning Q-values from both networks."""
+        x = torch.cat([obs, action], dim=-1)
+        return self.q1(x), self.q2(x)
+
+    def q1_forward(self, obs: "torch.Tensor", action: "torch.Tensor") -> "torch.Tensor":
+        """Forward pass through Q1 only (for policy update)."""
+        x = torch.cat([obs, action], dim=-1)
+        return self.q1(x)
+
+
 class BaseAgent(ABC):
     """Abstract base class for RL agents."""
 
@@ -252,12 +461,12 @@ class BaseAgent(ABC):
         pass
 
     @abstractmethod
-    def save(self, path: str):
+    def save(self, path: str) -> None:
         """Save agent to file."""
         pass
 
     @abstractmethod
-    def load(self, path: str):
+    def load(self, path: str) -> None:
         """Load agent from file."""
         pass
 
@@ -371,10 +580,10 @@ class PPOAgent(BaseAgent):
 
         # PPO training loop
         n_samples = len(observations)
-        total_loss = 0
-        total_policy_loss = 0
-        total_value_loss = 0
-        total_entropy = 0
+        total_loss = 0.0
+        total_policy_loss = 0.0
+        total_value_loss = 0.0
+        total_entropy = 0.0
 
         for _ in range(self.config.n_epochs):
             # Shuffle indices
@@ -434,7 +643,7 @@ class PPOAgent(BaseAgent):
             "entropy": total_entropy / n_updates,
         }
 
-    def save(self, path: str):
+    def save(self, path: str) -> None:
         """Save agent to file."""
         torch.save({
             "network": self.network.state_dict(),
@@ -442,9 +651,9 @@ class PPOAgent(BaseAgent):
             "config": self.config,
         }, path)
 
-    def load(self, path: str):
+    def load(self, path: str) -> None:
         """Load agent from file."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.network.load_state_dict(checkpoint["network"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
 
@@ -581,7 +790,7 @@ class A2CAgent(BaseAgent):
             "entropy": entropy.mean().item(),
         }
 
-    def save(self, path: str):
+    def save(self, path: str) -> None:
         """Save agent to file."""
         torch.save({
             "network": self.network.state_dict(),
@@ -589,11 +798,223 @@ class A2CAgent(BaseAgent):
             "config": self.config,
         }, path)
 
-    def load(self, path: str):
+    def load(self, path: str) -> None:
         """Load agent from file."""
-        checkpoint = torch.load(path, map_location=self.device)
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.network.load_state_dict(checkpoint["network"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
+
+
+class SACAgent(BaseAgent):
+    """Soft Actor-Critic agent.
+
+    Off-policy maximum entropy RL algorithm with automatic temperature tuning.
+    Uses twin Q-networks to reduce overestimation and a Gaussian policy.
+    """
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        config: Optional[AgentConfig] = None,
+    ):
+        """Initialize SAC agent.
+
+        Args:
+            obs_dim: Observation dimension
+            action_dim: Action dimension
+            config: Agent configuration (uses SAC-specific params: tau, alpha, auto_alpha)
+        """
+        config = config or AgentConfig()
+        super().__init__(obs_dim, action_dim, config)
+
+        # Actor (Gaussian policy)
+        self.actor = GaussianActor(
+            obs_dim,
+            action_dim,
+            config.hidden_dims,
+            config.activation,
+        ).to(self.device)
+
+        # Twin Q-networks
+        self.critic = TwinQNetwork(
+            obs_dim,
+            action_dim,
+            config.hidden_dims,
+            config.activation,
+        ).to(self.device)
+
+        # Target Q-networks (for soft updates)
+        self.critic_target = TwinQNetwork(
+            obs_dim,
+            action_dim,
+            config.hidden_dims,
+            config.activation,
+        ).to(self.device)
+        self.critic_target.load_state_dict(self.critic.state_dict())
+
+        # Optimizers
+        self.actor_optimizer = torch.optim.Adam(
+            self.actor.parameters(),
+            lr=config.learning_rate,
+        )
+        self.critic_optimizer = torch.optim.Adam(
+            self.critic.parameters(),
+            lr=config.learning_rate,
+        )
+
+        # Entropy temperature (alpha)
+        self.auto_alpha = config.auto_alpha
+        if self.auto_alpha:
+            # Target entropy: -dim(A) (heuristic from SAC paper)
+            self.target_entropy = -action_dim
+            self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
+            self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=config.learning_rate)
+            self.alpha = self.log_alpha.exp().item()
+        else:
+            self.alpha = config.alpha
+
+        # Replay buffer
+        self.replay_buffer = ReplayBuffer(capacity=100000)
+
+    def select_action(
+        self,
+        obs: np.ndarray,
+        deterministic: bool = False,
+    ) -> np.ndarray:
+        """Select action given observation.
+
+        Args:
+            obs: Observation
+            deterministic: If True, return mean action
+
+        Returns:
+            Action array
+        """
+        with torch.no_grad():
+            obs_tensor = torch.FloatTensor(obs).unsqueeze(0).to(self.device)
+            action = self.actor.get_action(obs_tensor, deterministic)
+            return action.cpu().numpy().squeeze()
+
+    def store_transition(
+        self,
+        obs: np.ndarray,
+        action: np.ndarray,
+        reward: float,
+        next_obs: np.ndarray,
+        done: bool,
+    ) -> None:
+        """Store transition in replay buffer."""
+        self.replay_buffer.add(obs, action, reward, next_obs, done)
+
+    def update(self, buffer: Union[RolloutBuffer, ReplayBuffer, None] = None, batch_size: int = 256) -> Dict[str, float]:
+        """Update agent from replay buffer.
+
+        Args:
+            buffer: Not used (SAC uses internal replay buffer)
+            batch_size: Batch size for sampling
+
+        Returns:
+            Dictionary of training metrics
+        """
+        if not self.replay_buffer.is_ready(batch_size):
+            return {"actor_loss": 0.0, "critic_loss": 0.0, "alpha": self.alpha}
+
+        # Sample batch
+        obs, actions, rewards, next_obs, dones = self.replay_buffer.sample(batch_size)
+
+        # Convert to tensors
+        obs = torch.FloatTensor(obs).to(self.device)
+        actions = torch.FloatTensor(actions).to(self.device)
+        rewards = torch.FloatTensor(rewards).unsqueeze(-1).to(self.device)
+        next_obs = torch.FloatTensor(next_obs).to(self.device)
+        dones = torch.FloatTensor(dones).unsqueeze(-1).to(self.device)
+
+        # Update critic
+        with torch.no_grad():
+            # Sample action for next state
+            next_actions, next_log_probs = self.actor(next_obs)
+            next_log_probs = next_log_probs.unsqueeze(-1)
+
+            # Target Q-values
+            target_q1, target_q2 = self.critic_target(next_obs, next_actions)
+            target_q = torch.min(target_q1, target_q2) - self.alpha * next_log_probs
+            target_q = rewards + self.config.gamma * (1 - dones) * target_q
+
+        # Current Q-values
+        current_q1, current_q2 = self.critic(obs, actions)
+        critic_loss = F.mse_loss(current_q1, target_q) + F.mse_loss(current_q2, target_q)
+
+        self.critic_optimizer.zero_grad()
+        critic_loss.backward()
+        nn.utils.clip_grad_norm_(self.critic.parameters(), self.config.max_grad_norm)
+        self.critic_optimizer.step()
+
+        # Update actor
+        new_actions, log_probs = self.actor(obs)
+        q1_new = self.critic.q1_forward(obs, new_actions)
+        actor_loss = (self.alpha * log_probs - q1_new).mean()
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        nn.utils.clip_grad_norm_(self.actor.parameters(), self.config.max_grad_norm)
+        self.actor_optimizer.step()
+
+        # Update alpha (entropy temperature)
+        alpha_loss_value = 0.0
+        if self.auto_alpha:
+            alpha_loss = -(self.log_alpha * (log_probs.detach() + self.target_entropy)).mean()
+            self.alpha_optimizer.zero_grad()
+            alpha_loss.backward()
+            self.alpha_optimizer.step()
+            self.alpha = self.log_alpha.exp().item()
+            alpha_loss_value = alpha_loss.item()
+
+        # Soft update target networks
+        self._soft_update()
+
+        return {
+            "actor_loss": actor_loss.item(),
+            "critic_loss": critic_loss.item(),
+            "alpha": self.alpha,
+            "alpha_loss": alpha_loss_value,
+        }
+
+    def _soft_update(self) -> None:
+        """Soft update target networks."""
+        tau = self.config.tau
+        for param, target_param in zip(
+            self.critic.parameters(), self.critic_target.parameters()
+        ):
+            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
+
+    def save(self, path: str) -> None:
+        """Save agent to file."""
+        checkpoint = {
+            "actor": self.actor.state_dict(),
+            "critic": self.critic.state_dict(),
+            "critic_target": self.critic_target.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+            "config": self.config,
+        }
+        if self.auto_alpha:
+            checkpoint["log_alpha"] = self.log_alpha
+            checkpoint["alpha_optimizer"] = self.alpha_optimizer.state_dict()
+        torch.save(checkpoint, path)
+
+    def load(self, path: str) -> None:
+        """Load agent from file."""
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        self.actor.load_state_dict(checkpoint["actor"])
+        self.critic.load_state_dict(checkpoint["critic"])
+        self.critic_target.load_state_dict(checkpoint["critic_target"])
+        self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
+        self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
+        if self.auto_alpha and "log_alpha" in checkpoint:
+            self.log_alpha = checkpoint["log_alpha"]
+            self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer"])
+            self.alpha = self.log_alpha.exp().item()
 
 
 # =============================================================================
@@ -611,11 +1032,11 @@ def create_agent(
     """Factory function to create RL agent.
 
     Args:
-        agent_type: "ppo" or "a2c"
+        agent_type: "ppo", "a2c", or "sac"
         obs_dim: Observation dimension
         action_dim: Action dimension
         config: Agent configuration
-        discrete: Whether actions are discrete
+        discrete: Whether actions are discrete (ignored for SAC, which uses continuous)
 
     Returns:
         RL agent instance
@@ -626,5 +1047,9 @@ def create_agent(
         return PPOAgent(obs_dim, action_dim, config, discrete)
     elif agent_type.lower() == "a2c":
         return A2CAgent(obs_dim, action_dim, config, discrete)
+    elif agent_type.lower() == "sac":
+        if discrete:
+            logger.warning("SAC requires continuous actions. Ignoring discrete=True.")
+        return SACAgent(obs_dim, action_dim, config)
     else:
-        raise ValueError(f"Unknown agent type: {agent_type}. Supported: ppo, a2c")
+        raise ValueError(f"Unknown agent type: {agent_type}. Supported: ppo, a2c, sac")

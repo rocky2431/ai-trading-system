@@ -4,7 +4,7 @@
 
 This module provides:
 - Trading environments (single asset, portfolio)
-- RL agents (PPO, A2C)
+- RL agents (PPO, A2C, SAC)
 - Training utilities and evaluation tools
 
 STATUS: This module is IMPLEMENTED but NOT CONNECTED to the main agent pipeline.
@@ -70,13 +70,17 @@ from .agents import (
     # Config and buffer
     AgentConfig,
     RolloutBuffer,
+    ReplayBuffer,
     # Networks
     MLP,
     ActorCriticNetwork,
+    GaussianActor,
+    TwinQNetwork,
     # Agents
     BaseAgent,
     PPOAgent,
     A2CAgent,
+    SACAgent,
     create_agent,
     # Availability
     TORCH_AVAILABLE,
@@ -104,11 +108,15 @@ __all__ = [
     # Agent classes
     "AgentConfig",
     "RolloutBuffer",
+    "ReplayBuffer",
     "MLP",
     "ActorCriticNetwork",
+    "GaussianActor",
+    "TwinQNetwork",
     "BaseAgent",
     "PPOAgent",
     "A2CAgent",
+    "SACAgent",
     "create_agent",
     # Training classes
     "TrainingConfig",

@@ -27,8 +27,9 @@ from iqfmp.api.backtest.schemas import (
     BacktestStatsResponse,
     StrategyResponse,
     OptimizationConfig,
+    OptimizationDetailResponse,
     OptimizationResponse,
-    OptimizationResult,
+    OptimizationTrialResult,
 )
 from iqfmp.db.repositories import StrategyRepository
 
@@ -41,6 +42,34 @@ class StrategyNotFoundError(Exception):
 class BacktestNotFoundError(Exception):
     """Raised when backtest is not found."""
     pass
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+
+def parse_datetime_or_default(
+    data: dict, key: str, default: datetime | None = None
+) -> datetime:
+    """Parse datetime from dict, falling back to default or now()."""
+    if data.get(key):
+        return datetime.fromisoformat(data[key])
+    return default if default is not None else datetime.now()
+
+
+def parse_datetime_or_none(data: dict, key: str) -> datetime | None:
+    """Parse datetime from dict, returning None if missing."""
+    if data.get(key):
+        return datetime.fromisoformat(data[key])
+    return None
+
+
+def parse_metrics(data: dict, key: str = "metrics") -> BacktestMetrics | None:
+    """Parse BacktestMetrics from dict, returning None if missing."""
+    if data.get(key):
+        return BacktestMetrics(**data[key])
+    return None
 
 
 class BacktestService:
@@ -104,8 +133,8 @@ class BacktestService:
         await self.session.commit()
 
         # Parse datetime from ISO string
-        created_at = datetime.fromisoformat(strategy_data["created_at"]) if strategy_data.get("created_at") else datetime.now()
-        updated_at = datetime.fromisoformat(strategy_data["updated_at"]) if strategy_data.get("updated_at") else datetime.now()
+        created_at = parse_datetime_or_default(strategy_data, "created_at")
+        updated_at = parse_datetime_or_default(strategy_data, "updated_at")
 
         return StrategyResponse(
             id=strategy_id,
@@ -152,8 +181,8 @@ class BacktestService:
                 long_only=config.get("long_only", False),
                 max_positions=config.get("max_positions", 20),
                 status=data.get("status", "draft"),
-                created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(),
-                updated_at=datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else datetime.now(),
+                created_at=parse_datetime_or_default(data, "created_at"),
+                updated_at=parse_datetime_or_default(data, "updated_at"),
             ))
 
         return strategies, total
@@ -178,8 +207,8 @@ class BacktestService:
             long_only=config.get("long_only", False),
             max_positions=config.get("max_positions", 20),
             status=data.get("status", "draft"),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(),
-            updated_at=datetime.fromisoformat(data["updated_at"]) if data.get("updated_at") else datetime.now(),
+            created_at=parse_datetime_or_default(data, "created_at"),
+            updated_at=parse_datetime_or_default(data, "updated_at"),
         )
 
     async def delete_strategy(self, strategy_id: str) -> bool:
@@ -284,7 +313,8 @@ class BacktestService:
             for code in factor_codes:
                 try:
                     factor_value_series.append(factor_engine.compute_factor(code, "signal"))
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"Failed to compute factor '{code}': {e}")
                     continue
 
             if not factor_value_series:
@@ -369,6 +399,7 @@ class BacktestService:
             )
 
         except Exception as e:
+            logger.error(f"Backtest {backtest_id} failed: {e}")
             backtest_data["status"] = "failed"
             backtest_data["error_message"] = str(e)
             backtest_data["completed_at"] = datetime.now().isoformat()
@@ -449,10 +480,6 @@ class BacktestService:
                 if status and data["status"] != status:
                     continue
 
-                metrics = None
-                if data.get("metrics"):
-                    metrics = BacktestMetrics(**data["metrics"])
-
                 backtests.append(BacktestResponse(
                     id=data["id"],
                     strategy_id=data["strategy_id"],
@@ -462,11 +489,11 @@ class BacktestService:
                     config=BacktestConfig(**data["config"]),
                     status=data["status"],
                     progress=data["progress"],
-                    metrics=metrics,
+                    metrics=parse_metrics(data),
                     error_message=data.get("error_message"),
                     created_at=datetime.fromisoformat(data["created_at"]),
-                    started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
-                    completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
+                    started_at=parse_datetime_or_none(data, "started_at"),
+                    completed_at=parse_datetime_or_none(data, "completed_at"),
                 ))
 
         # Also get backtests from DB (for completed backtests not in Redis)
@@ -563,7 +590,6 @@ class BacktestService:
             data_json = await self.redis_client.hget("backtests", backtest_id)
             if data_json:
                 data = json.loads(data_json)
-                metrics = BacktestMetrics(**data["metrics"]) if data.get("metrics") else None
 
                 return BacktestResponse(
                     id=data["id"],
@@ -574,11 +600,11 @@ class BacktestService:
                     config=BacktestConfig(**data["config"]),
                     status=data["status"],
                     progress=data["progress"],
-                    metrics=metrics,
+                    metrics=parse_metrics(data),
                     error_message=data.get("error_message"),
                     created_at=datetime.fromisoformat(data["created_at"]),
-                    started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
-                    completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
+                    started_at=parse_datetime_or_none(data, "started_at"),
+                    completed_at=parse_datetime_or_none(data, "completed_at"),
                 )
 
         # Fallback to database for completed backtests
@@ -713,6 +739,497 @@ class BacktestService:
         if self.redis_client:
             result = await self.redis_client.hdel("backtests", backtest_id)
             await self.redis_client.srem("backtests:active", backtest_id)
+            return result > 0
+        return False
+
+    # ==================== Optimization Methods ====================
+
+    async def create_optimization(
+        self,
+        strategy_id: str,
+        backtest_config: BacktestConfig,
+        optimization_config: OptimizationConfig,
+        name: Optional[str] = None,
+        description: str = "",
+    ) -> str:
+        """Create and start a backtest parameter optimization.
+
+        Uses Optuna for hyperparameter optimization of backtest parameters.
+
+        Args:
+            strategy_id: Strategy to optimize
+            backtest_config: Base backtest configuration
+            optimization_config: Optimization settings
+            name: Optional optimization name
+            description: Optional description
+
+        Returns:
+            Optimization ID
+        """
+        # Verify strategy exists
+        strategy = await self.get_strategy(strategy_id)
+        if not strategy:
+            raise StrategyNotFoundError(f"Strategy {strategy_id} not found")
+
+        optimization_id = str(uuid.uuid4())
+        now = datetime.now()
+
+        optimization_data = {
+            "id": optimization_id,
+            "strategy_id": strategy_id,
+            "strategy_name": strategy.name,
+            "name": name or f"Optimization {now.strftime('%Y%m%d_%H%M%S')}",
+            "description": description,
+            "backtest_config": backtest_config.model_dump(),
+            "optimization_config": optimization_config.model_dump(),
+            "status": "pending",
+            "progress": 0.0,
+            "current_trial": 0,
+            "total_trials": optimization_config.n_trials,
+            "best_trial_id": None,
+            "best_params": None,
+            "best_metrics": None,
+            "top_trials": [],
+            "all_trials": [],
+            "param_importance": {},
+            "convergence_history": [],
+            "error_message": None,
+            "created_at": now.isoformat(),
+            "started_at": None,
+            "completed_at": None,
+        }
+
+        if self.redis_client:
+            await self.redis_client.hset(
+                "optimizations", optimization_id, json.dumps(optimization_data)
+            )
+            await self.redis_client.sadd("optimizations:active", optimization_id)
+
+        # Start optimization in background
+        asyncio.create_task(
+            self._run_optimization(optimization_id, optimization_data, strategy)
+        )
+
+        return optimization_id
+
+    async def _run_optimization(
+        self,
+        optimization_id: str,
+        optimization_data: dict,
+        strategy: StrategyResponse,
+    ) -> None:
+        """Run Optuna optimization in background.
+
+        Args:
+            optimization_id: Optimization ID
+            optimization_data: Optimization state dict
+            strategy: Strategy to optimize
+        """
+        try:
+            optimization_data["status"] = "running"
+            optimization_data["started_at"] = datetime.now().isoformat()
+            await self._update_optimization(optimization_id, optimization_data)
+
+            # Import optimization components
+            from iqfmp.evaluation.backtest_optimizer import (
+                BacktestOptimizationConfig,
+                BacktestOptimizationMetric,
+                BacktestOptimizer,
+                BacktestPrunerType,
+                BacktestSamplerType,
+            )
+            from iqfmp.core.unified_backtest import (
+                BacktestMode,
+                UnifiedBacktestParams,
+            )
+            from iqfmp.core.data_provider import DataProvider
+
+            opt_config = OptimizationConfig(**optimization_data["optimization_config"])
+            bt_config = BacktestConfig(**optimization_data["backtest_config"])
+
+            # Load market data
+            symbols = bt_config.symbols or ["ETH/USDT"]
+            symbol = symbols[0]
+            provider = DataProvider(session=self.session)
+            df = await provider.load_ohlcv(symbol=symbol, timeframe=bt_config.timeframe)
+
+            # Create signals from strategy factors
+            from iqfmp.core.factor_engine import FactorEngine
+            from iqfmp.db.repositories import FactorRepository
+
+            factor_repo = FactorRepository(self.session, self.redis_client)
+            factor_engine = FactorEngine(
+                df=df, symbol=symbol.replace("/", ""), timeframe=bt_config.timeframe
+            )
+
+            # Compute factor signals
+            signals_list: list[pd.Series] = []
+            for fid in strategy.factor_ids:
+                f = await factor_repo.get_by_id(fid)
+                if f:
+                    try:
+                        signals_list.append(
+                            factor_engine.compute_factor(f.code, "signal")
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to compute factor '{fid}': {e}")
+                        continue
+
+            if not signals_list:
+                raise ValueError("No valid factors to optimize")
+
+            # Combine signals
+            if len(signals_list) == 1:
+                signals = signals_list[0].to_frame("signal")
+            else:
+                combined = sum(signals_list) / len(signals_list)
+                signals = combined.to_frame("signal")
+
+            # Map config to optimizer types
+            sampler_map = {
+                "tpe": BacktestSamplerType.TPE,
+                "cmaes": BacktestSamplerType.CMAES,
+                "random": BacktestSamplerType.RANDOM,
+                "grid": BacktestSamplerType.GRID,
+            }
+            pruner_map = {
+                "median": BacktestPrunerType.MEDIAN,
+                "hyperband": BacktestPrunerType.HYPERBAND,
+                "percentile": BacktestPrunerType.PERCENTILE,
+                "none": BacktestPrunerType.NONE,
+            }
+
+            # Get primary metric
+            primary_metric = BacktestOptimizationMetric.SHARPE
+            if opt_config.metrics:
+                metric_map = {
+                    "sharpe": BacktestOptimizationMetric.SHARPE,
+                    "calmar": BacktestOptimizationMetric.CALMAR,
+                    "total_return": BacktestOptimizationMetric.TOTAL_RETURN,
+                    "sortino": BacktestOptimizationMetric.SORTINO,
+                    "ic": BacktestOptimizationMetric.IC,
+                }
+                primary_metric = metric_map.get(
+                    opt_config.metrics[0].name, BacktestOptimizationMetric.SHARPE
+                )
+
+            # Create optimization config
+            optimizer_config = BacktestOptimizationConfig(
+                n_trials=opt_config.n_trials,
+                n_jobs=opt_config.n_jobs,
+                timeout=opt_config.timeout,
+                metric=primary_metric,
+                sampler=sampler_map.get(opt_config.sampler, BacktestSamplerType.TPE),
+                pruner=pruner_map.get(opt_config.pruner, BacktestPrunerType.MEDIAN),
+            )
+
+            # Create base backtest params
+            base_params = UnifiedBacktestParams(
+                start_time=bt_config.start_date,
+                end_time=bt_config.end_date,
+                initial_capital=bt_config.initial_capital,
+                commission_rate=bt_config.commission_rate,
+                mode=BacktestMode.CRYPTO,
+                optimization_run_id=optimization_id,
+            )
+
+            # Create optimizer
+            optimizer = BacktestOptimizer(
+                signals=signals,
+                price_data=df,
+                config=optimizer_config,
+                base_params=base_params,
+                redis_client=self.redis_client,
+            )
+
+            # Progress callback
+            async def progress_callback(
+                trial_id: int, value: float, params: dict
+            ) -> None:
+                optimization_data["current_trial"] = trial_id + 1
+                optimization_data["progress"] = (
+                    (trial_id + 1) / opt_config.n_trials
+                ) * 100
+
+                # Update best if improved
+                if (
+                    optimization_data["best_metrics"] is None
+                    or value > optimization_data["best_metrics"].get("sharpe_ratio", 0)
+                ):
+                    optimization_data["best_trial_id"] = trial_id
+                    optimization_data["best_params"] = params
+
+                optimization_data["convergence_history"].append(
+                    {"trial_id": trial_id, "value": value}
+                )
+
+                await self._update_optimization(optimization_id, optimization_data)
+
+            # Run optimization (synchronous call in async context)
+            import asyncio
+
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, optimizer.optimize)
+
+            # Process results
+            optimization_data["status"] = "completed"
+            optimization_data["progress"] = 100.0
+            optimization_data["completed_at"] = datetime.now().isoformat()
+
+            if result.best_params:
+                optimization_data["best_params"] = result.best_params
+                optimization_data["best_trial_id"] = result.best_trial_number
+                optimization_data["best_metrics"] = {
+                    "total_return": result.best_value,
+                    "annual_return": 0.0,
+                    "sharpe_ratio": result.best_value
+                    if primary_metric == BacktestOptimizationMetric.SHARPE
+                    else 0.0,
+                    "sortino_ratio": 0.0,
+                    "max_drawdown": 0.0,
+                    "max_drawdown_duration": 0,
+                    "win_rate": 0.0,
+                    "profit_factor": 0.0,
+                    "calmar_ratio": result.best_value
+                    if primary_metric == BacktestOptimizationMetric.CALMAR
+                    else 0.0,
+                    "volatility": 0.0,
+                    "beta": 0.0,
+                    "alpha": 0.0,
+                    "information_ratio": 0.0,
+                    "trade_count": 0,
+                    "avg_trade_return": 0.0,
+                    "avg_holding_period": 0.0,
+                }
+
+            # Store all trials
+            optimization_data["all_trials"] = [
+                {
+                    "trial_id": t.trial_id,
+                    "params": t.params,
+                    "metrics": {
+                        "total_return": t.value,
+                        "sharpe_ratio": t.value
+                        if primary_metric == BacktestOptimizationMetric.SHARPE
+                        else 0.0,
+                        "calmar_ratio": t.value
+                        if primary_metric == BacktestOptimizationMetric.CALMAR
+                        else 0.0,
+                        "max_drawdown": 0.0,
+                        "win_rate": 0.0,
+                        "profit_factor": 0.0,
+                        "trade_count": 0,
+                        "annual_return": 0.0,
+                        "sortino_ratio": 0.0,
+                        "max_drawdown_duration": 0,
+                        "volatility": 0.0,
+                        "beta": 0.0,
+                        "alpha": 0.0,
+                        "information_ratio": 0.0,
+                        "avg_trade_return": 0.0,
+                        "avg_holding_period": 0.0,
+                    },
+                    "duration_seconds": t.duration_seconds,
+                    "rank": i + 1,
+                    "pruned": t.pruned,
+                }
+                for i, t in enumerate(
+                    sorted(result.all_trials, key=lambda x: x.value, reverse=True)
+                )
+            ]
+
+            # Top 10 trials
+            optimization_data["top_trials"] = optimization_data["all_trials"][:10]
+
+            # Parameter importance
+            optimization_data["param_importance"] = result.param_importance
+
+        except Exception as e:
+            logger.error(f"Optimization {optimization_id} failed: {e}")
+            optimization_data["status"] = "failed"
+            optimization_data["error_message"] = str(e)
+            optimization_data["completed_at"] = datetime.now().isoformat()
+
+        await self._update_optimization(optimization_id, optimization_data)
+
+        if self.redis_client:
+            await self.redis_client.srem("optimizations:active", optimization_id)
+
+    async def _update_optimization(
+        self, optimization_id: str, optimization_data: dict
+    ) -> None:
+        """Update optimization in Redis."""
+        if self.redis_client:
+            await self.redis_client.hset(
+                "optimizations", optimization_id, json.dumps(optimization_data)
+            )
+
+    async def list_optimizations(
+        self,
+        strategy_id: Optional[str] = None,
+        status: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> tuple[list[OptimizationResponse], int]:
+        """List optimizations with filtering and pagination."""
+        optimizations = []
+
+        if self.redis_client:
+            all_optimizations = await self.redis_client.hgetall("optimizations")
+            for data_json in all_optimizations.values():
+                data = json.loads(data_json)
+
+                if strategy_id and data["strategy_id"] != strategy_id:
+                    continue
+                if status and data["status"] != status:
+                    continue
+
+                top_trials = []
+                for t in data.get("top_trials", [])[:5]:
+                    trial_metrics = parse_metrics(t)
+                    if trial_metrics:
+                        top_trials.append(
+                            OptimizationTrialResult(
+                                trial_id=t["trial_id"],
+                                params=t["params"],
+                                metrics=trial_metrics,
+                                duration_seconds=t["duration_seconds"],
+                                rank=t["rank"],
+                                pruned=t.get("pruned", False),
+                            )
+                        )
+
+                optimizations.append(
+                    OptimizationResponse(
+                        id=data["id"],
+                        strategy_id=data["strategy_id"],
+                        name=data["name"],
+                        description=data.get("description", ""),
+                        status=data["status"],
+                        progress=data["progress"],
+                        current_trial=data["current_trial"],
+                        total_trials=data["total_trials"],
+                        best_trial_id=data.get("best_trial_id"),
+                        best_params=data.get("best_params"),
+                        best_metrics=parse_metrics(data, "best_metrics"),
+                        top_trials=top_trials,
+                        error_message=data.get("error_message"),
+                        created_at=datetime.fromisoformat(data["created_at"]),
+                        started_at=parse_datetime_or_none(data, "started_at"),
+                        completed_at=parse_datetime_or_none(data, "completed_at"),
+                    )
+                )
+
+        optimizations.sort(key=lambda o: o.created_at, reverse=True)
+        total = len(optimizations)
+        start = (page - 1) * page_size
+        end = start + page_size
+
+        return optimizations[start:end], total
+
+    async def get_optimization(
+        self, optimization_id: str
+    ) -> Optional[OptimizationResponse]:
+        """Get optimization by ID."""
+        if self.redis_client:
+            data_json = await self.redis_client.hget("optimizations", optimization_id)
+            if data_json:
+                data = json.loads(data_json)
+
+                top_trials = []
+                for t in data.get("top_trials", [])[:5]:
+                    trial_metrics = parse_metrics(t)
+                    if trial_metrics:
+                        top_trials.append(
+                            OptimizationTrialResult(
+                                trial_id=t["trial_id"],
+                                params=t["params"],
+                                metrics=trial_metrics,
+                                duration_seconds=t["duration_seconds"],
+                                rank=t["rank"],
+                                pruned=t.get("pruned", False),
+                            )
+                        )
+
+                return OptimizationResponse(
+                    id=data["id"],
+                    strategy_id=data["strategy_id"],
+                    name=data["name"],
+                    description=data.get("description", ""),
+                    status=data["status"],
+                    progress=data["progress"],
+                    current_trial=data["current_trial"],
+                    total_trials=data["total_trials"],
+                    best_trial_id=data.get("best_trial_id"),
+                    best_params=data.get("best_params"),
+                    best_metrics=parse_metrics(data, "best_metrics"),
+                    top_trials=top_trials,
+                    error_message=data.get("error_message"),
+                    created_at=datetime.fromisoformat(data["created_at"]),
+                    started_at=parse_datetime_or_none(data, "started_at"),
+                    completed_at=parse_datetime_or_none(data, "completed_at"),
+                )
+
+        return None
+
+    async def get_optimization_detail(
+        self, optimization_id: str
+    ) -> Optional[OptimizationDetailResponse]:
+        """Get detailed optimization results."""
+        optimization = await self.get_optimization(optimization_id)
+        if not optimization or optimization.status != "completed":
+            return None
+
+        if self.redis_client:
+            data_json = await self.redis_client.hget("optimizations", optimization_id)
+            if data_json:
+                data = json.loads(data_json)
+
+                all_trials = []
+                for t in data.get("all_trials", []):
+                    trial_metrics = parse_metrics(t)
+                    if trial_metrics:
+                        all_trials.append(
+                            OptimizationTrialResult(
+                                trial_id=t["trial_id"],
+                                params=t["params"],
+                                metrics=trial_metrics,
+                                duration_seconds=t["duration_seconds"],
+                                rank=t["rank"],
+                                pruned=t.get("pruned", False),
+                            )
+                        )
+
+                return OptimizationDetailResponse(
+                    optimization=optimization,
+                    all_trials=all_trials,
+                    param_importance=data.get("param_importance", {}),
+                    convergence_history=data.get("convergence_history", []),
+                )
+
+        return None
+
+    async def cancel_optimization(self, optimization_id: str) -> bool:
+        """Cancel a running optimization."""
+        if self.redis_client:
+            data_json = await self.redis_client.hget("optimizations", optimization_id)
+            if data_json:
+                data = json.loads(data_json)
+                if data["status"] == "running":
+                    data["status"] = "cancelled"
+                    data["completed_at"] = datetime.now().isoformat()
+                    await self.redis_client.hset(
+                        "optimizations", optimization_id, json.dumps(data)
+                    )
+                    await self.redis_client.srem("optimizations:active", optimization_id)
+                    return True
+        return False
+
+    async def delete_optimization(self, optimization_id: str) -> bool:
+        """Delete an optimization."""
+        if self.redis_client:
+            result = await self.redis_client.hdel("optimizations", optimization_id)
+            await self.redis_client.srem("optimizations:active", optimization_id)
             return result > 0
         return False
 

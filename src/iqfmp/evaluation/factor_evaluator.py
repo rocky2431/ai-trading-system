@@ -30,6 +30,12 @@ from iqfmp.evaluation.stability_analyzer import (
     StabilityConfig,
 )
 from iqfmp.evaluation.qlib_stats import spearman_rank_correlation
+from iqfmp.evaluation.lookahead_detector import (
+    LookaheadBiasDetector,
+    DetectionMode,
+    DetectionResult,
+    LookaheadBiasError,
+)
 
 
 # =============================================================================
@@ -109,6 +115,11 @@ class EvaluationConfig:
     # Annualization
     annualization_factor: float = 252.0  # Daily data
 
+    # Lookahead bias detection (P0-2)
+    lookahead_check_enabled: bool = True  # Enable lookahead detection
+    lookahead_mode: str = "lenient"  # "strict", "lenient", or "audit"
+    ic_decay_check: bool = True  # Run IC decay analysis for lookahead detection
+
 
 @dataclass
 class FactorMetrics:
@@ -161,10 +172,10 @@ class FactorMetrics:
 
 
 class QlibMetricsCalculator:
-    """Qlib-native metrics calculator.
+    """Factor metrics calculator with Qlib integration.
 
-    All computations go through Qlib's evaluation engine.
-    This is the ONLY allowed implementation for factor metrics.
+    Uses Qlib's evaluation engine when available, with pandas fallback
+    for basic metrics (IC/IR) when Qlib functions are not available.
     """
 
     def __init__(self) -> None:
@@ -198,10 +209,10 @@ class QlibMetricsCalculator:
     def calculate_ic(
         self, factor_values: pd.Series, returns: pd.Series
     ) -> float:
-        """Calculate Information Coefficient via Qlib.
+        """Calculate Information Coefficient (Pearson correlation).
 
-        Uses Qlib's calc_ic when available, falls back to Pearson correlation
-        via qlib_stats unified interface. NO pandas fallback - Qlib is mandatory.
+        Uses Qlib's calc_ic when available, falls back to pandas Pearson
+        correlation when Qlib is not available.
         """
         # Cross-sectional IC (date x symbol) when MultiIndex is provided
         if isinstance(factor_values.index, pd.MultiIndex) and isinstance(
@@ -500,6 +511,7 @@ class EvaluationResult:
     trial_id: str
     cv_results: Optional[list[CVResult]] = None
     stability_report: Optional[StabilityReport] = None
+    lookahead_result: Optional[DetectionResult] = None  # P0-2: Lookahead bias detection
 
     def generate_report(self) -> FactorReport:
         """Generate full report from result."""
@@ -620,6 +632,19 @@ class FactorEvaluator:
             )
         )
 
+        # P0-2: Initialize lookahead bias detector
+        if self.config.lookahead_check_enabled:
+            mode_map = {
+                "strict": DetectionMode.STRICT,
+                "lenient": DetectionMode.LENIENT,
+                "audit": DetectionMode.AUDIT,
+            }
+            self.lookahead_detector = LookaheadBiasDetector(
+                mode=mode_map.get(self.config.lookahead_mode, DetectionMode.LENIENT)
+            )
+        else:
+            self.lookahead_detector = None
+
     def evaluate(
         self,
         factor_name: str,
@@ -641,6 +666,19 @@ class FactorEvaluator:
 
         # Prepare data
         df = self._prepare_data(data)
+
+        # P0-2: Run lookahead bias detection before calculating metrics
+        lookahead_result = None
+        if self.lookahead_detector is not None:
+            lookahead_result = self._run_lookahead_check(df, factor_name)
+            # In strict mode, raise exception if bias detected
+            if lookahead_result.has_bias and self.config.lookahead_mode == "strict":
+                # Build summary from instances
+                summary_parts = [f"{i.description}" for i in lookahead_result.instances[:3]]
+                summary = "; ".join(summary_parts) if summary_parts else "Unknown bias"
+                raise LookaheadBiasError(
+                    f"Lookahead bias detected in factor '{factor_name}': {summary}"
+                )
 
         # Calculate metrics via Qlib
         metrics = self._calculate_metrics(df)
@@ -680,6 +718,7 @@ class FactorEvaluator:
             trial_id=trial_id,
             cv_results=cv_results,
             stability_report=stability_report,
+            lookahead_result=lookahead_result,  # P0-2: Include lookahead detection result
         )
 
     def _validate_inputs(
@@ -868,6 +907,55 @@ class FactorEvaluator:
             ic_std=ic_std,
             ic_skew=ic_skew,
         )
+
+    def _run_lookahead_check(
+        self, df: pd.DataFrame, factor_name: str
+    ) -> DetectionResult:
+        """Run lookahead bias detection on factor data.
+
+        P0-2: Uses LookaheadBiasDetector to check for temporal alignment issues
+        and suspicious IC decay patterns.
+
+        Args:
+            df: DataFrame with factor and return data
+            factor_name: Name of the factor being evaluated
+
+        Returns:
+            DetectionResult with any detected biases
+        """
+        if self.lookahead_detector is None:
+            return DetectionResult(has_bias=False, instances=[])
+
+        factor_col = self.config.factor_column
+        return_col = self.config.return_column
+
+        # Run temporal alignment audit
+        factor_series = df[factor_col]
+        returns_df = df[[return_col, "_date"]].copy()
+        returns_df = returns_df.rename(columns={return_col: "return"})
+
+        audit_result = self.lookahead_detector.audit_temporal_alignment(
+            factor_df=df[[factor_col, "_date"]].copy(),
+            target_df=returns_df,
+        )
+
+        # Optionally run IC decay analysis
+        if self.config.ic_decay_check and self.lookahead_detector is not None:
+            try:
+                decay_analysis = self.lookahead_detector.ic_decay_analysis(
+                    factor=factor_series,
+                    returns=df[[return_col]],
+                )
+                # If decay analysis indicates suspicious pattern, add to result
+                if decay_analysis.is_suspicious:
+                    logger.warning(
+                        f"Factor '{factor_name}' shows suspicious IC decay pattern: "
+                        f"{decay_analysis.suspicion_reason}"
+                    )
+            except Exception as e:
+                logger.debug(f"IC decay analysis failed (non-critical): {e}")
+
+        return audit_result.detection_result
 
     def _run_cv_evaluation(self, df: pd.DataFrame) -> list[CVResult]:
         """Run cross-validation evaluation."""

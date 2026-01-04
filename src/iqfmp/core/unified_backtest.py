@@ -340,6 +340,10 @@ class UnifiedBacktestParams:
     # Anti-overfitting
     strict_cv_mode: bool = True          # Fail on insufficient data
 
+    # Optimization tracking (for Optuna integration)
+    trial_id: int | None = None              # Optuna trial ID
+    optimization_run_id: str | None = None   # Optimization study ID
+
     def __post_init__(self) -> None:
         """Validate financial parameters at construction time."""
         if self.initial_capital <= 0:

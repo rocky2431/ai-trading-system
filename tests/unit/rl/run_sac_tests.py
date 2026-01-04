@@ -243,6 +243,67 @@ def run_tests():
         failed += 1
         print(f"  FAILED: {e}")
 
+    print("Test: SACAgent update with fixed alpha")
+    try:
+        fixed_alpha = 0.5
+        config = AgentConfig(alpha=fixed_alpha, auto_alpha=False)
+        agent = SACAgent(obs_dim, action_dim, config)
+        rng = np.random.default_rng(seed=42)
+        for _ in range(300):
+            obs = rng.random(obs_dim).astype(np.float32)
+            action = rng.random(action_dim).astype(np.float32)
+            next_obs = rng.random(obs_dim).astype(np.float32)
+            agent.store_transition(obs, action, rng.random() - 0.5, next_obs, rng.random() > 0.95)
+        for _ in range(10):
+            metrics = agent.update(batch_size=64)
+        assert agent.alpha == fixed_alpha
+        assert metrics["alpha"] == fixed_alpha
+        assert metrics["alpha_loss"] == 0.0
+        passed += 1
+        print("  PASSED")
+    except Exception as e:
+        failed += 1
+        print(f"  FAILED: {e}")
+
+    print("Test: SACAgent load nonexistent file raises error")
+    try:
+        agent = SACAgent(obs_dim, action_dim)
+        try:
+            agent.load("/nonexistent/path/to/agent.pt")
+            failed += 1
+            print("  FAILED: Should have raised FileNotFoundError")
+        except FileNotFoundError as e:
+            if "Checkpoint not found" in str(e):
+                passed += 1
+                print("  PASSED")
+            else:
+                failed += 1
+                print(f"  FAILED: Wrong error message: {e}")
+    except Exception as e:
+        failed += 1
+        print(f"  FAILED: {e}")
+
+    print("Test: SACAgent load missing keys raises error")
+    try:
+        agent = SACAgent(obs_dim, action_dim)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "incomplete.pt"
+            torch.save({"actor": agent.actor.state_dict()}, str(path))
+            try:
+                agent.load(str(path))
+                failed += 1
+                print("  FAILED: Should have raised ValueError")
+            except ValueError as e:
+                if "missing keys" in str(e):
+                    passed += 1
+                    print("  PASSED")
+                else:
+                    failed += 1
+                    print(f"  FAILED: Wrong error message: {e}")
+    except Exception as e:
+        failed += 1
+        print(f"  FAILED: {e}")
+
     print(f"\n{'='*50}")
     print(f"Results: {passed} passed, {failed} failed")
     print(f"{'='*50}")

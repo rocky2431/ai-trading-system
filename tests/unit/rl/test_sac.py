@@ -25,6 +25,7 @@ from iqfmp.rl.agents import (
     ReplayBuffer,
     TORCH_AVAILABLE,
     create_agent,
+    get_activation,
 )
 
 # Conditional imports for PyTorch components
@@ -179,6 +180,49 @@ class TestReplayBuffer:
         assert not np.any(np.isinf(obs))
         assert not np.any(np.isnan(rewards))
 
+    def test_invalid_capacity_raises_error(self) -> None:
+        """Test that zero or negative capacity raises ValueError."""
+        with pytest.raises(ValueError, match="capacity must be positive"):
+            ReplayBuffer(capacity=0)
+        with pytest.raises(ValueError, match="capacity must be positive"):
+            ReplayBuffer(capacity=-1)
+
+    def test_sample_raises_when_not_ready(self, obs_dim: int, action_dim: int) -> None:
+        """Test sample raises ValueError when buffer has insufficient samples."""
+        buffer = ReplayBuffer(capacity=100)
+        obs = np.zeros(obs_dim, dtype=np.float32)
+        action = np.zeros(action_dim, dtype=np.float32)
+
+        # Add only 5 samples
+        for _ in range(5):
+            buffer.add(obs, action, 0.0, obs, False)
+
+        with pytest.raises(ValueError, match="Cannot sample 10 transitions"):
+            buffer.sample(10)
+
+
+# =============================================================================
+# get_activation Tests
+# =============================================================================
+
+
+class TestGetActivation:
+    """Tests for get_activation utility function."""
+
+    def test_valid_activations(self) -> None:
+        """Test that valid activation names return nn.Module instances."""
+        valid_names = ["relu", "tanh", "leaky_relu", "elu", "gelu"]
+        for name in valid_names:
+            activation = get_activation(name)
+            assert callable(activation), f"{name} should return callable"
+
+    def test_invalid_activation_raises_error(self) -> None:
+        """Test that invalid activation name raises ValueError."""
+        with pytest.raises(ValueError, match="Unknown activation"):
+            get_activation("invalid_activation")
+        with pytest.raises(ValueError, match="Unknown activation"):
+            get_activation("nonexistent")
+
 
 # =============================================================================
 # GaussianActor Tests
@@ -256,6 +300,31 @@ class TestGaussianActor:
         all_same = all(torch.allclose(actions[0], a) for a in actions[1:])
         assert not all_same, "Stochastic samples should differ"
 
+    def test_invalid_obs_dim_raises_error(
+        self, action_dim: int, hidden_dims: list[int]
+    ) -> None:
+        """Test that invalid obs_dim raises ValueError."""
+        with pytest.raises(ValueError, match="obs_dim must be positive"):
+            GaussianActor(0, action_dim, hidden_dims)
+        with pytest.raises(ValueError, match="obs_dim must be positive"):
+            GaussianActor(-1, action_dim, hidden_dims)
+
+    def test_invalid_action_dim_raises_error(
+        self, obs_dim: int, hidden_dims: list[int]
+    ) -> None:
+        """Test that invalid action_dim raises ValueError."""
+        with pytest.raises(ValueError, match="action_dim must be positive"):
+            GaussianActor(obs_dim, 0, hidden_dims)
+        with pytest.raises(ValueError, match="action_dim must be positive"):
+            GaussianActor(obs_dim, -1, hidden_dims)
+
+    def test_empty_hidden_dims_raises_error(
+        self, obs_dim: int, action_dim: int
+    ) -> None:
+        """Test that empty hidden_dims raises ValueError."""
+        with pytest.raises(ValueError, match="hidden_dims must be non-empty"):
+            GaussianActor(obs_dim, action_dim, [])
+
 
 # =============================================================================
 # TwinQNetwork Tests
@@ -315,6 +384,31 @@ class TestTwinQNetwork:
 
         assert q1_only.shape == (4, 1)
         assert torch.allclose(q1_only, q1_from_forward)
+
+    def test_invalid_obs_dim_raises_error(
+        self, action_dim: int, hidden_dims: list[int]
+    ) -> None:
+        """Test that invalid obs_dim raises ValueError."""
+        with pytest.raises(ValueError, match="obs_dim must be positive"):
+            TwinQNetwork(0, action_dim, hidden_dims)
+        with pytest.raises(ValueError, match="obs_dim must be positive"):
+            TwinQNetwork(-1, action_dim, hidden_dims)
+
+    def test_invalid_action_dim_raises_error(
+        self, obs_dim: int, hidden_dims: list[int]
+    ) -> None:
+        """Test that invalid action_dim raises ValueError."""
+        with pytest.raises(ValueError, match="action_dim must be positive"):
+            TwinQNetwork(obs_dim, 0, hidden_dims)
+        with pytest.raises(ValueError, match="action_dim must be positive"):
+            TwinQNetwork(obs_dim, -1, hidden_dims)
+
+    def test_empty_hidden_dims_raises_error(
+        self, obs_dim: int, action_dim: int
+    ) -> None:
+        """Test that empty hidden_dims raises ValueError."""
+        with pytest.raises(ValueError, match="hidden_dims must be non-empty"):
+            TwinQNetwork(obs_dim, action_dim, [])
 
 
 # =============================================================================
@@ -440,6 +534,34 @@ class TestSACAgent:
         assert "critic_loss" in metrics
         assert "alpha" in metrics
 
+    def test_update_with_fixed_alpha(
+        self, obs_dim: int, action_dim: int
+    ) -> None:
+        """Test update with auto_alpha=False uses fixed alpha."""
+        fixed_alpha = 0.5
+        config = AgentConfig(alpha=fixed_alpha, auto_alpha=False)
+        agent = SACAgent(obs_dim, action_dim, config)
+        rng = np.random.default_rng(seed=42)
+
+        # Fill buffer with enough samples
+        for _ in range(300):
+            obs = rng.random(obs_dim).astype(np.float32)
+            action = rng.random(action_dim).astype(np.float32)
+            next_obs = rng.random(obs_dim).astype(np.float32)
+            reward = rng.random() - 0.5
+            done = rng.random() > 0.95
+            agent.store_transition(obs, action, reward, next_obs, done)
+
+        # Run multiple updates
+        for _ in range(10):
+            metrics = agent.update(batch_size=64)
+
+        # Alpha should remain fixed
+        assert agent.alpha == fixed_alpha
+        assert metrics["alpha"] == fixed_alpha
+        # alpha_loss should be 0.0 when not tuning
+        assert metrics["alpha_loss"] == 0.0
+
     def test_save_and_load(self, obs_dim: int, action_dim: int) -> None:
         """Test saving and loading agent."""
         agent = SACAgent(obs_dim, action_dim)
@@ -470,6 +592,45 @@ class TestSACAgent:
             action_after = new_agent.select_action(test_obs, deterministic=True)
 
         assert np.allclose(action_before, action_after)
+
+    def test_load_nonexistent_file_raises_error(
+        self, obs_dim: int, action_dim: int
+    ) -> None:
+        """Test loading from nonexistent file raises FileNotFoundError."""
+        agent = SACAgent(obs_dim, action_dim)
+
+        with pytest.raises(FileNotFoundError, match="Checkpoint not found"):
+            agent.load("/nonexistent/path/to/agent.pt")
+
+    def test_load_invalid_checkpoint_raises_error(
+        self, obs_dim: int, action_dim: int
+    ) -> None:
+        """Test loading corrupted checkpoint raises ValueError."""
+        agent = SACAgent(obs_dim, action_dim)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "invalid.pt"
+            # Write invalid data to file
+            path.write_text("not a valid checkpoint")
+
+            with pytest.raises(ValueError, match="Failed to load checkpoint"):
+                agent.load(str(path))
+
+    def test_load_missing_keys_raises_error(
+        self, obs_dim: int, action_dim: int
+    ) -> None:
+        """Test loading checkpoint with missing keys raises ValueError."""
+        import torch as pt
+
+        agent = SACAgent(obs_dim, action_dim)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "incomplete.pt"
+            # Save checkpoint with missing keys
+            pt.save({"actor": agent.actor.state_dict()}, str(path))
+
+            with pytest.raises(ValueError, match="Invalid checkpoint.*missing keys"):
+                agent.load(str(path))
 
 
 # =============================================================================

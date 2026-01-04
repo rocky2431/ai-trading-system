@@ -11,7 +11,7 @@ Key components:
 - GaussianActor: Gaussian policy network with reparameterization
 - TwinQNetwork: Twin Q-networks for SAC
 
-Implementations use PyTorch and follow the Stable-Baselines3 conventions.
+Implementations use PyTorch.
 """
 
 import logging
@@ -41,7 +41,7 @@ class AgentConfig:
     """Configuration for RL agents."""
     # Network architecture
     hidden_dims: List[int] = field(default_factory=lambda: [256, 256])
-    activation: str = "relu"  # relu, tanh, leaky_relu
+    activation: str = "relu"  # relu, tanh, leaky_relu, elu, gelu
 
     # Training hyperparameters
     learning_rate: float = 3e-4
@@ -61,6 +61,7 @@ class AgentConfig:
     tau: float = 0.005  # Soft update coefficient
     alpha: float = 0.2  # Temperature parameter
     auto_alpha: bool = True  # Automatically tune alpha
+    replay_buffer_capacity: int = 100000  # Replay buffer size
 
     # Device
     device: str = "auto"  # auto, cpu, cuda
@@ -319,7 +320,7 @@ class ActorCriticNetwork(nn.Module):
                 action = dist.sample()
                 action = torch.tanh(action)  # Squash to [-1, 1]
 
-            # Log prob with tanh correction
+            # Log prob (no tanh correction - simplified for PPO/A2C)
             log_prob = dist.log_prob(action).sum(-1)
             entropy = dist.entropy().sum(-1)
 
@@ -349,6 +350,13 @@ class GaussianActor(nn.Module):
         hidden_dims: List[int],
         activation: str = "relu",
     ):
+        if obs_dim <= 0:
+            raise ValueError(f"obs_dim must be positive, got {obs_dim}")
+        if action_dim <= 0:
+            raise ValueError(f"action_dim must be positive, got {action_dim}")
+        if not hidden_dims:
+            raise ValueError("hidden_dims must be non-empty")
+
         super().__init__()
 
         self.action_dim = action_dim
@@ -404,7 +412,7 @@ class GaussianActor(nn.Module):
 
 
 class TwinQNetwork(nn.Module):
-    """Twin Q-network for SAC (clipped double Q-learning).
+    """Twin Q-network for SAC (min of two Q-values).
 
     Uses two independent Q-networks and takes the minimum to reduce
     overestimation bias.
@@ -417,6 +425,13 @@ class TwinQNetwork(nn.Module):
         hidden_dims: List[int],
         activation: str = "relu",
     ):
+        if obs_dim <= 0:
+            raise ValueError(f"obs_dim must be positive, got {obs_dim}")
+        if action_dim <= 0:
+            raise ValueError(f"action_dim must be positive, got {action_dim}")
+        if not hidden_dims:
+            raise ValueError("hidden_dims must be non-empty")
+
         super().__init__()
 
         input_dim = obs_dim + action_dim
@@ -875,7 +890,7 @@ class SACAgent(BaseAgent):
             self.alpha = config.alpha
 
         # Replay buffer
-        self.replay_buffer = ReplayBuffer(capacity=100000)
+        self.replay_buffer = ReplayBuffer(capacity=config.replay_buffer_capacity)
 
     def select_action(
         self,
@@ -907,18 +922,28 @@ class SACAgent(BaseAgent):
         """Store transition in replay buffer."""
         self.replay_buffer.add(obs, action, reward, next_obs, done)
 
-    def update(self, buffer: Union[RolloutBuffer, ReplayBuffer, None] = None, batch_size: int = 256) -> Dict[str, float]:
-        """Update agent from replay buffer.
+    def update(self, batch_size: int = 256) -> Dict[str, float]:
+        """Update agent from internal replay buffer.
 
         Args:
-            buffer: Not used (SAC uses internal replay buffer)
             batch_size: Batch size for sampling
 
         Returns:
             Dictionary of training metrics
         """
         if not self.replay_buffer.is_ready(batch_size):
-            return {"actor_loss": 0.0, "critic_loss": 0.0, "alpha": self.alpha}
+            logger.debug(
+                "Skipping SAC update: replay buffer has %d samples, requires %d",
+                len(self.replay_buffer),
+                batch_size,
+            )
+            return {
+                "actor_loss": 0.0,
+                "critic_loss": 0.0,
+                "alpha": self.alpha,
+                "alpha_loss": 0.0,
+                "skipped": True,
+            }
 
         # Sample batch
         obs, actions, rewards, next_obs, dones = self.replay_buffer.sample(batch_size)
@@ -953,7 +978,22 @@ class SACAgent(BaseAgent):
         # Update actor
         new_actions, log_probs = self.actor(obs)
         q1_new = self.critic.q1_forward(obs, new_actions)
-        actor_loss = (self.alpha * log_probs - q1_new).mean()
+        # Fix shape: log_probs is (batch,), q1_new is (batch, 1) - squeeze q1_new
+        actor_loss = (self.alpha * log_probs - q1_new.squeeze(-1)).mean()
+
+        # Check for numerical instability
+        if torch.isnan(critic_loss) or torch.isinf(critic_loss):
+            logger.error(
+                "Numerical instability: critic_loss=%s, skipping update",
+                critic_loss.item() if not torch.isnan(critic_loss) else "nan",
+            )
+            return {
+                "actor_loss": float("nan"),
+                "critic_loss": float("nan"),
+                "alpha": self.alpha,
+                "alpha_loss": 0.0,
+                "numerical_error": True,
+            }
 
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
@@ -989,7 +1029,14 @@ class SACAgent(BaseAgent):
             target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
     def save(self, path: str) -> None:
-        """Save agent to file."""
+        """Save agent to file.
+
+        Args:
+            path: Path to save checkpoint
+
+        Raises:
+            IOError: If save fails (permissions, disk space, etc.)
+        """
         checkpoint = {
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
@@ -997,24 +1044,81 @@ class SACAgent(BaseAgent):
             "actor_optimizer": self.actor_optimizer.state_dict(),
             "critic_optimizer": self.critic_optimizer.state_dict(),
             "config": self.config,
+            "auto_alpha": self.auto_alpha,
         }
         if self.auto_alpha:
             checkpoint["log_alpha"] = self.log_alpha
             checkpoint["alpha_optimizer"] = self.alpha_optimizer.state_dict()
-        torch.save(checkpoint, path)
+
+        try:
+            torch.save(checkpoint, path)
+            logger.info("Saved SAC agent to %s", path)
+        except (OSError, IOError) as e:
+            raise IOError(
+                f"Failed to save SAC agent to '{path}': {e}. "
+                f"Check directory exists and has write permissions."
+            ) from e
 
     def load(self, path: str) -> None:
-        """Load agent from file."""
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        """Load agent from file.
+
+        Args:
+            path: Path to checkpoint file
+
+        Raises:
+            FileNotFoundError: If checkpoint file doesn't exist
+            ValueError: If checkpoint is corrupted or incompatible
+        """
+        try:
+            checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        except FileNotFoundError:
+            raise FileNotFoundError(
+                f"Checkpoint not found at '{path}'. "
+                f"Ensure the path is correct and the file exists."
+            )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load checkpoint from '{path}': {e}. "
+                f"The file may be corrupted or incompatible."
+            ) from e
+
+        # Validate required keys
+        required_keys = ["actor", "critic", "critic_target", "actor_optimizer", "critic_optimizer"]
+        missing = [k for k in required_keys if k not in checkpoint]
+        if missing:
+            raise ValueError(
+                f"Invalid checkpoint at '{path}': missing keys {missing}. "
+                f"Expected a checkpoint saved by SACAgent.save()."
+            )
+
         self.actor.load_state_dict(checkpoint["actor"])
         self.critic.load_state_dict(checkpoint["critic"])
         self.critic_target.load_state_dict(checkpoint["critic_target"])
         self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer"])
         self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer"])
-        if self.auto_alpha and "log_alpha" in checkpoint:
-            self.log_alpha = checkpoint["log_alpha"]
-            self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer"])
-            self.alpha = self.log_alpha.exp().item()
+
+        # Handle auto_alpha state
+        if self.auto_alpha:
+            if "log_alpha" not in checkpoint:
+                logger.warning(
+                    "Loading checkpoint into auto_alpha=True agent, but checkpoint "
+                    "has no log_alpha. Using default alpha=%.4f. This may indicate "
+                    "checkpoint was saved with auto_alpha=False.",
+                    self.alpha,
+                )
+            else:
+                # Fix device mismatch
+                self.log_alpha = checkpoint["log_alpha"].to(self.device)
+                if "alpha_optimizer" in checkpoint:
+                    self.alpha_optimizer.load_state_dict(checkpoint["alpha_optimizer"])
+                else:
+                    logger.warning(
+                        "Checkpoint has log_alpha but no alpha_optimizer state. "
+                        "Alpha optimizer will start fresh."
+                    )
+                self.alpha = self.log_alpha.exp().item()
+
+        logger.info("Loaded SAC agent from %s", path)
 
 
 # =============================================================================

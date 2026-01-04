@@ -29,7 +29,12 @@ import {
   Clock,
   CheckCircle2,
   XCircle,
+  LineChart,
+  Grid3X3,
+  FileText,
 } from 'lucide-react'
+import { EquityCurveChart, MonthlyReturnsHeatmap } from '@/components/backtest'
+import type { EquityDataPoint } from '@/components/backtest'
 
 function StatusBadge({ status }: { status: BacktestResponse['status'] }) {
   const config = {
@@ -165,7 +170,21 @@ function BacktestDetailView({ backtestId, onClose }: { backtestId: string; onClo
     )
   }
 
-  const { backtest, monthly_returns, factor_contributions } = detail
+  const { backtest, equity_curve, monthly_returns, factor_contributions } = detail
+
+  // Transform equity curve data for chart component
+  const equityChartData: EquityDataPoint[] = equity_curve?.map(point => ({
+    date: point.date,
+    equity: point.equity,
+    drawdown: point.drawdown,
+    benchmark: point.benchmark_equity,
+  })) || []
+
+  // Transform monthly returns for heatmap
+  const monthlyReturnsData = Object.entries(monthly_returns).map(([month, returnValue]) => ({
+    month,
+    return: returnValue,
+  }))
 
   return (
     <div className="space-y-6">
@@ -209,47 +228,115 @@ function BacktestDetailView({ backtestId, onClose }: { backtestId: string; onClo
         </div>
       )}
 
-      {/* Monthly Returns */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Monthly Returns</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-12 gap-2">
-            {Object.entries(monthly_returns).slice(-12).map(([month, ret]) => (
-              <div key={month} className="text-center">
-                <div className={`text-xs font-medium ${ret >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
-                  {ret >= 0 ? '+' : ''}{ret.toFixed(1)}%
-                </div>
-                <div className="text-xs text-muted-foreground">{month.slice(5)}</div>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+      {/* Tabbed Content */}
+      <Tabs defaultValue="overview" className="w-full">
+        <TabsList className="grid w-full grid-cols-3">
+          <TabsTrigger value="overview" className="gap-2">
+            <FileText className="h-4 w-4" />
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="equity" className="gap-2">
+            <LineChart className="h-4 w-4" />
+            Equity Curve
+          </TabsTrigger>
+          <TabsTrigger value="monthly" className="gap-2">
+            <Grid3X3 className="h-4 w-4" />
+            Monthly Returns
+          </TabsTrigger>
+        </TabsList>
 
-      {/* Factor Contributions */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-sm">Factor Contributions</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            {Object.entries(factor_contributions).map(([factor, contribution]) => (
-              <div key={factor} className="flex items-center gap-4">
-                <span className="text-sm capitalize w-24">{factor}</span>
-                <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-primary"
-                    style={{ width: `${Math.min(contribution, 100)}%` }}
-                  />
-                </div>
-                <span className="text-sm font-medium w-12 text-right">{contribution.toFixed(1)}%</span>
+        {/* Overview Tab */}
+        <TabsContent value="overview" className="space-y-4 mt-4">
+          {/* Monthly Returns Quick View */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Recent Monthly Returns</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid grid-cols-4 sm:grid-cols-6 md:grid-cols-12 gap-2">
+                {Object.entries(monthly_returns).slice(-12).map(([month, ret]) => (
+                  <div key={month} className="text-center">
+                    <div className={`text-xs font-medium ${ret >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                      {ret >= 0 ? '+' : ''}{ret.toFixed(1)}%
+                    </div>
+                    <div className="text-xs text-muted-foreground">{month.slice(5)}</div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+            </CardContent>
+          </Card>
+
+          {/* Factor Contributions */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Factor Contributions</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3">
+                {Object.entries(factor_contributions).map(([factor, contribution]) => (
+                  <div key={factor} className="flex items-center gap-4">
+                    <span className="text-sm capitalize w-24">{factor}</span>
+                    <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-primary"
+                        style={{ width: `${Math.min(contribution, 100)}%` }}
+                      />
+                    </div>
+                    <span className="text-sm font-medium w-12 text-right">{contribution.toFixed(1)}%</span>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Equity Curve Tab */}
+        <TabsContent value="equity" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Equity Curve & Drawdown</CardTitle>
+              <CardDescription>
+                Portfolio value over time with drawdown overlay
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {equityChartData.length > 0 ? (
+                <EquityCurveChart
+                  data={equityChartData}
+                  showBenchmark={true}
+                  benchmarkLabel="Benchmark"
+                  height={400}
+                />
+              ) : (
+                <div className="flex items-center justify-center h-[400px] text-muted-foreground">
+                  No equity curve data available
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Monthly Returns Heatmap Tab */}
+        <TabsContent value="monthly" className="mt-4">
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Monthly Returns Heatmap</CardTitle>
+              <CardDescription>
+                Year-over-year monthly performance visualization
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              {monthlyReturnsData.length > 0 ? (
+                <MonthlyReturnsHeatmap data={monthlyReturnsData} />
+              ) : (
+                <div className="flex items-center justify-center h-[300px] text-muted-foreground">
+                  No monthly returns data available
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
     </div>
   )
 }

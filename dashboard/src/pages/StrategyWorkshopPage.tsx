@@ -27,7 +27,20 @@ import {
   RefreshCw,
   CheckCircle2,
   Clock,
+  FileCode,
+  TrendingUp,
+  Activity,
+  Shield,
+  Zap,
 } from 'lucide-react'
+import {
+  STRATEGY_TEMPLATES,
+  CATEGORY_LABELS,
+  RISK_LEVEL_LABELS,
+  RISK_LEVEL_COLORS,
+  type StrategyTemplate,
+  type StrategyCategory,
+} from '@/data/strategyTemplates'
 
 const WEIGHTING_METHODS = [
   { value: 'equal', label: 'Equal Weight' },
@@ -46,6 +59,95 @@ const UNIVERSE_OPTIONS = [
   { value: 'top100', label: 'Top 100 by Volume' },
   { value: 'custom', label: 'Custom Selection' },
 ]
+
+const CATEGORY_ICONS: Record<StrategyCategory, React.ReactNode> = {
+  momentum: <TrendingUp className="h-5 w-5" />,
+  mean_reversion: <Activity className="h-5 w-5" />,
+  multi_factor: <Layers className="h-5 w-5" />,
+  crypto: <Zap className="h-5 w-5" />,
+}
+
+function TemplateCard({
+  template,
+  onSelect,
+  isCreating,
+}: {
+  template: StrategyTemplate
+  onSelect: (template: StrategyTemplate) => void
+  isCreating: boolean
+}) {
+  return (
+    <Card className="hover:border-primary/50 transition-colors h-full flex flex-col">
+      <CardHeader className="pb-2">
+        <div className="flex items-start justify-between">
+          <div className="flex items-center gap-2">
+            {CATEGORY_ICONS[template.category]}
+            <CardTitle className="text-base">{template.name}</CardTitle>
+          </div>
+          <Badge className={RISK_LEVEL_COLORS[template.riskLevel]}>
+            {RISK_LEVEL_LABELS[template.riskLevel]}
+          </Badge>
+        </div>
+        <Badge variant="outline" className="w-fit mt-1">
+          {CATEGORY_LABELS[template.category]}
+        </Badge>
+      </CardHeader>
+      <CardContent className="flex-1 flex flex-col">
+        <p className="text-sm text-muted-foreground mb-4 flex-1">
+          {template.description}
+        </p>
+
+        <div className="space-y-3">
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div>
+              <span className="text-muted-foreground">Factors:</span>
+              <span className="ml-1 font-medium">{template.factors.length}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Rebalance:</span>
+              <span className="ml-1 font-medium capitalize">{template.rebalanceFrequency}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Exp. Sharpe:</span>
+              <span className="ml-1 font-medium">{template.expectedSharpe.toFixed(1)}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Exp. Return:</span>
+              <span className="ml-1 font-medium">{(template.expectedAnnualReturn * 100).toFixed(0)}%</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-1">
+            {template.tags.slice(0, 3).map((tag) => (
+              <Badge key={tag} variant="secondary" className="text-xs">
+                {tag}
+              </Badge>
+            ))}
+          </div>
+
+          <Button
+            size="sm"
+            className="w-full mt-2"
+            onClick={() => onSelect(template)}
+            disabled={isCreating}
+          >
+            {isCreating ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                Creating...
+              </>
+            ) : (
+              <>
+                <FileCode className="h-4 w-4 mr-1" />
+                Use Template
+              </>
+            )}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
 
 function StrategyCard({
   strategy,
@@ -126,6 +228,32 @@ export function StrategyWorkshopPage() {
   const [universe, setUniverse] = useState('all')
   const [longOnly, setLongOnly] = useState(false)
   const [maxPositions, setMaxPositions] = useState(20)
+
+  // Template state
+  const [templateCategory, setTemplateCategory] = useState<StrategyCategory | 'all'>('all')
+  const [creatingFromTemplate, setCreatingFromTemplate] = useState(false)
+
+  const filteredTemplates = templateCategory === 'all'
+    ? STRATEGY_TEMPLATES
+    : STRATEGY_TEMPLATES.filter((t) => t.category === templateCategory)
+
+  const handleCreateFromTemplate = async (template: StrategyTemplate) => {
+    setCreatingFromTemplate(true)
+    try {
+      await createStrategy({
+        name: `${template.name} Strategy`,
+        description: template.description,
+        factor_ids: template.factors,
+        weighting_method: template.weightingMethod,
+        rebalance_frequency: template.rebalanceFrequency,
+        universe: 'all',
+        long_only: template.longOnly,
+        max_positions: template.maxPositions,
+      })
+    } finally {
+      setCreatingFromTemplate(false)
+    }
+  }
 
   const handleCreateStrategy = async () => {
     if (!strategyName.trim()) return
@@ -226,9 +354,16 @@ export function StrategyWorkshopPage() {
         </Card>
       </div>
 
-      <Tabs defaultValue="create">
+      <Tabs defaultValue="templates">
         <TabsList>
-          <TabsTrigger value="create">Create Strategy</TabsTrigger>
+          <TabsTrigger value="templates">
+            <FileCode className="h-4 w-4 mr-1" />
+            From Template
+            <Badge variant="secondary" className="ml-2">
+              {STRATEGY_TEMPLATES.length}
+            </Badge>
+          </TabsTrigger>
+          <TabsTrigger value="create">Create Custom</TabsTrigger>
           <TabsTrigger value="manage">
             Manage Strategies
             {strategies.length > 0 && (
@@ -238,6 +373,59 @@ export function StrategyWorkshopPage() {
             )}
           </TabsTrigger>
         </TabsList>
+
+        {/* From Template Tab */}
+        <TabsContent value="templates" className="space-y-6 mt-6">
+          {/* Category Filter */}
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium">Category:</span>
+            <div className="flex gap-1">
+              <Button
+                size="sm"
+                variant={templateCategory === 'all' ? 'default' : 'outline'}
+                onClick={() => setTemplateCategory('all')}
+              >
+                All
+              </Button>
+              {(Object.keys(CATEGORY_LABELS) as StrategyCategory[]).map((cat) => (
+                <Button
+                  key={cat}
+                  size="sm"
+                  variant={templateCategory === cat ? 'default' : 'outline'}
+                  onClick={() => setTemplateCategory(cat)}
+                  className="gap-1"
+                >
+                  {CATEGORY_ICONS[cat]}
+                  {CATEGORY_LABELS[cat]}
+                </Button>
+              ))}
+            </div>
+          </div>
+
+          {/* Template Grid */}
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {filteredTemplates.map((template) => (
+              <TemplateCard
+                key={template.id}
+                template={template}
+                onSelect={handleCreateFromTemplate}
+                isCreating={creatingFromTemplate}
+              />
+            ))}
+          </div>
+
+          {filteredTemplates.length === 0 && (
+            <Card>
+              <CardContent className="flex flex-col items-center justify-center py-12">
+                <Shield className="h-12 w-12 text-muted-foreground mb-4" />
+                <p className="text-lg font-medium">No templates in this category</p>
+                <p className="text-sm text-muted-foreground">
+                  Try selecting a different category
+                </p>
+              </CardContent>
+            </Card>
+          )}
+        </TabsContent>
 
         {/* Create Strategy Tab */}
         <TabsContent value="create" className="space-y-6 mt-6">

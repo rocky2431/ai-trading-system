@@ -60,6 +60,10 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "structlog>=24.1.0",
     "tenacity>=8.2.0",
+
+    # CLI
+    "typer>=0.9.0",
+    "rich>=13.0.0",
 ]
 
 [project.optional-dependencies]
@@ -89,7 +93,7 @@ qlib = [
 ]
 
 [project.scripts]
-iqfmp = "iqfmp.api.main:main"
+iqfmp = "iqfmp.cli.main:main"
 
 [project.urls]
 Homepage = "https://github.com/iqfmp/trading-system-v3"

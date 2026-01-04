@@ -13,7 +13,7 @@ Migration from pandas-based backtest_engine.py to Qlib backtest.
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -22,14 +22,12 @@ logger = logging.getLogger(__name__)
 
 # Qlib imports with fallback
 try:
-    import qlib
     from qlib.backtest import backtest_loop
     from qlib.backtest.executor import SimulatorExecutor
-    from qlib.backtest.report import Indicator
     from qlib.contrib.evaluate import risk_analysis
     from qlib.contrib.strategy import TopkDropoutStrategy
     from qlib.strategy.base import BaseStrategy
-    from qlib.utils.time import Freq
+
     QLIB_BACKTEST_AVAILABLE = True
 except ImportError:
     QLIB_BACKTEST_AVAILABLE = False
@@ -115,11 +113,11 @@ class FactorWeightStrategy:
 class QlibBacktestConfig:
     """Configuration for Qlib backtest."""
 
-    start_time: Union[str, datetime] = "2020-01-01"
-    end_time: Union[str, datetime] = "2023-12-31"
+    start_time: str | datetime = "2020-01-01"
+    end_time: str | datetime = "2023-12-31"
     benchmark: str = "SH000300"  # CSI 300 index
     account: float = 1_000_000.0  # Initial capital
-    exchange_kwargs: dict = field(default_factory=lambda: {
+    exchange_kwargs: dict[str, Any] = field(default_factory=lambda: {
         "limit_threshold": 0.095,  # Price limit threshold
         "deal_price": "close",  # Deal at close price
         "open_cost": 0.0005,  # Open commission
@@ -139,7 +137,7 @@ class QlibBacktestRunner:
     - Comparison with benchmark
     """
 
-    def __init__(self, config: Optional[QlibBacktestConfig] = None) -> None:
+    def __init__(self, config: QlibBacktestConfig | None = None) -> None:
         """Initialize backtest runner.
 
         Args:
@@ -151,8 +149,8 @@ class QlibBacktestRunner:
         self,
         signals: pd.DataFrame,
         strategy_type: str = "topk",
-        **strategy_kwargs,
-    ) -> Dict[str, Any]:
+        **strategy_kwargs: Any,
+    ) -> dict[str, Any]:
         """Run backtest with given signals.
 
         Args:
@@ -170,20 +168,20 @@ class QlibBacktestRunner:
         try:
             # Create strategy
             if strategy_type == "topk":
-                strategy_adapter = FactorSignalStrategy(
+                signal_strategy = FactorSignalStrategy(
                     signals=signals,
                     topk=strategy_kwargs.get("topk", 50),
                     n_drop=strategy_kwargs.get("n_drop", 5),
                 )
-                strategy = strategy_adapter.to_qlib_strategy()
+                strategy = signal_strategy.to_qlib_strategy()
             else:
-                strategy_adapter = FactorWeightStrategy(
+                weight_strategy = FactorWeightStrategy(
                     signals=signals,
                     leverage=strategy_kwargs.get("leverage", 1.0),
                     long_short=strategy_kwargs.get("long_short", True),
                 )
                 # Weight-based strategy needs custom implementation
-                return self._run_weight_backtest(strategy_adapter)
+                return self._run_weight_backtest(weight_strategy)
 
             # Create executor
             executor = SimulatorExecutor(
@@ -210,9 +208,9 @@ class QlibBacktestRunner:
 
     def _process_results(
         self,
-        portfolio_dict: Dict,
-        indicator_dict: Dict,
-    ) -> Dict[str, Any]:
+        portfolio_dict: dict[str, Any],
+        indicator_dict: dict[str, Any],
+    ) -> dict[str, Any]:
         """Process Qlib backtest results."""
         results = {}
 
@@ -245,39 +243,42 @@ class QlibBacktestRunner:
     def _run_weight_backtest(
         self,
         strategy: FactorWeightStrategy,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Run weight-based backtest (not using Qlib TopkStrategy)."""
-        weights = strategy.compute_weights()
-
-        # This would use a custom executor for weight-based trading
-        # For now, use pandas fallback
+        # Weight computation would be used with custom executor
+        # For now, use pandas fallback directly
+        _ = strategy.compute_weights()  # Reserved for future executor
         return self._run_pandas_fallback(strategy.signals)
 
     def _run_pandas_fallback(
         self,
         signals: pd.DataFrame,
-    ) -> Dict[str, Any]:
-        """Fallback to pandas-based backtest when Qlib unavailable."""
-        from iqfmp.core.backtest_engine import BacktestEngine, BacktestConfig
+    ) -> dict[str, Any]:
+        """Fallback to simplified pandas-based backtest when Qlib unavailable.
 
-        config = BacktestConfig(
-            initial_capital=self.config.account,
-            commission_rate=0.001,
-            slippage=0.001,
-        )
+        This is a minimal vectorized backtest that doesn't use the full
+        BacktestEngine machinery. For production use, prefer Qlib mode.
+        """
+        # Convert signals to simple long/short positions (keep as DataFrame)
+        positions: pd.DataFrame = signals.apply(np.sign)
 
-        engine = BacktestEngine(config)
-
-        # Convert signals to simple long/short positions
-        positions = np.sign(signals)
-
-        # Run backtest (simplified)
+        # Run backtest (simplified vectorized approach)
+        # Returns are position * next period price change
         returns = positions.shift(1) * signals.pct_change()
+
+        # Apply approximate trading costs
+        commission_rate = 0.001  # 0.1% per trade
+        turnover = positions.diff().abs()
+        trading_costs = turnover * commission_rate
+        returns = returns - trading_costs
+
+        # Cumulative returns
         cumulative = (1 + returns).cumprod()
 
         return {
             "returns": returns,
             "cumulative_returns": cumulative,
+            "initial_capital": self.config.account,
             "fallback": True,
             "message": "Using pandas fallback (Qlib unavailable)",
         }
@@ -291,8 +292,8 @@ class QlibBacktestRunner:
 class CryptoBacktestConfig:
     """Configuration for crypto-specific backtest."""
 
-    start_time: Union[str, datetime] = "2023-01-01"
-    end_time: Union[str, datetime] = "2024-12-31"
+    start_time: str | datetime = "2023-01-01"
+    end_time: str | datetime = "2024-12-31"
     initial_capital: float = 100_000.0
     leverage: float = 1.0
     maker_fee: float = 0.0002  # Maker fee
@@ -312,7 +313,7 @@ class CryptoBacktestAdapter:
     - Liquidation logic
     """
 
-    def __init__(self, config: Optional[CryptoBacktestConfig] = None) -> None:
+    def __init__(self, config: CryptoBacktestConfig | None = None) -> None:
         self.config = config or CryptoBacktestConfig()
         self._qlib_runner = QlibBacktestRunner(
             QlibBacktestConfig(
@@ -332,9 +333,9 @@ class CryptoBacktestAdapter:
     def run(
         self,
         signals: pd.DataFrame,
-        funding_rates: Optional[pd.DataFrame] = None,
-        **kwargs,
-    ) -> Dict[str, Any]:
+        funding_rates: pd.DataFrame | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
         """Run crypto backtest.
 
         Args:
@@ -371,7 +372,7 @@ class CryptoBacktestAdapter:
         cost = positions * aligned_rates
         return cost
 
-    def _apply_leverage(self, results: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_leverage(self, results: dict[str, Any]) -> dict[str, Any]:
         """Apply leverage to results."""
         leverage = self.config.leverage
 
@@ -392,8 +393,8 @@ class CryptoBacktestAdapter:
 
 def create_backtest_runner(
     mode: str = "auto",
-    config: Optional[Union[QlibBacktestConfig, CryptoBacktestConfig]] = None,
-) -> Union[QlibBacktestRunner, CryptoBacktestAdapter]:
+    config: QlibBacktestConfig | CryptoBacktestConfig | None = None,
+) -> QlibBacktestRunner | CryptoBacktestAdapter:
     """Create appropriate backtest runner.
 
     Args:
@@ -404,21 +405,25 @@ def create_backtest_runner(
         Backtest runner instance
     """
     if mode == "crypto":
-        return CryptoBacktestAdapter(config)
+        crypto_config = config if isinstance(config, CryptoBacktestConfig) else None
+        return CryptoBacktestAdapter(crypto_config)
     elif mode == "qlib":
-        return QlibBacktestRunner(config)
+        qlib_config = config if isinstance(config, QlibBacktestConfig) else None
+        return QlibBacktestRunner(qlib_config)
     else:
         # Auto-detect based on config
         if isinstance(config, CryptoBacktestConfig):
             return CryptoBacktestAdapter(config)
-        return QlibBacktestRunner(config)
+        # config is QlibBacktestConfig or None here
+        qlib_config = config if isinstance(config, QlibBacktestConfig) else None
+        return QlibBacktestRunner(qlib_config)
 
 
 def run_factor_backtest(
     signals: pd.DataFrame,
-    config: Optional[Dict[str, Any]] = None,
+    config: dict[str, Any] | None = None,
     mode: str = "auto",
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Convenience function to run factor backtest.
 
     Args:
@@ -429,13 +434,82 @@ def run_factor_backtest(
     Returns:
         Backtest results
     """
+    bt_config: QlibBacktestConfig | CryptoBacktestConfig | None = None
     if config:
         if mode == "crypto":
             bt_config = CryptoBacktestConfig(**config)
         else:
             bt_config = QlibBacktestConfig(**config)
-    else:
-        bt_config = None
 
     runner = create_backtest_runner(mode, bt_config)
     return runner.run(signals)
+
+
+# =============================================================================
+# Re-exports from unified_backtest module
+# =============================================================================
+
+# Import and re-export unified backtest components for backward compatibility
+# This allows existing code to continue using qlib_backtest_adapter while
+# transparently gaining access to the enhanced unified backtest system.
+
+try:
+    from iqfmp.core.unified_backtest import BacktestMode as BacktestMode
+    from iqfmp.core.unified_backtest import (
+        CryptoNestedBacktest as CryptoNestedBacktest,
+    )
+    from iqfmp.core.unified_backtest import (
+        ExecutionFrequency as ExecutionFrequency,
+    )
+    from iqfmp.core.unified_backtest import InnerStrategyType as InnerStrategyType
+    from iqfmp.core.unified_backtest import (
+        NestedExecutionConfig as NestedExecutionConfig,
+    )
+    from iqfmp.core.unified_backtest import (
+        NestedExecutionLevel as NestedExecutionLevel,
+    )
+    from iqfmp.core.unified_backtest import (
+        UnifiedBacktestParams as UnifiedBacktestParams,
+    )
+    from iqfmp.core.unified_backtest import (
+        UnifiedBacktestRunner as UnifiedBacktestRunner,
+    )
+    from iqfmp.core.unified_backtest import (
+        create_crypto_nested_config as create_crypto_nested_config,
+    )
+    from iqfmp.core.unified_backtest import (
+        create_hft_nested_config as create_hft_nested_config,
+    )
+    from iqfmp.core.unified_backtest import (
+        create_standard_nested_config as create_standard_nested_config,
+    )
+    from iqfmp.core.unified_backtest import run_backtest as run_backtest
+
+    # Re-export create_backtest_runner with unified fallback
+    _original_create_backtest_runner = create_backtest_runner
+
+    def create_backtest_runner(  # type: ignore[misc]
+        mode: str = "auto",
+        config: QlibBacktestConfig | CryptoBacktestConfig | None = None,
+    ) -> QlibBacktestRunner | CryptoBacktestAdapter | UnifiedBacktestRunner:
+        """Create appropriate backtest runner.
+
+        Enhanced to support unified backtest modes.
+
+        Args:
+            mode: "qlib", "crypto", "nested", "unified", or "auto"
+            config: Backtest configuration
+
+        Returns:
+            Backtest runner instance
+        """
+        if mode == "nested" or mode == "unified":
+            return UnifiedBacktestRunner()
+        return _original_create_backtest_runner(mode, config)
+
+    UNIFIED_BACKTEST_AVAILABLE = True
+    logger.info("Unified backtest framework loaded successfully")
+
+except ImportError as e:
+    UNIFIED_BACKTEST_AVAILABLE = False
+    logger.debug(f"Unified backtest framework not available: {e}")

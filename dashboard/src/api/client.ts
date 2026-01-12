@@ -16,22 +16,24 @@ const safeStorage = {
   get(key: string): string | null {
     try {
       return localStorage.getItem(key)
-    } catch {
+    } catch (err) {
+      console.warn('[Storage] Failed to read key:', key, err)
       return null
     }
   },
   set(key: string, value: string): void {
     try {
       localStorage.setItem(key, value)
-    } catch {
-      // Silently fail - localStorage unavailable
+    } catch (err) {
+      console.error('[Storage] Failed to write key:', key, err)
+      // Storage unavailable - session will not persist
     }
   },
   remove(key: string): void {
     try {
       localStorage.removeItem(key)
-    } catch {
-      // Silently fail - localStorage unavailable
+    } catch (err) {
+      console.warn('[Storage] Failed to remove key:', key, err)
     }
   },
 }
@@ -84,7 +86,8 @@ async function tryRefreshToken(): Promise<boolean> {
         return true
       }
       return false
-    } catch {
+    } catch (err) {
+      console.error('[Auth] Token refresh failed:', err)
       return false
     } finally {
       refreshPromise = null
@@ -141,7 +144,8 @@ async function request<T>(endpoint: string, options: RequestOptions = {}): Promi
     let errorData
     try {
       errorData = await response.json()
-    } catch {
+    } catch (parseErr) {
+      console.warn('[API] Failed to parse error response:', response.status, parseErr)
       errorData = null
     }
     throw new ApiError(response.status, response.statusText, errorData)
@@ -168,6 +172,12 @@ export const api = {
   put: <T>(endpoint: string, data?: unknown) =>
     request<T>(endpoint, {
       method: 'PUT',
+      body: data ? JSON.stringify(data) : undefined,
+    }),
+
+  patch: <T>(endpoint: string, data?: unknown) =>
+    request<T>(endpoint, {
+      method: 'PATCH',
       body: data ? JSON.stringify(data) : undefined,
     }),
 

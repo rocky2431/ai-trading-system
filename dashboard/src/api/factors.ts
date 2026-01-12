@@ -12,6 +12,7 @@ export interface FactorMetricsResponse {
   sharpe: number
   max_drawdown: number
   turnover: number
+  win_rate: number | null  // Win rate from backtest (0.0-1.0), null if not available
   ic_by_split: Record<string, number>
   sharpe_by_split: Record<string, number>
 }
@@ -176,6 +177,9 @@ export const factorsApi = {
   evaluate: (factorId: string, data: {
     splits?: string[]
     market_splits?: string[]
+    frequency_splits?: string[]
+    symbol?: string
+    timeframe?: string
   }) => api.post<FactorEvaluateResponse>(`/factors/${factorId}/evaluate`, data),
 
   /**

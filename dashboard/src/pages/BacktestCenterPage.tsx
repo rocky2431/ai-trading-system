@@ -18,8 +18,6 @@ import {
   BarChart3,
   TrendingUp,
   TrendingDown,
-  Calendar,
-  DollarSign,
   Loader2,
   RefreshCw,
   Eye,
@@ -32,8 +30,9 @@ import {
   LineChart,
   Grid3X3,
   FileText,
+  Settings2,
 } from 'lucide-react'
-import { EquityCurveChart, MonthlyReturnsHeatmap } from '@/components/backtest'
+import { EquityCurveChart, MonthlyReturnsHeatmap, OptimizationPanel } from '@/components/backtest'
 import type { EquityDataPoint } from '@/components/backtest'
 
 function StatusBadge({ status }: { status: BacktestResponse['status'] }) {
@@ -159,6 +158,7 @@ function BacktestCard({
 
 function BacktestDetailView({ backtestId, onClose }: { backtestId: string; onClose: () => void }) {
   const { detail, loading } = useBacktestDetail(backtestId)
+  const [detailTab, setDetailTab] = useState('overview')
 
   if (loading || !detail) {
     return (
@@ -229,7 +229,7 @@ function BacktestDetailView({ backtestId, onClose }: { backtestId: string; onClo
       )}
 
       {/* Tabbed Content */}
-      <Tabs defaultValue="overview" className="w-full">
+      <Tabs value={detailTab} onValueChange={setDetailTab} className="w-full">
         <TabsList className="grid w-full grid-cols-3">
           <TabsTrigger value="overview" className="gap-2">
             <FileText className="h-4 w-4" />
@@ -359,6 +359,9 @@ export function BacktestCenterPage() {
   // Detail view
   const [viewingBacktestId, setViewingBacktestId] = useState<string | null>(null)
 
+  // Tab state
+  const [activeTab, setActiveTab] = useState('run')
+
   const handleRunBacktest = async () => {
     if (!selectedStrategy) return
 
@@ -446,7 +449,7 @@ export function BacktestCenterPage() {
         </div>
       )}
 
-      <Tabs defaultValue="run">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="run">Run Backtest</TabsTrigger>
           <TabsTrigger value="active">
@@ -456,6 +459,10 @@ export function BacktestCenterPage() {
             )}
           </TabsTrigger>
           <TabsTrigger value="results">Results</TabsTrigger>
+          <TabsTrigger value="optimization">
+            <Settings2 className="h-4 w-4 mr-1" />
+            Optimization
+          </TabsTrigger>
         </TabsList>
 
         {/* Run Backtest Tab */}
@@ -596,6 +603,11 @@ export function BacktestCenterPage() {
               ))}
             </div>
           )}
+        </TabsContent>
+
+        {/* Optimization Tab */}
+        <TabsContent value="optimization" className="mt-6">
+          <OptimizationPanel />
         </TabsContent>
       </Tabs>
     </div>

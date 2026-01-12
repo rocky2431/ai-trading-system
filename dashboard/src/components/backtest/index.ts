@@ -13,3 +13,5 @@ export {
   type MonthlyReturn,
   type MonthlyReturnsHeatmapProps,
 } from "./MonthlyReturnsHeatmap";
+
+export { OptimizationPanel } from "./OptimizationPanel";

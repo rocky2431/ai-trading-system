@@ -16,6 +16,17 @@ export interface TrialResponse {
   win_rate: number
   created_at: string
   metadata: Record<string, unknown> | null
+  // Optional fields for enhanced data (P1 expansion)
+  duration_ms?: number  // Evaluation duration in milliseconds
+  walk_forward?: WalkForwardResult  // Walk-forward validation results
+}
+
+// Walk-forward validation result from backend
+export interface WalkForwardResult {
+  avg_oos_ic: number | null
+  ic_degradation: number | null
+  ic_consistency: number | null
+  passes_robustness: boolean | null
 }
 
 export interface LedgerListResponse {

@@ -3,7 +3,7 @@
  * 展示因子库列表、筛选、搜索和详情
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -36,13 +36,13 @@ const familyOptions = [
   { value: 'fundamental', label: 'Fundamental' },
 ]
 
+// Status options aligned with backend: candidate, core, rejected, redundant
 const statusOptions = [
   { value: 'all', label: 'All Status' },
-  { value: 'approved', label: 'Approved' },
-  { value: 'evaluating', label: 'Evaluating' },
-  { value: 'draft', label: 'Draft' },
+  { value: 'candidate', label: 'Candidate' },
+  { value: 'core', label: 'Core' },
   { value: 'rejected', label: 'Rejected' },
-  { value: 'archived', label: 'Archived' },
+  { value: 'redundant', label: 'Redundant' },
 ]
 
 const sortOptions = [
@@ -54,9 +54,36 @@ const sortOptions = [
 ]
 
 export function FactorExplorerPage() {
-  const { factors, filter, setFilter, loading, stats } = useFactors()
+  const { factors, filter, setFilter, loading, error, stats, evaluateFactor, refresh } = useFactors()
   const [selectedFactor, setSelectedFactor] = useState<Factor | null>(null)
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
+  const [isEvaluating, setIsEvaluating] = useState(false)
+
+  const [evaluationError, setEvaluationError] = useState<string | null>(null)
+
+  // Sync selectedFactor with factors when factors array updates (fixes stale closure)
+  useEffect(() => {
+    if (selectedFactor) {
+      const updated = factors.find(f => f.id === selectedFactor.id)
+      if (updated && updated !== selectedFactor) {
+        setSelectedFactor(updated)
+      }
+    }
+  }, [factors, selectedFactor])
+
+  const handleEvaluate = async (factorId: string, options: { symbol?: string; timeframe?: string }) => {
+    setIsEvaluating(true)
+    setEvaluationError(null)
+    try {
+      await evaluateFactor(factorId, options)
+      // selectedFactor will be updated by useEffect when factors refresh
+    } catch (err) {
+      console.error('[FactorExplorer] Evaluation failed:', err)
+      setEvaluationError(err instanceof Error ? err.message : 'Factor evaluation failed')
+    } finally {
+      setIsEvaluating(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -64,6 +91,18 @@ export function FactorExplorerPage() {
         <div className="flex flex-col items-center gap-4">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
           <p className="text-muted-foreground">Loading factors...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="flex items-center justify-center h-[60vh]">
+        <div className="flex flex-col items-center gap-4">
+          <XCircle className="h-8 w-8 text-destructive" />
+          <p className="text-muted-foreground">Failed to load factors: {error.message}</p>
+          <Button onClick={() => refresh()}>Retry</Button>
         </div>
       </div>
     )
@@ -99,35 +138,35 @@ export function FactorExplorerPage() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Approved</CardTitle>
+            <CardTitle className="text-sm font-medium">Core</CardTitle>
             <CheckCircle className="h-4 w-4 text-emerald-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-emerald-500">
-              {stats.byStatus.approved}
+              {stats.byStatus.core}
             </div>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Evaluating</CardTitle>
+            <CardTitle className="text-sm font-medium">Candidate</CardTitle>
             <Clock className="h-4 w-4 text-amber-500" />
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold text-amber-500">
-              {stats.byStatus.evaluating}
+              {stats.byStatus.candidate}
             </div>
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle className="text-sm font-medium">Draft</CardTitle>
+            <CardTitle className="text-sm font-medium">Rejected</CardTitle>
             <XCircle className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
-            <div className="text-2xl font-bold">{stats.byStatus.draft}</div>
+            <div className="text-2xl font-bold">{stats.byStatus.rejected}</div>
           </CardContent>
         </Card>
       </div>
@@ -303,6 +342,8 @@ export function FactorExplorerPage() {
             <FactorDetailPanel
               factor={selectedFactor}
               onClose={() => setSelectedFactor(null)}
+              onEvaluate={handleEvaluate}
+              isEvaluating={isEvaluating}
             />
           </div>
         )}

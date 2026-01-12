@@ -32,6 +32,7 @@ class MetricsResponse(BaseModel):
     sharpe: float
     max_drawdown: float
     turnover: float
+    win_rate: Optional[float] = None  # Win rate from backtest (0.0-1.0)
     ic_by_split: dict[str, float] = Field(default_factory=dict)
     sharpe_by_split: dict[str, float] = Field(default_factory=dict)
 
@@ -256,6 +257,9 @@ class MiningTaskCreateRequest(BaseModel):
     )
 
 
+MiningTaskStatusType = Literal["pending", "running", "completed", "failed", "cancelled"]
+
+
 class MiningTaskStatus(BaseModel):
     """Mining task status response."""
 
@@ -267,7 +271,7 @@ class MiningTaskStatus(BaseModel):
     generated_count: int
     passed_count: int
     failed_count: int
-    status: str  # pending, running, completed, failed, cancelled
+    status: MiningTaskStatusType
     progress: float  # 0-100
     error_message: Optional[str] = None
     created_at: datetime

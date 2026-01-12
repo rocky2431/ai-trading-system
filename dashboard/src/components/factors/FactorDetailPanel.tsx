@@ -3,17 +3,37 @@
  * 展示因子的完整信息、代码和评估指标
  */
 
+import { useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
+import { Select } from '@/components/ui/select'
+import { Label } from '@/components/ui/label'
 import type { Factor, FactorFamily, FactorStatus } from '@/types/factor'
-import { X, Code, Activity, Clock, User, Play } from 'lucide-react'
+import { X, Code, Activity, Clock, User, Play, Loader2, ChevronDown, ChevronUp } from 'lucide-react'
 
 interface FactorDetailPanelProps {
   factor: Factor
   onClose: () => void
+  onEvaluate?: (factorId: string, options: { symbol?: string; timeframe?: string }) => Promise<void>
+  isEvaluating?: boolean
 }
+
+const SYMBOL_OPTIONS = [
+  { value: 'BTC/USDT', label: 'BTC/USDT' },
+  { value: 'ETH/USDT', label: 'ETH/USDT' },
+  { value: 'SOL/USDT', label: 'SOL/USDT' },
+  { value: 'BNB/USDT', label: 'BNB/USDT' },
+  { value: 'XRP/USDT', label: 'XRP/USDT' },
+]
+
+const TIMEFRAME_OPTIONS = [
+  { value: '1h', label: '1 Hour' },
+  { value: '4h', label: '4 Hours' },
+  { value: '1d', label: '1 Day' },
+  { value: '1w', label: '1 Week' },
+]
 
 const familyConfig: Record<FactorFamily, { label: string; className: string }> = {
   momentum: { label: 'Momentum', className: 'bg-blue-500/10 text-blue-500' },
@@ -54,10 +74,24 @@ function getMetricColor(value: number, thresholds: { good: number; warning: numb
   }
 }
 
-export function FactorDetailPanel({ factor, onClose }: FactorDetailPanelProps) {
+export function FactorDetailPanel({ factor, onClose, onEvaluate, isEvaluating }: FactorDetailPanelProps) {
   const family = familyConfig[factor.family]
   const status = statusConfig[factor.status]
   const metrics = factor.latestMetrics
+
+  // Evaluation options state
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [evalSymbol, setEvalSymbol] = useState('ETH/USDT')
+  const [evalTimeframe, setEvalTimeframe] = useState('1d')
+
+  const handleEvaluate = async () => {
+    if (onEvaluate) {
+      await onEvaluate(factor.id, {
+        symbol: evalSymbol,
+        timeframe: evalTimeframe,
+      })
+    }
+  }
 
   return (
     <Card className="h-full flex flex-col">
@@ -150,11 +184,11 @@ export function FactorDetailPanel({ factor, onClose }: FactorDetailPanelProps) {
               <div className="space-y-1">
                 <div className="flex justify-between text-sm">
                   <span className="text-muted-foreground">Win Rate</span>
-                  <span className={`font-medium ${getMetricColor(metrics.winRate, { good: 55, warning: 50 })}`}>
-                    {metrics.winRate.toFixed(1)}%
+                  <span className={`font-medium ${metrics.winRate !== null ? getMetricColor(metrics.winRate, { good: 55, warning: 50 }) : 'text-muted-foreground'}`}>
+                    {metrics.winRate !== null ? `${metrics.winRate.toFixed(1)}%` : 'N/A'}
                   </span>
                 </div>
-                <Progress value={metrics.winRate} className="h-1.5" />
+                <Progress value={metrics.winRate ?? 0} className="h-1.5" />
               </div>
 
               {/* Stability */}
@@ -192,10 +226,7 @@ export function FactorDetailPanel({ factor, onClose }: FactorDetailPanelProps) {
           <div className="text-center py-6 text-muted-foreground">
             <Activity className="h-8 w-8 mx-auto mb-2 opacity-50" />
             <p>No evaluation data available</p>
-            <Button variant="outline" size="sm" className="mt-2">
-              <Play className="h-4 w-4 mr-2" />
-              Run Evaluation
-            </Button>
+            <p className="text-xs mt-1">Run an evaluation to see factor metrics</p>
           </div>
         )}
 
@@ -225,14 +256,63 @@ export function FactorDetailPanel({ factor, onClose }: FactorDetailPanelProps) {
           </div>
         </div>
 
+        {/* Evaluation Options */}
+        {onEvaluate && (
+          <div className="border-t pt-4 space-y-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="w-full justify-between"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+            >
+              <span className="text-sm font-medium">Evaluation Options</span>
+              {showAdvanced ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            </Button>
+
+            {showAdvanced && (
+              <div className="space-y-3 px-1">
+                <div className="space-y-1">
+                  <Label className="text-xs">Symbol</Label>
+                  <Select
+                    options={SYMBOL_OPTIONS}
+                    value={evalSymbol}
+                    onChange={(e) => setEvalSymbol(e.target.value)}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs">Timeframe</Label>
+                  <Select
+                    options={TIMEFRAME_OPTIONS}
+                    value={evalTimeframe}
+                    onChange={(e) => setEvalTimeframe(e.target.value)}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Actions */}
         <div className="flex gap-2 pt-4 border-t">
           <Button variant="outline" className="flex-1">
             Edit Factor
           </Button>
-          <Button className="flex-1">
-            <Play className="h-4 w-4 mr-2" />
-            Run Evaluation
+          <Button
+            className="flex-1"
+            onClick={handleEvaluate}
+            disabled={isEvaluating || !onEvaluate}
+          >
+            {isEvaluating ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Evaluating...
+              </>
+            ) : (
+              <>
+                <Play className="h-4 w-4 mr-2" />
+                Run Evaluation
+              </>
+            )}
           </Button>
         </div>
       </CardContent>

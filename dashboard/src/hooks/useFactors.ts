@@ -9,9 +9,10 @@ import type { FactorResponse } from '@/api'
 import type { Factor, FactorFilter, FactorFamily, FactorStatus } from '@/types/factor'
 
 /**
- * Calculate stability score from IC values across data splits.
- * Stability = (average IC across splits) / (overall IC mean)
- * Higher values indicate more consistent factor performance across train/valid/test.
+ * Calculate split-to-mean IC ratio from IC values across data splits.
+ * Ratio = (average IC across splits) / (overall IC mean)
+ * Values close to 1.0 indicate that split ICs are consistent with overall mean.
+ * NOTE: This is NOT a true stability metric (would require std/mean analysis).
  * Returns 0.7 as default when data is unavailable.
  */
 function calculateStability(metrics: FactorResponse['metrics']): number {
@@ -44,7 +45,9 @@ function apiToFactor(response: FactorResponse): Factor {
       icir: response.metrics.ir,
       sharpe: response.metrics.sharpe,
       maxDrawdown: response.metrics.max_drawdown * 100,
-      winRate: 50 + response.metrics.ir * 5,
+      // Use real win_rate from API, convert to percentage (0-100)
+      // If null, display as null to indicate data unavailable
+      winRate: response.metrics.win_rate !== null ? response.metrics.win_rate * 100 : null,
       turnover: response.metrics.turnover * 100,
       stability: calculateStability(response.metrics),
     } : null,
@@ -118,10 +121,19 @@ export function useFactors(initialFilter?: FactorFilter) {
   }, [])
 
   // Evaluate factor performance
-  const evaluateFactor = useCallback(async (factorId: string) => {
+  const evaluateFactor = useCallback(async (
+    factorId: string,
+    options?: {
+      symbol?: string
+      timeframe?: string
+      splits?: string[]
+    }
+  ) => {
     try {
       const response = await factorsApi.evaluate(factorId, {
-        splits: ['train', 'valid', 'test'],
+        splits: options?.splits ?? ['train', 'valid', 'test'],
+        symbol: options?.symbol,
+        timeframe: options?.timeframe,
       })
       // Reload factor list to get updated metrics
       await loadFactors()

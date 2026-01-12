@@ -97,13 +97,24 @@ class StrategyService:
     ) -> dict:
         """Run a backtest for a strategy.
 
-        Note: This is a simulated backtest. Real implementation would
-        execute the strategy code against historical data.
+        WARNING: This is currently a SIMULATED backtest using deterministic
+        random values. The results are NOT real backtest metrics.
+
+        IMPLEMENTATION NOTE: Integration with UnifiedBacktestRunner pending.
+        Requirements for real backtest:
+        1. Factor signal data retrieval from factor_ids
+        2. Price data retrieval for the date range
+        3. UnifiedBacktestRunner execution (see core/unified_backtest.py)
+
+        The simulated results use deterministic seeding so the same
+        strategy + date range always produces consistent (but fake) results.
         """
         import random
+        # Deterministic seed for consistent results per strategy/date
         random.seed(hash(strategy_id + str(start_date)))
 
-        # Simulated results
+        # SIMULATED RESULTS - NOT REAL BACKTEST DATA
+        # These values are generated randomly but deterministically
         total_return = random.uniform(-0.2, 0.5)
         sharpe_ratio = random.uniform(0.5, 2.5)
         max_drawdown = random.uniform(0.05, 0.3)
@@ -127,6 +138,9 @@ class StrategyService:
                 "initial_capital": initial_capital,
                 "commission": commission,
                 "final_capital": initial_capital * (1 + total_return),
+                # CRITICAL: Flag to indicate this is simulated data
+                "is_simulated": True,
+                "simulation_note": "Results are deterministically generated, not from real backtest execution.",
             },
         )
 

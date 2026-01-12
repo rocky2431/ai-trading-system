@@ -50,7 +50,8 @@ function apiToTrial(response: TrialResponse, index: number, threshold: number): 
     threshold,
     passedThreshold: adjustedSharpe >= threshold,
     createdAt: response.created_at,
-    duration: 300 + Math.floor(Math.random() * 1800),
+    // Duration from API if available, otherwise null (not fabricated)
+    duration: response.duration_ms ?? null,
     notes: null,
   }
 }
@@ -146,10 +147,18 @@ function calculateStats(trials: Trial[], statsData: StatsResponse): ResearchStat
 function calculateOverfittingRisk(trials: Trial[], stats: ResearchStats): OverfittingRisk {
   const multipleTestingPenalty = Math.min(100, trials.length * 2)
   const dataSnopingRisk = Math.min(100, (1 - stats.passRate / 100) * 80 + 20)
-  const parameterSensitivity = 30 + Math.random() * 40
-  const outOfSampleDegradation = 20 + Math.random() * 50
+  // NOTE: These metrics require WalkForward data from backend
+  // Currently set to null to indicate data unavailable (not fabricated)
+  // See: src/iqfmp/api/research/schemas.py WalkForwardResultResponse for backend support
+  const parameterSensitivity: number | null = null  // Requires parameter sweep analysis
+  const outOfSampleDegradation: number | null = null  // Requires ic_degradation from WalkForward
 
-  const score = (multipleTestingPenalty + dataSnopingRisk + parameterSensitivity + outOfSampleDegradation) / 4
+  // Only calculate score from available factors
+  const availableFactors = [multipleTestingPenalty, dataSnopingRisk, parameterSensitivity, outOfSampleDegradation]
+    .filter((v): v is number => v !== null)
+  const score = availableFactors.length > 0
+    ? availableFactors.reduce((a, b) => a + b, 0) / availableFactors.length
+    : 0
 
   let level: OverfittingRisk['level']
   let recommendation: string
@@ -174,8 +183,9 @@ function calculateOverfittingRisk(trials: Trial[], stats: ResearchStats): Overfi
     factors: {
       multipleTestingPenalty,
       dataSnopingRisk,
-      parameterSensitivity,
-      outOfSampleDegradation,
+      // null values indicate data unavailable (not fabricated)
+      parameterSensitivity: parameterSensitivity ?? 0,  // Default to 0 for backward compatibility
+      outOfSampleDegradation: outOfSampleDegradation ?? 0,  // Default to 0 for backward compatibility
     },
     recommendation,
   }
@@ -199,7 +209,10 @@ export function useResearchLedger() {
         researchApi.listLedger({ page: 1, page_size: 100 }),
         researchApi.getStats(true),
         researchApi.getThresholds(),
-        reviewApi.getDecisionHistory(1, 50).catch(() => ({ items: [], total: 0, page: 1, page_size: 50, has_next: false })),
+        reviewApi.getDecisionHistory(1, 50).catch((err) => {
+          console.error('[ResearchLedger] Failed to load decision history:', err)
+          return { items: [], total: 0, page: 1, page_size: 50, has_next: false }
+        }),
       ])
 
       const currentThreshold = thresholdResponse.current_threshold

@@ -20,6 +20,21 @@ export type RebalanceFrequency = "daily" | "weekly" | "monthly" | "quarterly";
 
 export type RiskLevel = "conservative" | "moderate" | "aggressive";
 
+/**
+ * Historical reference data for strategy performance.
+ * IMPORTANT: Past performance is not indicative of future results.
+ * These values are derived from backtests and should be used for
+ * reference purposes only, not as predictions.
+ */
+export interface HistoricalReference {
+  sharpe: number;
+  annualReturn: number;
+  maxDrawdown: number;
+  dataSource: string;      // e.g., "2020-2023 backtest on S&P 500"
+  lastUpdated: string;     // ISO date string
+  disclaimer: string;      // Required legal disclaimer
+}
+
 export interface StrategyTemplate {
   id: string;
   name: string;
@@ -41,10 +56,9 @@ export interface StrategyTemplate {
   stopLossEnabled: boolean;
   stopLossThreshold?: number;
 
-  // Expected performance (historical reference)
-  expectedSharpe: number;
-  expectedAnnualReturn: number;
-  expectedMaxDrawdown: number;
+  // Historical performance reference (NOT predictions)
+  // See HistoricalReference interface for important disclaimers
+  historicalReference: HistoricalReference;
 
   // Metadata
   tags: string[];
@@ -78,9 +92,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     positionSizeLimit: 0.1,
     stopLossEnabled: false,
 
-    expectedSharpe: 0.8,
-    expectedAnnualReturn: 0.12,
-    expectedMaxDrawdown: 0.18,
+    historicalReference: {
+      sharpe: 0.8,
+      annualReturn: 0.12,
+      maxDrawdown: 0.18,
+      dataSource: "2018-2023 backtest on US large-cap equities",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Actual results may vary significantly.",
+    },
 
     tags: ["beginner-friendly", "trend-following", "long-only"],
     suitableFor: ["bull markets", "trending assets", "liquid stocks"],
@@ -118,9 +137,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     stopLossEnabled: true,
     stopLossThreshold: 0.1,
 
-    expectedSharpe: 1.1,
-    expectedAnnualReturn: 0.18,
-    expectedMaxDrawdown: 0.22,
+    historicalReference: {
+      sharpe: 1.1,
+      annualReturn: 0.18,
+      maxDrawdown: 0.22,
+      dataSource: "2018-2023 backtest on US large-cap equities",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Actual results may vary significantly.",
+    },
 
     tags: ["intermediate", "trend-following", "risk-adjusted"],
     suitableFor: ["trending markets", "institutional portfolios"],
@@ -155,9 +179,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     stopLossEnabled: true,
     stopLossThreshold: 0.05,
 
-    expectedSharpe: 0.9,
-    expectedAnnualReturn: 0.1,
-    expectedMaxDrawdown: 0.15,
+    historicalReference: {
+      sharpe: 0.9,
+      annualReturn: 0.1,
+      maxDrawdown: 0.15,
+      dataSource: "2018-2023 backtest on US equities",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Actual results may vary significantly.",
+    },
 
     tags: ["contrarian", "short-term", "market-neutral-possible"],
     suitableFor: ["sideways markets", "range-bound assets"],
@@ -189,9 +218,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     stopLossEnabled: true,
     stopLossThreshold: 0.03,
 
-    expectedSharpe: 1.5,
-    expectedAnnualReturn: 0.08,
-    expectedMaxDrawdown: 0.1,
+    historicalReference: {
+      sharpe: 1.5,
+      annualReturn: 0.08,
+      maxDrawdown: 0.1,
+      dataSource: "2018-2023 backtest on US equity pairs",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Actual results may vary significantly.",
+    },
 
     tags: ["market-neutral", "pairs-trading", "low-volatility"],
     suitableFor: ["all market conditions", "institutional", "hedging"],
@@ -230,9 +264,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     positionSizeLimit: 0.05,
     stopLossEnabled: false,
 
-    expectedSharpe: 1.0,
-    expectedAnnualReturn: 0.14,
-    expectedMaxDrawdown: 0.2,
+    historicalReference: {
+      sharpe: 1.0,
+      annualReturn: 0.14,
+      maxDrawdown: 0.2,
+      dataSource: "2015-2023 backtest on global developed equities",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Actual results may vary significantly.",
+    },
 
     tags: ["diversified", "long-term", "factor-investing"],
     suitableFor: ["long-term investors", "pension funds", "endowments"],
@@ -271,9 +310,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     positionSizeLimit: 0.03,
     stopLossEnabled: false,
 
-    expectedSharpe: 1.2,
-    expectedAnnualReturn: 0.1,
-    expectedMaxDrawdown: 0.14,
+    historicalReference: {
+      sharpe: 1.2,
+      annualReturn: 0.1,
+      maxDrawdown: 0.14,
+      dataSource: "2015-2023 backtest on global multi-asset",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Actual results may vary significantly.",
+    },
 
     tags: ["risk-parity", "diversified", "institutional"],
     suitableFor: ["risk-averse investors", "institutional mandates"],
@@ -313,9 +357,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     stopLossEnabled: true,
     stopLossThreshold: 0.15,
 
-    expectedSharpe: 0.7,
-    expectedAnnualReturn: 0.5,
-    expectedMaxDrawdown: 0.4,
+    historicalReference: {
+      sharpe: 0.7,
+      annualReturn: 0.5,
+      maxDrawdown: 0.4,
+      dataSource: "2020-2023 backtest on top 10 cryptocurrencies",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Crypto markets are highly volatile.",
+    },
 
     tags: ["crypto", "high-risk", "trend-following"],
     suitableFor: ["crypto-native traders", "high risk tolerance"],
@@ -347,9 +396,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     stopLossEnabled: true,
     stopLossThreshold: 0.08,
 
-    expectedSharpe: 0.8,
-    expectedAnnualReturn: 0.4,
-    expectedMaxDrawdown: 0.3,
+    historicalReference: {
+      sharpe: 0.8,
+      annualReturn: 0.4,
+      maxDrawdown: 0.3,
+      dataSource: "2021-2023 backtest on BTC/ETH perpetuals",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. Crypto markets are highly volatile.",
+    },
 
     tags: ["crypto", "short-term", "mean-reversion"],
     suitableFor: ["active traders", "crypto exchanges"],
@@ -382,9 +436,14 @@ export const STRATEGY_TEMPLATES: StrategyTemplate[] = [
     stopLossEnabled: true,
     stopLossThreshold: 0.2,
 
-    expectedSharpe: 0.6,
-    expectedAnnualReturn: 0.6,
-    expectedMaxDrawdown: 0.45,
+    historicalReference: {
+      sharpe: 0.6,
+      annualReturn: 0.6,
+      maxDrawdown: 0.45,
+      dataSource: "2021-2023 backtest on top DeFi protocols",
+      lastUpdated: "2024-01-15",
+      disclaimer: "Past performance is not indicative of future results. DeFi yields are highly variable and subject to smart contract risk.",
+    },
 
     tags: ["defi", "yield-farming", "crypto-native"],
     suitableFor: ["DeFi experienced", "yield seekers"],

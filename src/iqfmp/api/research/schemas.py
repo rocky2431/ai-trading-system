@@ -6,6 +6,15 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+class WalkForwardResultResponse(BaseModel):
+    """Walk-forward validation result for overfitting detection."""
+
+    avg_oos_ic: Optional[float] = None  # Average out-of-sample IC
+    ic_degradation: Optional[float] = None  # OOS degradation ratio
+    ic_consistency: Optional[float] = None  # IC stability score (0-1)
+    passes_robustness: Optional[bool] = None  # Passes robustness test
+
+
 class TrialResponse(BaseModel):
     """Trial record response schema."""
 
@@ -19,6 +28,9 @@ class TrialResponse(BaseModel):
     win_rate: Optional[float] = None
     created_at: datetime
     metadata: dict = Field(default_factory=dict)
+    # Enhanced fields for P1 data integrity
+    duration_ms: Optional[int] = None  # Evaluation duration in milliseconds
+    walk_forward: Optional[WalkForwardResultResponse] = None  # Walk-forward validation
 
 
 class LedgerListResponse(BaseModel):

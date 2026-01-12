@@ -22,7 +22,7 @@ export interface FactorMetrics {
   icir: number                  // IC Information Ratio
   sharpe: number                // Sharpe Ratio
   maxDrawdown: number           // Maximum Drawdown %
-  winRate: number               // Win Rate %
+  winRate: number | null        // Win Rate % (null if data unavailable)
   turnover: number              // Turnover Rate %
   stability: number             // Stability Score (0-1)
 }

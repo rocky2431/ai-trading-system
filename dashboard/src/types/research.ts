@@ -25,7 +25,7 @@ export interface Trial {
   threshold: number             // 当时的动态阈值
   passedThreshold: boolean
   createdAt: string
-  duration: number              // 试验时长（秒）
+  duration: number | null       // 试验时长（毫秒），null if unavailable
   notes: string | null
 }
 

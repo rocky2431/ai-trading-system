@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy source code
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY vendor/qlib/ ./vendor/qlib/
 

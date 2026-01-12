@@ -11,10 +11,9 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql://iqfmp:iqfmp@timescaledb:5432/iqfmp
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-iqfmp}:${POSTGRES_PASSWORD:-iqfmp}@postgres:5432/${POSTGRES_DB:-iqfmp}
       - REDIS_URL=redis://redis:6379/0
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
+      - QDRANT_URL=${QDRANT_URL:-http://localhost:6333}
       - PYTHONPATH=/app/src:/app/vendor/qlib
       - QLIB_AUTO_INIT=true
       - QLIB_DATA_DIR=/home/iqfmp/.qlib/qlib_data
@@ -23,7 +22,7 @@ services:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
     depends_on:
-      timescaledb:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -60,10 +59,9 @@ services:
     restart: unless-stopped
     command: celery -A iqfmp.celery_app.app worker --loglevel=info --concurrency=4 -Q high,default,low
     environment:
-      - DATABASE_URL=postgresql://iqfmp:iqfmp@timescaledb:5432/iqfmp
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-iqfmp}:${POSTGRES_PASSWORD:-iqfmp}@postgres:5432/${POSTGRES_DB:-iqfmp}
       - REDIS_URL=redis://redis:6379/0
-      - QDRANT_HOST=qdrant
-      - QDRANT_PORT=6333
+      - QDRANT_URL=${QDRANT_URL:-http://localhost:6333}
       - PYTHONPATH=/app/src:/app/vendor/qlib
       - QLIB_AUTO_INIT=true
       - QLIB_DATA_DIR=/home/iqfmp/.qlib/qlib_data
@@ -77,19 +75,19 @@ services:
     networks:
       - iqfmp-network
 
-  # ==================== TimescaleDB ====================
-  timescaledb:
-    image: timescale/timescaledb:latest-pg15
-    container_name: iqfmp-timescaledb
+  # ==================== PostgreSQL ====================
+  postgres:
+    image: postgres:17-alpine
+    container_name: iqfmp-postgres
     restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
-      - POSTGRES_USER=iqfmp
-      - POSTGRES_PASSWORD=iqfmp
-      - POSTGRES_DB=iqfmp
+      - POSTGRES_USER=${POSTGRES_USER:-iqfmp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-iqfmp}
+      - POSTGRES_DB=${POSTGRES_DB:-iqfmp}
     volumes:
-      - timescaledb-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
     networks:
       - iqfmp-network
     healthcheck:
@@ -117,6 +115,9 @@ services:
       retries: 5
 
   # ==================== Qdrant ====================
+  # NOTE: For production, use Qdrant Cloud (https://cloud.qdrant.io)
+  # Set QDRANT_URL in .env to your cloud instance URL
+  # Local Qdrant is optional - only starts with: docker compose --profile local up
   qdrant:
     image: qdrant/qdrant:latest
     container_name: iqfmp-qdrant
@@ -128,6 +129,8 @@ services:
       - qdrant-data:/qdrant/storage
     networks:
       - iqfmp-network
+    profiles:
+      - local
 
   # ==================== Prometheus ====================
   prometheus:
@@ -163,7 +166,7 @@ services:
       - iqfmp-network
 
 volumes:
-  timescaledb-data:
+  postgres-data:
   redis-data:
   qdrant-data:
   prometheus-data:

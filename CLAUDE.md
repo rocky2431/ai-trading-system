@@ -6,7 +6,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Development
 ```bash
-# Start infrastructure (TimescaleDB, Redis, Qdrant)
+# Start infrastructure (PostgreSQL, Redis)
+# For local Qdrant add --profile local
 docker compose -f docker-compose.dev.yml up -d
 
 # Start backend (port 8000)

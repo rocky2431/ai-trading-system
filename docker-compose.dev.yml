@@ -4,19 +4,19 @@ version: "3.8"
 # Usage: docker-compose -f docker-compose.dev.yml up -d
 
 services:
-  # ==================== TimescaleDB ====================
-  timescaledb:
-    image: timescale/timescaledb:latest-pg15
-    container_name: iqfmp-timescaledb-dev
+  # ==================== PostgreSQL ====================
+  postgres:
+    image: postgres:17-alpine
+    container_name: iqfmp-postgres-dev
     restart: unless-stopped
     ports:
       - "5433:5432"  # Use 5433 to avoid conflict with local PostgreSQL
     environment:
-      - POSTGRES_USER=iqfmp
-      - POSTGRES_PASSWORD=iqfmp
-      - POSTGRES_DB=iqfmp
+      - POSTGRES_USER=${POSTGRES_USER:-iqfmp}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-iqfmp}
+      - POSTGRES_DB=${POSTGRES_DB:-iqfmp}
     volumes:
-      - timescaledb-dev-data:/var/lib/postgresql/data
+      - postgres-dev-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U iqfmp"]
       interval: 10s
@@ -40,6 +40,9 @@ services:
       retries: 5
 
   # ==================== Qdrant Vector Store ====================
+  # NOTE: For production, use Qdrant Cloud (https://cloud.qdrant.io)
+  # Set QDRANT_URL in .env to your cloud instance
+  # Local Qdrant is kept for development/testing only
   qdrant:
     image: qdrant/qdrant:latest
     container_name: iqfmp-qdrant-dev
@@ -56,8 +59,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    profiles:
+      - local  # Only start with: docker compose --profile local up
 
 volumes:
-  timescaledb-dev-data:
+  postgres-dev-data:
   redis-dev-data:
   qdrant-dev-data:

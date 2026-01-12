@@ -202,7 +202,7 @@ class Order:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        """Calculate derived fields and normalize types."""
+        """Calculate derived fields, normalize types, and validate invariants."""
         # Convert float inputs to Decimal for consistency
         if not isinstance(self.amount, Decimal):
             self.amount = Decimal(str(self.amount))
@@ -216,6 +216,14 @@ class Order:
             self.cost = Decimal(str(self.cost))
         if not isinstance(self.fee, Decimal):
             self.fee = Decimal(str(self.fee))
+
+        # Validate invariants
+        if self.amount <= Decimal("0"):
+            raise ValueError(f"amount must be positive, got {self.amount}")
+        if self.type == OrderType.LIMIT and self.price is None:
+            raise ValueError("LIMIT orders require price")
+        if self.filled > self.amount:
+            raise ValueError(f"filled ({self.filled}) cannot exceed amount ({self.amount})")
 
         if self.remaining == Decimal("0"):
             self.remaining = self.amount - self.filled

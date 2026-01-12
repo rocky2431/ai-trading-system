@@ -246,8 +246,8 @@ class QlibMetricsCalculator:
                 if isinstance(ic_result, pd.Series):
                     return float(ic_result.mean())
                 return float(ic_result)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Qlib IC calculation failed, using fallback: {e}")
 
         # Fallback: Use Pearson correlation (IC = Pearson(factor, returns))
         # This uses pandas .corr() which is Qlib's internal implementation
@@ -693,8 +693,9 @@ class FactorEvaluator:
         if self.config.run_stability_analysis:
             try:
                 stability_report = self.stability_analyzer.analyze(df)
-            except Exception:
-                pass  # Stability analysis is optional
+            except Exception as e:
+                # Stability analysis is optional but log for debugging
+                logger.warning(f"Stability analysis failed (continuing without): {e}")
 
         # Record to ledger
         trial = TrialRecord(
@@ -1029,8 +1030,9 @@ class EvaluationPipeline:
                     data=data,
                 )
                 results.append(result)
-            except Exception:
-                # Create failed result
+            except Exception as e:
+                # Create failed result but log the error
+                logger.error(f"Evaluation failed for factor '{name}': {e}")
                 results.append(
                     EvaluationResult(
                         factor_name=name,

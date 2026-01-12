@@ -818,6 +818,47 @@ class CryptoQlibBacktest:
 
         return is_liquidated, None
 
+    def _insufficient_cv_data_result(
+        self,
+        required: int,
+        actual: int,
+        message: str,
+        n_folds: int = 0,
+    ) -> dict[str, float]:
+        """Handle insufficient data for CV validation.
+
+        In strict mode, raises InsufficientDataError.
+        In non-strict mode, returns NaN values to indicate unknown rather than
+        misleading defaults.
+
+        Args:
+            required: Required number of samples
+            actual: Actual number of samples
+            message: Descriptive message for logging/error
+            n_folds: Number of folds completed (default 0)
+
+        Returns:
+            Dict with NaN values if not in strict mode
+
+        Raises:
+            InsufficientDataError: If strict_cv_mode is enabled
+        """
+        if self.config.strict_cv_mode:
+            raise InsufficientDataError(
+                required_samples=required,
+                actual_samples=actual,
+                message=message,
+            )
+
+        logger.warning(f"{message} Returning NaN for prob_overfit.")
+        return {
+            "cv_sharpe_mean": float("nan"),
+            "cv_sharpe_std": float("nan"),
+            "deflated_sharpe": float("nan"),
+            "prob_overfit": float("nan"),
+            "n_folds": n_folds,
+        }
+
     def _calculate_cv_metrics(
         self,
         equity_series: pd.Series,
@@ -849,50 +890,26 @@ class CryptoQlibBacktest:
         # Minimum data requirement for CV
         min_samples = n_splits * 50  # At least 50 samples per fold
         if len(equity_series) < min_samples:
-            if self.config.strict_cv_mode:
-                # 严格模式：抛出异常，禁止静默返回误导性值
-                raise InsufficientDataError(
-                    required_samples=min_samples,
-                    actual_samples=len(equity_series),
-                    message=(
-                        f"Insufficient data for Purged CV: need {min_samples} samples, "
-                        f"got {len(equity_series)}. Cannot perform reliable anti-overfitting validation."
-                    ),
-                )
-            else:
-                # 非严格模式：返回 NaN 表示"未知"，而非误导性的 1.0
-                logger.warning(
-                    f"Insufficient data for Purged CV: {len(equity_series)} < {min_samples}. "
-                    "Returning NaN for prob_overfit (unknown, not 1.0)."
-                )
-                return {
-                    "cv_sharpe_mean": float("nan"),
-                    "cv_sharpe_std": float("nan"),
-                    "deflated_sharpe": float("nan"),
-                    "prob_overfit": float("nan"),  # NaN = 未知，非 1.0
-                    "n_folds": 0,
-                }
+            return self._insufficient_cv_data_result(
+                required=min_samples,
+                actual=len(equity_series),
+                message=(
+                    f"Insufficient data for Purged CV: need {min_samples} samples, "
+                    f"got {len(equity_series)}. Cannot perform reliable anti-overfitting validation."
+                ),
+            )
 
         # Calculate returns from equity curve
         returns = equity_series.pct_change().dropna()
         if len(returns) < min_samples:
-            if self.config.strict_cv_mode:
-                raise InsufficientDataError(
-                    required_samples=min_samples,
-                    actual_samples=len(returns),
-                    message=(
-                        f"Insufficient returns data for Purged CV: need {min_samples}, "
-                        f"got {len(returns)} after pct_change()."
-                    ),
-                )
-            else:
-                return {
-                    "cv_sharpe_mean": float("nan"),
-                    "cv_sharpe_std": float("nan"),
-                    "deflated_sharpe": float("nan"),
-                    "prob_overfit": float("nan"),
-                    "n_folds": 0,
-                }
+            return self._insufficient_cv_data_result(
+                required=min_samples,
+                actual=len(returns),
+                message=(
+                    f"Insufficient returns data for Purged CV: need {min_samples}, "
+                    f"got {len(returns)} after pct_change()."
+                ),
+            )
 
         # Create DataFrame for CV (required by PurgedKFoldCV)
         returns_df = pd.DataFrame({
@@ -927,24 +944,15 @@ class CryptoQlibBacktest:
                 fold_sharpes.append(float(fold_sharpe))
 
         if len(fold_sharpes) < 2:
-            if self.config.strict_cv_mode:
-                raise InsufficientDataError(
-                    required_samples=2,  # Need at least 2 valid folds
-                    actual_samples=len(fold_sharpes),
-                    message=(
-                        f"Not enough valid CV folds: need at least 2, got {len(fold_sharpes)}. "
-                        "Data may be too sparse or volatile for reliable validation."
-                    ),
-                )
-            else:
-                logger.warning("Not enough valid CV folds for reliable metrics")
-                return {
-                    "cv_sharpe_mean": float("nan"),
-                    "cv_sharpe_std": float("nan"),
-                    "deflated_sharpe": float("nan"),
-                    "prob_overfit": float("nan"),
-                    "n_folds": len(fold_sharpes),
-                }
+            return self._insufficient_cv_data_result(
+                required=2,
+                actual=len(fold_sharpes),
+                message=(
+                    f"Not enough valid CV folds: need at least 2, got {len(fold_sharpes)}. "
+                    "Data may be too sparse or volatile for reliable validation."
+                ),
+                n_folds=len(fold_sharpes),
+            )
 
         # Calculate CV statistics
         cv_sharpe_mean = float(np.mean(fold_sharpes))

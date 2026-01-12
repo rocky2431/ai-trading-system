@@ -7,15 +7,23 @@ Security Layers:
 1. AST Security Checker - Static analysis (pre-execution)
 2. Sandbox Executor - Runtime isolation
 3. Human Review Gate (this module) - Manual approval
+
+Critical State Persistence:
+Per CLAUDE.md, review decisions are critical state that must be persisted.
+Use RedisReviewQueue for production deployments.
 """
 
 import asyncio
+import json
+import logging
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class ReviewStatus(str, Enum):
@@ -251,6 +259,203 @@ class ReviewQueue:
         return timed_out
 
 
+class ReviewQueueError(Exception):
+    """Raised when review queue operations fail."""
+
+    pass
+
+
+class RedisReviewQueue(ReviewQueue):
+    """Redis-backed queue for managing review requests.
+
+    Critical state per CLAUDE.md: Review decisions must be persisted
+    to survive service restarts. This class stores pending requests
+    and decisions in Redis.
+
+    Note: Decision events (asyncio.Event) are still in-memory for the
+    current process, but the actual state is recovered from Redis on init.
+    """
+
+    REDIS_PENDING_KEY = "iqfmp:review:pending"
+    REDIS_DECISIONS_KEY = "iqfmp:review:decisions"
+    REDIS_PENDING_TTL = 86400 * 7  # 7 days for pending requests
+    REDIS_DECISION_TTL = 86400 * 30  # 30 days for decisions
+
+    def __init__(self, max_size: int = 100, redis_client: Any = None) -> None:
+        """Initialize the Redis-backed review queue.
+
+        Args:
+            max_size: Maximum number of pending requests.
+            redis_client: Optional Redis client for dependency injection.
+
+        Raises:
+            ReviewQueueError: If Redis is unavailable and no client injected.
+        """
+        super().__init__(max_size)
+        self._redis = redis_client if redis_client is not None else self._get_redis_client()
+        # Load existing state from Redis
+        self._load_from_redis()
+
+    def _get_redis_client(self) -> Any:
+        """Get Redis client. Raises if unavailable."""
+        try:
+            from iqfmp.db import get_redis_client
+            client = get_redis_client()
+            if client is None:
+                raise ReviewQueueError(
+                    "Redis unavailable. Review queue requires persistent storage "
+                    "per CLAUDE.md critical state rules."
+                )
+            return client
+        except ReviewQueueError:
+            raise
+        except Exception as e:
+            raise ReviewQueueError(f"Failed to connect to Redis: {e}") from e
+
+    def _serialize_request(self, request: ReviewRequest) -> str:
+        """Serialize ReviewRequest to JSON."""
+        return json.dumps(request.to_dict())
+
+    def _deserialize_request(self, data: str) -> ReviewRequest:
+        """Deserialize JSON to ReviewRequest."""
+        obj = json.loads(data)
+        return ReviewRequest(
+            code=obj["code"],
+            code_summary=obj["code_summary"],
+            factor_name=obj["factor_name"],
+            metadata=obj.get("metadata", {}),
+            request_id=obj["request_id"],
+            created_at=datetime.fromisoformat(obj["created_at"]),
+            priority=obj.get("priority", 0),
+        )
+
+    def _serialize_decision(self, decision: ReviewDecision) -> str:
+        """Serialize ReviewDecision to JSON."""
+        return json.dumps(decision.to_dict())
+
+    def _deserialize_decision(self, data: str) -> ReviewDecision:
+        """Deserialize JSON to ReviewDecision."""
+        obj = json.loads(data)
+        return ReviewDecision(
+            request_id=obj["request_id"],
+            status=ReviewStatus(obj["status"]),
+            reviewer=obj.get("reviewer"),
+            reason=obj.get("reason"),
+            decided_at=datetime.fromisoformat(obj["decided_at"]),
+        )
+
+    def _load_from_redis(self) -> None:
+        """Load existing state from Redis on initialization."""
+        try:
+            # Load pending requests
+            pending_data = self._redis.hgetall(self.REDIS_PENDING_KEY)
+            for request_id, data in pending_data.items():
+                try:
+                    request_id_str = request_id.decode() if isinstance(request_id, bytes) else request_id
+                    data_str = data.decode() if isinstance(data, bytes) else data
+                    request = self._deserialize_request(data_str)
+                    self._pending[request_id_str] = request
+                    self._decision_events[request_id_str] = asyncio.Event()
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Failed to deserialize pending request {request_id}: {e}")
+
+            # Load decisions
+            decisions_data = self._redis.hgetall(self.REDIS_DECISIONS_KEY)
+            for request_id, data in decisions_data.items():
+                try:
+                    request_id_str = request_id.decode() if isinstance(request_id, bytes) else request_id
+                    data_str = data.decode() if isinstance(data, bytes) else data
+                    decision = self._deserialize_decision(data_str)
+                    self._decisions[request_id_str] = decision
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.warning(f"Failed to deserialize decision {request_id}: {e}")
+
+            logger.info(
+                f"Loaded review queue from Redis: {len(self._pending)} pending, "
+                f"{len(self._decisions)} decisions"
+            )
+        except Exception as e:
+            logger.error(f"Failed to load review queue from Redis: {e}")
+            raise ReviewQueueError(f"Failed to load review queue from Redis: {e}") from e
+
+    def add(self, request: ReviewRequest) -> None:
+        """Add a request to the queue and persist to Redis."""
+        if len(self._pending) >= self.max_size:
+            raise RuntimeError(f"Review queue is full (max: {self.max_size})")
+
+        try:
+            # Persist to Redis first
+            self._redis.hset(
+                self.REDIS_PENDING_KEY,
+                request.request_id,
+                self._serialize_request(request),
+            )
+            # Then update in-memory
+            self._pending[request.request_id] = request
+            self._decision_events[request.request_id] = asyncio.Event()
+            logger.debug(f"Added review request to Redis: {request.request_id}")
+        except Exception as e:
+            raise ReviewQueueError(
+                f"Failed to persist review request to Redis: {e}. "
+                "Critical state persistence required."
+            ) from e
+
+    def record_decision(self, decision: ReviewDecision) -> None:
+        """Record a decision and persist to Redis."""
+        try:
+            # Persist decision to Redis
+            self._redis.hset(
+                self.REDIS_DECISIONS_KEY,
+                decision.request_id,
+                self._serialize_decision(decision),
+            )
+            # Remove from pending in Redis
+            self._redis.hdel(self.REDIS_PENDING_KEY, decision.request_id)
+
+            # Update in-memory state
+            if decision.request_id in self._pending:
+                del self._pending[decision.request_id]
+            self._decisions[decision.request_id] = decision
+
+            # Signal any waiters
+            if decision.request_id in self._decision_events:
+                self._decision_events[decision.request_id].set()
+
+            logger.debug(f"Recorded decision to Redis: {decision.request_id} -> {decision.status.value}")
+        except Exception as e:
+            raise ReviewQueueError(
+                f"Failed to persist decision to Redis: {e}. "
+                "Critical state persistence required."
+            ) from e
+
+
+def get_review_queue(
+    max_size: int = 100,
+    use_redis: bool = True,
+    redis_client: Any = None,
+) -> ReviewQueue:
+    """Get review queue with appropriate storage backend.
+
+    Args:
+        max_size: Maximum queue size.
+        use_redis: If True (default), use Redis-backed queue for persistence.
+        redis_client: Optional Redis client for dependency injection.
+
+    Returns:
+        ReviewQueue instance (Redis-backed in production, memory for testing).
+    """
+    if use_redis:
+        try:
+            return RedisReviewQueue(max_size=max_size, redis_client=redis_client)
+        except ReviewQueueError as e:
+            logger.warning(
+                f"Redis review queue unavailable: {e}. "
+                "Falling back to in-memory queue. "
+                "WARNING: Review decisions will NOT persist across restarts!"
+            )
+    return ReviewQueue(max_size=max_size)
+
+
 class HumanReviewGate:
     """Gate for human review of LLM-generated code.
 
@@ -259,6 +464,8 @@ class HumanReviewGate:
     - Notifying reviewers
     - Recording decisions
     - Handling timeouts
+
+    Critical State: Uses Redis-backed queue by default for persistence.
     """
 
     def __init__(
@@ -267,6 +474,8 @@ class HumanReviewGate:
         notifiers: Optional[list[NotifierBase]] = None,
         config: Optional[ReviewConfig] = None,
         on_request_callback: Optional[Callable] = None,
+        queue: Optional[ReviewQueue] = None,
+        use_redis: bool = True,
     ) -> None:
         """Initialize the review gate.
 
@@ -275,9 +484,14 @@ class HumanReviewGate:
             notifiers: List of notifier instances (for multiple channels).
             config: Review configuration.
             on_request_callback: Callback for new requests.
+            queue: Optional custom queue (for testing).
+            use_redis: If True (default), use Redis-backed queue for persistence.
         """
         self.config = config or ReviewConfig()
-        self._queue = ReviewQueue(max_size=self.config.max_queue_size)
+        self._queue = queue or get_review_queue(
+            max_size=self.config.max_queue_size,
+            use_redis=use_redis,
+        )
 
         # Handle notifiers
         self._notifiers: list[NotifierBase] = []
@@ -307,15 +521,17 @@ class HumanReviewGate:
         for notifier in self._notifiers:
             try:
                 await notifier.send_review_request(request)
-            except Exception:
-                pass  # Log warning but don't fail
+            except Exception as e:
+                logger.warning(
+                    f"Failed to send review request notification via {type(notifier).__name__}: {e}"
+                )
 
         # Call callback if set
         if self._on_request_callback:
             try:
                 await self._on_request_callback(request)
-            except Exception:
-                pass  # Log warning but don't fail
+            except Exception as e:
+                logger.warning(f"Review request callback failed: {e}")
 
         return request.request_id
 
@@ -365,8 +581,10 @@ class HumanReviewGate:
         for notifier in self._notifiers:
             try:
                 await notifier.send_decision(decision)
-            except Exception:
-                pass  # Log warning but don't fail
+            except Exception as e:
+                logger.warning(
+                    f"Failed to send decision notification via {type(notifier).__name__}: {e}"
+                )
 
         return decision
 

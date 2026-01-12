@@ -116,6 +116,17 @@ class MarginPosition:
     leverage: int = 10
     mode: MarginMode = MarginMode.ISOLATED
 
+    def __post_init__(self) -> None:
+        """Validate position invariants."""
+        if self.quantity <= Decimal("0"):
+            raise ValueError(f"quantity must be positive, got {self.quantity}")
+        if self.entry_price <= Decimal("0"):
+            raise ValueError(f"entry_price must be positive, got {self.entry_price}")
+        if self.mark_price <= Decimal("0"):
+            raise ValueError(f"mark_price must be positive, got {self.mark_price}")
+        if not (1 <= self.leverage <= 125):
+            raise ValueError(f"leverage must be between 1 and 125, got {self.leverage}")
+
     @property
     def position_value(self) -> Decimal:
         """Calculate position value at mark price."""

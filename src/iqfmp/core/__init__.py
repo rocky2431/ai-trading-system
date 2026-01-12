@@ -3,11 +3,14 @@
 from iqfmp.core.review import (
     HumanReviewGate,
     NotifierBase,
+    RedisReviewQueue,
     ReviewConfig,
     ReviewDecision,
     ReviewQueue,
+    ReviewQueueError,
     ReviewRequest,
     ReviewStatus,
+    get_review_queue,
 )
 from iqfmp.core.sandbox import (
     ExecutionResult,
@@ -66,11 +69,14 @@ __all__ = [
     # Review
     "HumanReviewGate",
     "NotifierBase",
+    "RedisReviewQueue",
     "ReviewConfig",
     "ReviewDecision",
     "ReviewQueue",
+    "ReviewQueueError",
     "ReviewRequest",
     "ReviewStatus",
+    "get_review_queue",
     # Factor Engine
     "FactorEngine",
     "FactorEvaluator",

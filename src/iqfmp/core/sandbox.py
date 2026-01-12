@@ -173,6 +173,17 @@ class SandboxConfig:
         "iqfmp.evaluation.qlib_stats",  # Qlib-native statistical functions
     ])
 
+    def __post_init__(self) -> None:
+        """Validate sandbox resource limits."""
+        if self.timeout_seconds <= 0:
+            raise ValueError(f"timeout_seconds must be positive, got {self.timeout_seconds}")
+        if self.max_memory_mb <= 0:
+            raise ValueError(f"max_memory_mb must be positive, got {self.max_memory_mb}")
+        if self.max_memory_mb > 4096:
+            raise ValueError(f"max_memory_mb cannot exceed 4096MB, got {self.max_memory_mb}")
+        if self.max_cpu_seconds <= 0:
+            raise ValueError(f"max_cpu_seconds must be positive, got {self.max_cpu_seconds}")
+
 
 class TimeoutException(Exception):
     """Exception raised when execution times out."""

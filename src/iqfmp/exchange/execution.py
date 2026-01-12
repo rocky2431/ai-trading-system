@@ -657,13 +657,23 @@ class OrderManager:
 
     @property
     def active_orders(self) -> set[str]:
-        """Get active order IDs from Redis."""
+        """Get active order IDs from Redis.
+
+        Returns:
+            Set of active order IDs
+
+        Raises:
+            OrderManagerError: If Redis query fails (critical state must be retrievable)
+        """
         try:
             members = self._redis.smembers(self.REDIS_ACTIVE_KEY)
             return set(members) if members else set()
         except Exception as e:
             logger.error(f"Failed to get active orders from Redis: {e}")
-            return set()
+            raise OrderManagerError(
+                f"Failed to retrieve active orders from Redis: {e}. "
+                "This is critical state - cannot proceed safely."
+            ) from e
 
     def track(self, order: Order) -> None:
         """Track an order with Redis persistence.

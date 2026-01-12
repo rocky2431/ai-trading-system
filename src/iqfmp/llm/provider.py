@@ -288,8 +288,9 @@ class LLMProvider:
         if use_persistent_cache:
             try:
                 self._persistent_cache = get_prompt_cache()
-            except Exception:
+            except Exception as e:
                 # Fallback to in-memory only if cache init fails
+                logger.warning(f"Persistent cache init failed, using in-memory only: {e}")
                 self._persistent_cache = None
         self._rate_limiter = RateLimiter()
         # Retry handler with error classification and exponential backoff
@@ -1032,7 +1033,8 @@ class LLMProvider:
                 model=model,
                 temperature=temperature,
             )
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Persistent cache read failed (continuing without cache): {e}")
             return None
 
     def _save_to_persistent_cache(
@@ -1063,8 +1065,9 @@ class LLMProvider:
                 tokens_saved=tokens_saved,
                 temperature=temperature,
             )
-        except Exception:
-            pass  # Silently fail cache writes
+        except Exception as e:
+            # Cache writes are non-critical - log but don't fail
+            logger.debug(f"Persistent cache write failed: {e}")
 
     def _save_to_cache(self, key: str, response: LLMResponse) -> None:
         """Save response to cache."""
@@ -1096,7 +1099,8 @@ class LLMProvider:
         try:
             # Use sync wrapper for compatibility
             return self._persistent_cache.get_stats_sync()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Failed to get cache stats: {e}")
             return None
 
     async def complete_structured(

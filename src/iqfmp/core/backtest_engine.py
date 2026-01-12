@@ -12,6 +12,7 @@ Supports:
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Optional
 from uuid import uuid4
@@ -42,19 +43,22 @@ class TradingCosts:
 
 @dataclass
 class Trade:
-    """Individual trade record."""
+    """Individual trade record.
+
+    Uses Decimal for price/quantity/amount fields per CLAUDE.md conventions.
+    """
     id: str
     symbol: str
     side: str  # "long" or "short"
     entry_date: str
-    entry_price: float
+    entry_price: Decimal
     exit_date: str
-    exit_price: float
-    quantity: float
-    pnl: float
-    pnl_pct: float
+    exit_price: Decimal
+    quantity: Decimal
+    pnl: Decimal
+    pnl_pct: float  # Percentage ratio - float is appropriate
     holding_days: int
-    commission: float = 0.0
+    commission: Decimal = field(default_factory=lambda: Decimal("0"))
 
 
 @dataclass
@@ -113,10 +117,10 @@ class BacktestResult:
                     "symbol": t.symbol,
                     "side": t.side,
                     "entry_date": t.entry_date,
-                    "entry_price": t.entry_price,
+                    "entry_price": float(t.entry_price),
                     "exit_date": t.exit_date,
-                    "exit_price": t.exit_price,
-                    "pnl": t.pnl,
+                    "exit_price": float(t.exit_price),
+                    "pnl": float(t.pnl),
                     "pnl_pct": t.pnl_pct,
                     "holding_days": t.holding_days,
                 }
@@ -386,14 +390,14 @@ class BacktestEngine:
                     symbol=df["symbol"].iloc[0] if "symbol" in df.columns else "ETHUSDT",
                     side="long" if entry_position > 0 else "short",
                     entry_date=str(df["timestamp"].iloc[entry_idx].date()),
-                    entry_price=entry_price,
+                    entry_price=Decimal(str(entry_price)),
                     exit_date=str(df["timestamp"].iloc[i].date()),
-                    exit_price=exit_price,
-                    quantity=quantity,
-                    pnl=dollar_pnl,
+                    exit_price=Decimal(str(exit_price)),
+                    quantity=Decimal(str(quantity)),
+                    pnl=Decimal(str(dollar_pnl)),
                     pnl_pct=pnl_pct,
                     holding_days=holding_days,
-                    commission=commission,
+                    commission=Decimal(str(commission)),
                 ))
 
                 trade_id += 1

@@ -6,10 +6,17 @@ LangGraph concepts, with support for:
 - Checkpoint persistence
 - Time-travel debugging
 - Conditional routing
+
+Critical State Persistence:
+Per CLAUDE.md, checkpoints are critical state that must be persisted.
+When checkpoint_enabled=True, PostgresCheckpointSaver is used by default.
+MemorySaver is only for testing.
 """
 
 import asyncio
 import json
+import logging
+import os
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -17,6 +24,8 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional, Union
 
 import asyncpg
+
+logger = logging.getLogger(__name__)
 
 
 # === Error Classes ===
@@ -382,6 +391,58 @@ class PostgresCheckpointSaver(CheckpointSaver):
             await conn.execute("DELETE FROM agent_checkpoints WHERE id=$1", checkpoint_id)
 
 
+class CheckpointSaverError(OrchestratorError):
+    """Raised when checkpoint saver operations fail."""
+
+    pass
+
+
+def get_default_checkpoint_saver(
+    checkpoint_enabled: bool = False,
+) -> CheckpointSaver:
+    """Get the default checkpoint saver based on configuration.
+
+    When checkpoint_enabled=True, returns PostgresCheckpointSaver using
+    DATABASE_URL environment variable. Falls back to MemorySaver with warning.
+
+    Args:
+        checkpoint_enabled: Whether checkpointing is enabled.
+
+    Returns:
+        CheckpointSaver instance.
+    """
+    if not checkpoint_enabled:
+        # Checkpointing disabled, use memory (no state to persist)
+        return MemorySaver()
+
+    # Try to get PostgresCheckpointSaver
+    database_url = os.environ.get("DATABASE_URL")
+    if database_url:
+        logger.info("Using PostgresCheckpointSaver for checkpoint persistence")
+        return PostgresCheckpointSaver(database_url)
+
+    # Try to build from individual PG* environment variables
+    pg_host = os.environ.get("PGHOST")
+    pg_port = os.environ.get("PGPORT", "5433")
+    pg_user = os.environ.get("PGUSER")
+    pg_password = os.environ.get("PGPASSWORD")
+    pg_database = os.environ.get("PGDATABASE")
+
+    if pg_host and pg_user and pg_database:
+        conn_str = f"postgresql://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_database}"
+        logger.info("Using PostgresCheckpointSaver for checkpoint persistence")
+        return PostgresCheckpointSaver(conn_str)
+
+    # No database configuration available - warn and fall back
+    logger.warning(
+        "PostgresCheckpointSaver unavailable: DATABASE_URL or PG* environment variables not set. "
+        "Falling back to MemorySaver. "
+        "WARNING: Checkpoints will NOT persist across restarts! "
+        "This violates CLAUDE.md critical state persistence requirements."
+    )
+    return MemorySaver()
+
+
 # === Orchestrator Configuration ===
 
 @dataclass
@@ -425,7 +486,10 @@ class AgentOrchestrator:
         self._graph = graph
         self._config = config
         self._compiled = graph.compile()
-        self._checkpoint_saver = checkpoint_saver or MemorySaver()
+        # Use provided saver or get default based on checkpoint_enabled
+        self._checkpoint_saver = checkpoint_saver or get_default_checkpoint_saver(
+            checkpoint_enabled=config.checkpoint_enabled
+        )
         self._execution_id: Optional[str] = None
 
     def __repr__(self) -> str:

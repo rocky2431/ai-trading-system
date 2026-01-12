@@ -1217,6 +1217,126 @@ class FactorGenerationAgent:
 
         return generated_factor
 
+    async def generate_with_feedback(
+        self,
+        user_request: str,
+        factor_family: FactorFamily | None = None,
+        feedback: Any | None = None,
+        similar_successes: list[Any] | None = None,
+        similar_failures: list[Any] | None = None,
+    ) -> GeneratedFactor:
+        """Generate a factor with feedback context for iterative improvement.
+
+        This method extends the standard generate() by incorporating:
+        - Structured feedback from previous evaluation attempts
+        - Success examples for inspiration
+        - Failure patterns to avoid
+
+        Used by the FeedbackLoop for closed-loop factor mining.
+
+        Args:
+            user_request: Natural language description/hypothesis
+            factor_family: Optional factor family constraint
+            feedback: StructuredFeedback from previous attempt (optional)
+            similar_successes: List of PatternRecord success examples
+            similar_failures: List of PatternRecord failure warnings
+
+        Returns:
+            Generated factor with code and metadata
+        """
+        # If no feedback context provided, fall back to standard generation
+        if feedback is None and not similar_successes and not similar_failures:
+            return await self.generate(user_request, factor_family)
+
+        # Build feedback-enhanced prompt
+        from iqfmp.feedback.prompt_builder import FeedbackPromptBuilder
+
+        builder = FeedbackPromptBuilder()
+        system_prompt, enhanced_prompt = builder.build_combined_prompt(
+            user_request=user_request,
+            feedback=feedback,
+            similar_successes=similar_successes,
+            similar_failures=similar_failures,
+        )
+
+        # Skip duplicate check for iterative generation (we want new approaches)
+
+        # Resolve model configuration
+        from iqfmp.agents.model_config import get_agent_full_config
+
+        model_id, config_temperature, _ = get_agent_full_config("factor_generation")
+
+        model = self.config.model or model_id
+        temperature = self.config.temperature or config_temperature
+
+        # Generate with enhanced prompt
+        try:
+            response = await self.llm_provider.complete(
+                prompt=enhanced_prompt,
+                system_prompt=system_prompt,
+                model=model,
+                temperature=temperature,
+            )
+        except Exception as e:
+            raise FactorGenerationError(f"LLM call failed with feedback: {e}") from e
+
+        raw_content = response.content if hasattr(response, "content") else str(response)
+        code = self._extract_code(raw_content)
+
+        if not code:
+            raise InvalidFactorError("No valid code generated from feedback iteration")
+
+        # Validate Qlib expression
+        is_python = (
+            code.strip().startswith("def ")
+            or code.strip().startswith("import ")
+            or code.strip().startswith("from ")
+            or "\ndef " in code
+        )
+
+        if not is_python and self.config.qlib_expression_validation_enabled:
+            expr_result = self._validate_qlib_expression(code)
+            if not expr_result.is_valid:
+                raise InvalidFactorError(
+                    f"Generated code is not a valid Qlib expression: {expr_result.error_message}"
+                )
+
+        # Security checks
+        if self.config.security_check_enabled:
+            self._run_security_check(code, is_python)
+
+        # Field constraint checks
+        if self.config.field_constraint_enabled and not is_python:
+            self._run_field_constraint_check(code)
+
+        # Extract metadata
+        name = self._extract_factor_name(code)
+        description = self._extract_description(code, user_request)
+        family = factor_family or self._infer_family(user_request)
+
+        metadata: dict[str, Any] = {
+            "user_request": user_request,
+            "security_checked": self.config.security_check_enabled,
+            "is_python_code": is_python,
+            "feedback_iteration": True,
+            "has_feedback": feedback is not None,
+            "num_success_examples": len(similar_successes) if similar_successes else 0,
+            "num_failure_warnings": len(similar_failures) if similar_failures else 0,
+        }
+
+        generated_factor = GeneratedFactor(
+            name=name,
+            description=description,
+            code=code,
+            family=family,
+            metadata=metadata,
+        )
+
+        # Store for future reference
+        self._store_generated_factor(generated_factor, user_request)
+
+        return generated_factor
+
     def _extract_code(self, content: str) -> str:
         """Extract Qlib expression or Python code from LLM response.
 

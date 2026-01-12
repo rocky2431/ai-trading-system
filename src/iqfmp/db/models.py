@@ -900,6 +900,72 @@ class OrderBookSnapshotORM(Base):
     )
 
 
+# =============================================================================
+# Feedback Loop Models (Closed-Loop Factor Mining)
+# =============================================================================
+
+
+class PatternRecordORM(Base):
+    """Pattern record table - stores success/failure patterns for closed-loop factor mining.
+
+    This table stores patterns learned from factor evaluation results:
+    - Success patterns: factors that passed evaluation thresholds
+    - Failure patterns: factors that failed, with classified failure reasons
+
+    Used by PatternMemory for similarity-based retrieval during factor generation.
+    """
+
+    __tablename__ = "pattern_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    pattern_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
+    pattern_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True
+    )  # "success" or "failure"
+
+    # Factor information
+    hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
+    factor_code: Mapped[str] = mapped_column(Text, nullable=False)
+    factor_family: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    # Metrics (stored as JSONB for flexibility)
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # Expected keys: ic, ir, sharpe, max_drawdown, win_rate
+
+    # Feedback (for failure patterns)
+    feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    failure_reasons: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
+    # Expected values: ["low_ic", "low_ir", "high_drawdown", "overfitting", etc.]
+
+    # Reference to evaluation trial
+    trial_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("ix_pattern_records_type_family", "pattern_type", "factor_family"),
+        Index("ix_pattern_records_created_at", "created_at"),
+    )
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        return {
+            "pattern_id": self.pattern_id,
+            "pattern_type": self.pattern_type,
+            "hypothesis": self.hypothesis,
+            "factor_code": self.factor_code,
+            "factor_family": self.factor_family,
+            "metrics": self.metrics,
+            "feedback": self.feedback,
+            "failure_reasons": self.failure_reasons or [],
+            "trial_id": self.trial_id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
 # SQL to create TimescaleDB hypertable (run after creating tables)
 CREATE_HYPERTABLE_SQL = """
 -- Enable TimescaleDB extension

@@ -1154,6 +1154,66 @@ class HypothesisAgent:
         self._hypothesis_history.append(updated)
         return updated
 
+    async def refine_hypothesis_with_feedback(
+        self,
+        original_hypothesis: str,
+        feedback: Any,
+        family_statistics: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Refine a hypothesis based on structured feedback.
+
+        This method uses the FeedbackPromptBuilder to create a prompt
+        that helps the LLM generate an improved hypothesis based on
+        evaluation feedback from a failed factor.
+
+        Used by the FeedbackLoop for closed-loop hypothesis refinement.
+
+        Args:
+            original_hypothesis: The original research hypothesis text
+            feedback: StructuredFeedback from factor evaluation
+            family_statistics: Optional statistics about the factor family
+
+        Returns:
+            Refined hypothesis text
+        """
+        from iqfmp.agents.model_config import get_agent_full_config
+        from iqfmp.feedback.prompt_builder import FeedbackPromptBuilder
+
+        builder = FeedbackPromptBuilder()
+        system_prompt, user_prompt = builder.build_hypothesis_refinement_prompt(
+            original_hypothesis=original_hypothesis,
+            feedback=feedback,
+            family_statistics=family_statistics,
+        )
+
+        # Get configured model settings
+        model_id, temperature, custom_system = get_agent_full_config("hypothesis")
+        # Use custom system prompt if available, otherwise use the builder's prompt
+        final_system = custom_system or system_prompt
+
+        # Use LLM provider to generate refined hypothesis
+        try:
+            response = await self.llm_provider.complete(
+                prompt=user_prompt,
+                system_prompt=final_system,
+                model=model_id,
+                temperature=temperature,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to refine hypothesis with LLM: {e}")
+            # Return original if refinement fails
+            return original_hypothesis
+
+        refined_text = response.content if hasattr(response, "content") else str(response)
+        refined_text = refined_text.strip()
+
+        # Basic validation: ensure we got some text back
+        if not refined_text or len(refined_text) < 20:
+            logger.warning("LLM returned insufficient refined hypothesis")
+            return original_hypothesis
+
+        return refined_text
+
     def generate_hypotheses(
         self,
         market_data: pd.DataFrame,

@@ -14,7 +14,10 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
+
+if TYPE_CHECKING:
+    from iqfmp.feedback.structured_feedback import StructuredFeedback
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -596,6 +599,31 @@ class EvaluationResult:
             )
 
         return recommendations
+
+    def to_structured_feedback(
+        self,
+        hypothesis: str,
+        factor_code: str,
+    ) -> "StructuredFeedback":
+        """Convert to StructuredFeedback for closed-loop factor mining.
+
+        This method bridges the evaluation pipeline to the feedback loop,
+        enabling LLM-driven iterative improvement.
+
+        Args:
+            hypothesis: The research hypothesis that led to this factor
+            factor_code: The generated factor code (Qlib expression or Python)
+
+        Returns:
+            StructuredFeedback instance with classified failures and suggestions
+        """
+        from iqfmp.feedback.structured_feedback import StructuredFeedback
+
+        return StructuredFeedback.from_evaluation_result(
+            result=self,
+            hypothesis=hypothesis,
+            factor_code=factor_code,
+        )
 
 
 class FactorEvaluator:

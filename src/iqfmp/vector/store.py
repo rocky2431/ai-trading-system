@@ -6,8 +6,10 @@
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
+
+from qdrant_client.http import models as qdrant_models
 
 from .client import QdrantClient, QdrantConfig, get_qdrant_client
 from .embedding import EmbeddingGenerator, get_embedding_generator
@@ -112,18 +114,16 @@ class FactorVectorStore:
             "code": code,
             "hypothesis": hypothesis,
             "family": family,
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             **(metadata or {}),
         }
 
         # 存储到 Qdrant - 严格模式，无 Mock 降级
-        from qdrant_client.http import models
-
         try:
             self.qdrant.client.upsert(
                 collection_name=self.collection_name,
                 points=[
-                    models.PointStruct(
+                    qdrant_models.PointStruct(
                         id=factor_id,
                         vector=embedding,
                         payload=payload,
@@ -172,13 +172,12 @@ class FactorVectorStore:
                 "code": f["code"],
                 "hypothesis": f["hypothesis"],
                 "family": f["family"],
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 **(f.get("metadata") or {}),
             }
 
             # 严格模式：必须使用 Qdrant models，无 Mock 降级
-            from qdrant_client.http import models
-            points.append(models.PointStruct(
+            points.append(qdrant_models.PointStruct(
                 id=factor_id,
                 vector=embeddings[i],
                 payload=payload,
@@ -264,12 +263,10 @@ class FactorVectorStore:
             是否删除成功
         """
         # 严格模式：必须使用真实 Qdrant，无 Mock 降级
-        from qdrant_client.http import models
-
         try:
             self.qdrant.client.delete(
                 collection_name=self.collection_name,
-                points_selector=models.PointIdsList(
+                points_selector=qdrant_models.PointIdsList(
                     points=[factor_id],
                 ),
             )
@@ -312,11 +309,10 @@ class FactorVectorStore:
         return self.qdrant.get_collection_info(self.collection_name)
 
     def health_check(self) -> tuple[bool, str]:
-        """
-        H2 FIX: 健康检查方法
+        """Check health of the vector store.
 
         Returns:
-            (is_healthy, message) 元组
+            Tuple of (is_healthy, message)
         """
         try:
             # 检查 Qdrant 连接
@@ -334,3 +330,227 @@ class FactorVectorStore:
         """检查向量存储是否可用"""
         healthy, _ = self.health_check()
         return healthy
+
+    # =========================================================================
+    # Pattern Memory Support (Closed-Loop Factor Mining)
+    # =========================================================================
+
+    def ensure_pattern_collection(self, collection_name: str = "patterns") -> None:
+        """Ensure the patterns collection exists.
+
+        Args:
+            collection_name: Name of the patterns collection
+        """
+        if not self.qdrant.collection_exists(collection_name):
+            self.qdrant.create_collection(
+                collection_name=collection_name,
+                vector_size=self.embedding.dimension,
+                distance="Cosine",
+            )
+            logger.info(f"Created patterns collection: {collection_name}")
+
+    def add_pattern(
+        self,
+        pattern_id: str,
+        pattern_type: str,
+        hypothesis: str,
+        factor_code: str,
+        family: str,
+        metrics: dict[str, float],
+        feedback: Optional[str] = None,
+        failure_reasons: Optional[list[str]] = None,
+        trial_id: Optional[str] = None,
+        collection_name: str = "patterns",
+    ) -> str:
+        """Add a pattern to the vector store.
+
+        Patterns are success/failure records from factor evaluation,
+        used for similarity-based retrieval during factor generation.
+
+        Args:
+            pattern_id: Unique pattern identifier
+            pattern_type: "success" or "failure"
+            hypothesis: The research hypothesis
+            factor_code: Generated factor code
+            family: Factor family
+            metrics: Evaluation metrics (ic, ir, sharpe, etc.)
+            feedback: Structured feedback text (for failures)
+            failure_reasons: List of FailureReason values
+            trial_id: Reference to evaluation trial
+            collection_name: Qdrant collection name
+
+        Returns:
+            Stored pattern ID
+        """
+        # Ensure collection exists
+        self.ensure_pattern_collection(collection_name)
+
+        # Generate embedding from hypothesis + code
+        embedding = self.embedding.generate_factor_embedding(
+            factor_code=factor_code,
+            factor_name=f"{pattern_type}_pattern",
+            hypothesis=hypothesis,
+        )
+
+        # Build payload
+        payload = {
+            "pattern_id": pattern_id,
+            "pattern_type": pattern_type,
+            "hypothesis": hypothesis,
+            "factor_code": factor_code,
+            "family": family,
+            "metrics": metrics,
+            "feedback": feedback,
+            "failure_reasons": failure_reasons or [],
+            "trial_id": trial_id,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Store in Qdrant
+        try:
+            self.qdrant.client.upsert(
+                collection_name=collection_name,
+                points=[
+                    qdrant_models.PointStruct(
+                        id=pattern_id,
+                        vector=embedding,
+                        payload=payload,
+                    )
+                ],
+            )
+
+            logger.info(f"Added {pattern_type} pattern to vector store: {pattern_id}")
+            return pattern_id
+
+        except Exception as e:
+            logger.error(f"Failed to add pattern {pattern_id}: {e}")
+            raise
+
+    def search_patterns(
+        self,
+        hypothesis: str,
+        pattern_type: Optional[str] = None,
+        family: Optional[str] = None,
+        limit: int = 5,
+        collection_name: str = "patterns",
+    ) -> list[dict[str, Any]]:
+        """Search for similar patterns by hypothesis.
+
+        Args:
+            hypothesis: Query hypothesis for similarity search
+            pattern_type: Filter by "success" or "failure" (optional)
+            family: Filter by factor family (optional)
+            limit: Maximum number of results
+            collection_name: Qdrant collection name
+
+        Returns:
+            List of similar patterns with scores
+        """
+        # Ensure collection exists
+        self.ensure_pattern_collection(collection_name)
+
+        # Generate query embedding
+        query_embedding = self.embedding.generate_factor_embedding(
+            factor_code="",
+            factor_name="query",
+            hypothesis=hypothesis,
+        )
+
+        # Build filter conditions
+        filter_conditions = []
+
+        if pattern_type:
+            filter_conditions.append(
+                qdrant_models.FieldCondition(
+                    key="pattern_type",
+                    match=qdrant_models.MatchValue(value=pattern_type),
+                )
+            )
+
+        if family:
+            filter_conditions.append(
+                qdrant_models.FieldCondition(
+                    key="family",
+                    match=qdrant_models.MatchValue(value=family),
+                )
+            )
+
+        query_filter = None
+        if filter_conditions:
+            query_filter = qdrant_models.Filter(must=filter_conditions)
+
+        try:
+            results = self.qdrant.client.search(
+                collection_name=collection_name,
+                query_vector=query_embedding,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=True,
+            )
+
+            patterns = []
+            for result in results:
+                pattern = result.payload.copy()
+                pattern["score"] = result.score
+                patterns.append(pattern)
+
+            logger.debug(f"Found {len(patterns)} similar patterns for hypothesis")
+            return patterns
+
+        except Exception as e:
+            # Log detailed error info for debugging
+            logger.error(
+                f"Failed to search patterns: {e}",
+                extra={
+                    "hypothesis_preview": hypothesis[:100] if hypothesis else None,
+                    "pattern_type": pattern_type,
+                    "family": family,
+                    "collection": collection_name,
+                },
+            )
+            # Return empty list to allow caller to continue gracefully
+            return []
+
+    def delete_pattern(
+        self,
+        pattern_id: str,
+        collection_name: str = "patterns",
+    ) -> bool:
+        """Delete a pattern from the vector store.
+
+        Args:
+            pattern_id: Pattern ID to delete
+            collection_name: Qdrant collection name
+
+        Returns:
+            True if deleted successfully
+        """
+        try:
+            self.qdrant.client.delete(
+                collection_name=collection_name,
+                points_selector=qdrant_models.PointIdsList(
+                    points=[pattern_id],
+                ),
+            )
+
+            logger.info(f"Deleted pattern: {pattern_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to delete pattern {pattern_id}: {e}")
+            return False
+
+    def get_pattern_stats(
+        self,
+        collection_name: str = "patterns",
+    ) -> dict[str, Any]:
+        """Get statistics for the patterns collection.
+
+        Args:
+            collection_name: Qdrant collection name
+
+        Returns:
+            Collection statistics
+        """
+        self.ensure_pattern_collection(collection_name)
+        return self.qdrant.get_collection_info(collection_name)

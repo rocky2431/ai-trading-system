@@ -1,0 +1,15 @@
+On branch main
+Your branch is ahead of 'origin/main' by 1 commit.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/iqfmp/evaluation/qlib_stats.py
+	modified:   tests/unit/api/test_auth.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	mlruns/576493356213322160/f4c79ad4ff364e48b181c9d78e42e96a/
+
+no changes added to commit (use "git add" and/or "git commit -a")

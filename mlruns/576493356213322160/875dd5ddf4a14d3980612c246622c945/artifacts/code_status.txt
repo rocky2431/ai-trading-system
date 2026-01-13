@@ -1,0 +1,26 @@
+On branch main
+Your branch is ahead of 'origin/main' by 2 commits.
+  (use "git push" to publish your local commits)
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   dashboard/src/components/trading/RiskStatusCard.tsx
+	modified:   dashboard/src/hooks/useFactors.ts
+	modified:   dashboard/src/hooks/useLiveTrading.ts
+	modified:   src/iqfmp/agents/orchestrator.py
+	modified:   src/iqfmp/core/backtest_engine.py
+	modified:   src/iqfmp/core/sandbox.py
+	modified:   src/iqfmp/evaluation/factor_evaluator.py
+	modified:   src/iqfmp/evaluation/research_ledger.py
+	modified:   src/iqfmp/exchange/adapter.py
+	modified:   src/iqfmp/exchange/execution.py
+	modified:   src/iqfmp/exchange/risk.py
+	modified:   src/iqfmp/llm/provider.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	mlruns/576493356213322160/875dd5ddf4a14d3980612c246622c945/
+	mlruns/576493356213322160/f4c79ad4ff364e48b181c9d78e42e96a/
+
+no changes added to commit (use "git add" and/or "git commit -a")

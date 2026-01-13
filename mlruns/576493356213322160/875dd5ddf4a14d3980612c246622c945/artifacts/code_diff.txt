@@ -1,0 +1,1623 @@
+diff --git a/dashboard/src/components/trading/RiskStatusCard.tsx b/dashboard/src/components/trading/RiskStatusCard.tsx
+index 19ebca5..0b9f96b 100644
+--- a/dashboard/src/components/trading/RiskStatusCard.tsx
++++ b/dashboard/src/components/trading/RiskStatusCard.tsx
+@@ -57,6 +57,17 @@ function getProgressColor(value: number, thresholds: [number, number, number]):
+   return '[&>div]:bg-emerald-500'
+ }
+ 
++// Alert severity style configuration
++const alertStyles: Record<string, { bg: string; badge: 'destructive' | 'warning' }> = {
++  critical: { bg: 'bg-red-500/10 text-red-500', badge: 'destructive' },
++  danger: { bg: 'bg-orange-500/10 text-orange-500', badge: 'destructive' },
++  warning: { bg: 'bg-amber-500/10 text-amber-500', badge: 'warning' },
++}
++
++function getAlertStyle(severity: string) {
++  return alertStyles[severity] || alertStyles.warning
++}
++
+ export function RiskStatusCard({ risk }: RiskStatusCardProps) {
+   const config = riskConfig[risk.level]
+   const StatusIcon = config.Icon
+@@ -161,32 +172,22 @@ export function RiskStatusCard({ risk }: RiskStatusCardProps) {
+               Active Alerts ({risk.alerts.length})
+             </h4>
+             <div className="space-y-2">
+-              {risk.alerts.map((alert) => (
+-                <div
+-                  key={alert.id}
+-                  className={`p-3 rounded-lg text-sm ${
+-                    alert.severity === 'critical'
+-                      ? 'bg-red-500/10 text-red-500'
+-                      : alert.severity === 'danger'
+-                      ? 'bg-orange-500/10 text-orange-500'
+-                      : 'bg-amber-500/10 text-amber-500'
+-                  }`}
+-                >
+-                  <div className="flex items-start justify-between">
+-                    <span>{alert.message}</span>
+-                    <Badge
+-                      variant={
+-                        alert.severity === 'critical' || alert.severity === 'danger'
+-                          ? 'destructive'
+-                          : 'warning'
+-                      }
+-                      className="text-xs ml-2"
+-                    >
+-                      {alert.severity}
+-                    </Badge>
++              {risk.alerts.map((alert) => {
++                const style = getAlertStyle(alert.severity)
++                return (
++                  <div
++                    key={alert.id}
++                    className={`p-3 rounded-lg text-sm ${style.bg}`}
++                  >
++                    <div className="flex items-start justify-between">
++                      <span>{alert.message}</span>
++                      <Badge variant={style.badge} className="text-xs ml-2">
++                        {alert.severity}
++                      </Badge>
++                    </div>
+                   </div>
+-                </div>
+-              ))}
++                )
++              })}
+             </div>
+           </div>
+         )}
+diff --git a/dashboard/src/hooks/useFactors.ts b/dashboard/src/hooks/useFactors.ts
+index d17f1bb..9007c5b 100644
+--- a/dashboard/src/hooks/useFactors.ts
++++ b/dashboard/src/hooks/useFactors.ts
+@@ -1,6 +1,6 @@
+ /**
+- * Factors Hook - 提供因子列表和筛选功能
+- * 使用真实 API 数据
++ * Factors Hook - Factor list and filtering functionality
++ * Uses real API data from backend
+  */
+ 
+ import { useState, useEffect, useMemo, useCallback } from 'react'
+@@ -8,7 +8,25 @@ import { factorsApi } from '@/api'
+ import type { FactorResponse } from '@/api'
+ import type { Factor, FactorFilter, FactorFamily, FactorStatus } from '@/types/factor'
+ 
+-// 将 API 响应转换为前端类型
++/**
++ * Calculate stability score from IC values across data splits.
++ * Stability = (average IC across splits) / (overall IC mean)
++ * Higher values indicate more consistent factor performance across train/valid/test.
++ * Returns 0.7 as default when data is unavailable.
++ */
++function calculateStability(metrics: FactorResponse['metrics']): number {
++  if (!metrics || !metrics.ic_by_split || metrics.ic_mean === 0) {
++    return 0.7
++  }
++  const icValues = Object.values(metrics.ic_by_split)
++  if (icValues.length === 0) {
++    return 0.7
++  }
++  const avgIcAcrossSplits = icValues.reduce((a, b) => a + b, 0) / icValues.length
++  return avgIcAcrossSplits / metrics.ic_mean || 0.7
++}
++
++// Transform API response to frontend Factor type
+ function apiToFactor(response: FactorResponse): Factor {
+   return {
+     id: response.id,
+@@ -28,21 +46,19 @@ function apiToFactor(response: FactorResponse): Factor {
+       maxDrawdown: response.metrics.max_drawdown * 100,
+       winRate: 50 + response.metrics.ir * 5,
+       turnover: response.metrics.turnover * 100,
+-      stability: Object.values(response.metrics.ic_by_split).reduce((a, b) => a + b, 0) /
+-        Math.max(Object.values(response.metrics.ic_by_split).length, 1) / response.metrics.ic_mean || 0.7,
++      stability: calculateStability(response.metrics),
+     } : null,
+     evaluationCount: response.experiment_number,
+     tags: response.family || [],
+   }
+ }
+ 
+-// Direct passthrough - backend FactorStatus matches frontend FactorStatus type
++// Validated status mapping - returns status if valid, defaults to 'candidate' for unknown values
+ function mapApiStatus(status: string): FactorStatus {
+   const validStatuses: FactorStatus[] = ['candidate', 'rejected', 'core', 'redundant']
+   if (validStatuses.includes(status as FactorStatus)) {
+     return status as FactorStatus
+   }
+-  // Fallback for unknown status
+   return 'candidate'
+ }
+ 
+@@ -58,7 +74,7 @@ export function useFactors(initialFilter?: FactorFilter) {
+   const [loading, setLoading] = useState(true)
+   const [error, setError] = useState<Error | null>(null)
+ 
+-  // 加载因子数据
++  // Load factor data from API
+   const loadFactors = useCallback(async () => {
+     setLoading(true)
+     setError(null)
+@@ -82,7 +98,7 @@ export function useFactors(initialFilter?: FactorFilter) {
+     loadFactors()
+   }, [loadFactors])
+ 
+-  // 生成新因子
++  // Generate new factor via LLM
+   const generateFactor = useCallback(async (description: string, family?: string[]) => {
+     setLoading(true)
+     try {
+@@ -101,13 +117,13 @@ export function useFactors(initialFilter?: FactorFilter) {
+     }
+   }, [])
+ 
+-  // 评估因子
++  // Evaluate factor performance
+   const evaluateFactor = useCallback(async (factorId: string) => {
+     try {
+       const response = await factorsApi.evaluate(factorId, {
+         splits: ['train', 'valid', 'test'],
+       })
+-      // 重新加载因子列表以获取更新后的数据
++      // Reload factor list to get updated metrics
+       await loadFactors()
+       return response
+     } catch (err) {
+@@ -116,7 +132,7 @@ export function useFactors(initialFilter?: FactorFilter) {
+     }
+   }, [loadFactors])
+ 
+-  // 更新因子状态
++  // Update factor status (candidate/core/rejected/redundant)
+   const updateFactorStatus = useCallback(async (factorId: string, status: string) => {
+     try {
+       await factorsApi.updateStatus(factorId, status)
+@@ -127,7 +143,7 @@ export function useFactors(initialFilter?: FactorFilter) {
+     }
+   }, [loadFactors])
+ 
+-  // 删除因子
++  // Delete factor
+   const deleteFactor = useCallback(async (factorId: string) => {
+     try {
+       await factorsApi.delete(factorId)
+@@ -138,7 +154,7 @@ export function useFactors(initialFilter?: FactorFilter) {
+     }
+   }, [])
+ 
+-  // 过滤和排序
++  // Filter and sort factors
+   const filteredFactors = useMemo(() => {
+     let result = [...factors]
+ 
+@@ -203,7 +219,7 @@ export function useFactors(initialFilter?: FactorFilter) {
+     return result
+   }, [factors, filter])
+ 
+-  // 统计信息
++  // Statistics by family and status
+   const stats = useMemo(() => {
+     const byFamily: Record<FactorFamily, number> = {
+       momentum: 0,
+diff --git a/dashboard/src/hooks/useLiveTrading.ts b/dashboard/src/hooks/useLiveTrading.ts
+index 5b44d25..c175868 100644
+--- a/dashboard/src/hooks/useLiveTrading.ts
++++ b/dashboard/src/hooks/useLiveTrading.ts
+@@ -155,54 +155,45 @@ export function useLiveTrading() {
+         wsRef.current.onmessage = (event) => {
+           try {
+             const message = JSON.parse(event.data) as TradingWebSocketMessage
++            const { type, data, timestamp } = message
+ 
+-            // Handle trading-related messages
+-            switch (message.type) {
++            // Consolidated handler for trading-related messages
++            switch (type) {
+               case 'trading_state_update':
+-                // Full state update
+-                if (message.data) {
++                if (data) {
+                   setState((prev) => ({
+                     ...prev,
+-                    ...(message.data as Partial<TradingState>),
+-                    lastUpdated: message.timestamp,
++                    ...(data as Partial<TradingState>),
++                    lastUpdated: timestamp,
+                   }))
+                 }
+                 break
+ 
+               case 'position_update':
+-                // Position update
+-                fetchState()
+-                break
+-
+               case 'order_update':
+-                // Order update
++                // Both trigger a full state refresh
+                 fetchState()
+                 break
+ 
+               case 'account_update':
+-                // Account update
+-                if (message.data?.account) {
++                if (data?.account) {
+                   setState((prev) => ({
+                     ...prev,
+-                    account: message.data.account as AccountInfo,
+-                    lastUpdated: message.timestamp,
++                    account: data.account as AccountInfo,
++                    lastUpdated: timestamp,
+                   }))
+                 }
+                 break
+ 
+               case 'risk_alert':
+-                // Risk alert
+-                if (message.data?.alert) {
++                if (data?.alert) {
+                   setState((prev) => ({
+                     ...prev,
+                     risk: {
+                       ...prev.risk,
+-                      alerts: [
+-                        message.data.alert as RiskAlert,
+-                        ...prev.risk.alerts.slice(0, 9),
+-                      ],
++                      alerts: [data.alert as RiskAlert, ...prev.risk.alerts.slice(0, 9)],
+                     },
+-                    lastUpdated: message.timestamp,
++                    lastUpdated: timestamp,
+                   }))
+                 }
+                 break
+diff --git a/src/iqfmp/agents/orchestrator.py b/src/iqfmp/agents/orchestrator.py
+index 9cfb198..860f5cf 100644
+--- a/src/iqfmp/agents/orchestrator.py
++++ b/src/iqfmp/agents/orchestrator.py
+@@ -9,9 +9,7 @@ LangGraph concepts, with support for:
+ """
+ 
+ import asyncio
+-import inspect
+ import json
+-import os
+ import time
+ import uuid
+ from abc import ABC, abstractmethod
+diff --git a/src/iqfmp/core/backtest_engine.py b/src/iqfmp/core/backtest_engine.py
+index 342672d..437fc68 100644
+--- a/src/iqfmp/core/backtest_engine.py
++++ b/src/iqfmp/core/backtest_engine.py
+@@ -86,7 +86,12 @@ class BacktestResult:
+     factor_contributions: dict[str, float] = field(default_factory=dict)
+ 
+     def to_dict(self) -> dict:
+-        """Convert to dictionary for serialization."""
++        """Convert to dictionary for serialization.
++
++        Note: Large collections are truncated to limit response size:
++        - equity_curve: last 100 entries (full data in self.equity_curve)
++        - trades: last 50 trades (full data in self.trades)
++        """
+         return {
+             "total_return": self.total_return,
+             "annual_return": self.annual_return,
+diff --git a/src/iqfmp/core/sandbox.py b/src/iqfmp/core/sandbox.py
+index 622a483..d642d9e 100644
+--- a/src/iqfmp/core/sandbox.py
++++ b/src/iqfmp/core/sandbox.py
+@@ -5,11 +5,11 @@ Python code. It serves as the second layer of the three-layer security
+ architecture.
+ 
+ Security Layers:
+-1. AST Security Checker - Static analysis (pre-execution)
++1. AST Security Checker - Static analysis (pre-execution) - see iqfmp.core.security
+ 2. Sandbox Executor (this module) - Runtime isolation with RestrictedPython
+-3. Human Review Gate - Manual approval
++3. Human Review Gate - Manual approval - see iqfmp.core.review.HumanReviewGate
+ 
+-P0 Security Enhancement (2025-12-26):
++Features:
+ - RestrictedPython integration for bytecode-level restrictions
+ - CPU/Memory resource limits via resource.setrlimit
+ - Subprocess isolation for additional safety
+@@ -41,6 +41,72 @@ from iqfmp.core.security import ASTSecurityChecker
+ logger = logging.getLogger(__name__)
+ 
+ 
++# Module import configuration - maps module names to (import_func, aliases)
++# This centralizes module import logic for both subprocess and main process execution
++def _build_module_import_map() -> dict[str, tuple[callable, list[str]]]:
++    """Build the module import map. Returns dict of module_name -> (import_func, aliases)."""
++    return {
++        "pandas": (lambda: __import__("pandas"), ["pandas", "pd"]),
++        "numpy": (lambda: __import__("numpy"), ["numpy", "np"]),
++        "math": (lambda: __import__("math"), ["math"]),
++        "statistics": (lambda: __import__("statistics"), ["statistics"]),
++        "datetime": (lambda: __import__("datetime"), ["datetime"]),
++        "time": (lambda: __import__("time"), ["time"]),
++        "collections": (lambda: __import__("collections"), ["collections"]),
++        "itertools": (lambda: __import__("itertools"), ["itertools"]),
++        "functools": (lambda: __import__("functools"), ["functools"]),
++        "operator": (lambda: __import__("operator"), ["operator"]),
++        "typing": (lambda: __import__("typing"), ["typing"]),
++        "dataclasses": (lambda: __import__("dataclasses"), ["dataclasses"]),
++        "enum": (lambda: __import__("enum"), ["enum"]),
++        "abc": (lambda: __import__("abc"), ["abc"]),
++        "copy": (lambda: __import__("copy"), ["copy"]),
++        "re": (lambda: __import__("re"), ["re"]),
++        "json": (lambda: __import__("json"), ["json"]),
++        "hashlib": (lambda: __import__("hashlib"), ["hashlib"]),
++        "base64": (lambda: __import__("base64"), ["base64"]),
++        "decimal": (lambda: __import__("decimal"), ["decimal"]),
++        "fractions": (lambda: __import__("fractions"), ["fractions"]),
++    }
++
++
++def _import_modules_shared(module_names: list[str], log_failures: bool = False) -> dict[str, Any]:
++    """Import allowed modules - shared implementation for subprocess and main process.
++
++    Args:
++        module_names: List of module names to import
++        log_failures: Whether to log import failures (False for subprocess)
++
++    Returns:
++        Dictionary mapping module names/aliases to imported modules
++    """
++    exec_globals: dict[str, Any] = {}
++    import_map = _build_module_import_map()
++
++    for module_name in module_names:
++        try:
++            # Special handling for qlib_stats
++            if module_name == "iqfmp.evaluation.qlib_stats":
++                try:
++                    from iqfmp.evaluation import qlib_stats
++                    exec_globals["qlib_stats"] = qlib_stats
++                except ImportError:
++                    if log_failures:
++                        logger.warning(f"Failed to import: {module_name}")
++                continue
++
++            if module_name in import_map:
++                import_func, aliases = import_map[module_name]
++                module = import_func()
++                for alias in aliases:
++                    exec_globals[alias] = module
++        except ImportError:
++            if log_failures:
++                logger.warning(f"Failed to import allowed module: {module_name}")
++
++    return exec_globals
++
++
+ class ExecutionStatus(str, Enum):
+     """Status of code execution."""
+ 
+@@ -226,86 +292,8 @@ def _subprocess_worker(
+ 
+ 
+ def _import_modules_for_subprocess(module_names: list[str]) -> dict[str, Any]:
+-    """Import allowed modules in subprocess context."""
+-    exec_globals: dict[str, Any] = {}
+-
+-    for module_name in module_names:
+-        try:
+-            if module_name == "pandas":
+-                import pandas as pd
+-                exec_globals["pandas"] = pd
+-                exec_globals["pd"] = pd
+-            elif module_name == "numpy":
+-                import numpy as np
+-                exec_globals["numpy"] = np
+-                exec_globals["np"] = np
+-            elif module_name == "iqfmp.evaluation.qlib_stats":
+-                try:
+-                    from iqfmp.evaluation import qlib_stats
+-                    exec_globals["qlib_stats"] = qlib_stats
+-                except ImportError:
+-                    pass  # May not be available in subprocess
+-            elif module_name == "math":
+-                import math
+-                exec_globals["math"] = math
+-            elif module_name == "statistics":
+-                import statistics
+-                exec_globals["statistics"] = statistics
+-            elif module_name == "datetime":
+-                import datetime
+-                exec_globals["datetime"] = datetime
+-            elif module_name == "time":
+-                import time as time_module
+-                exec_globals["time"] = time_module
+-            elif module_name == "collections":
+-                import collections
+-                exec_globals["collections"] = collections
+-            elif module_name == "itertools":
+-                import itertools
+-                exec_globals["itertools"] = itertools
+-            elif module_name == "functools":
+-                import functools
+-                exec_globals["functools"] = functools
+-            elif module_name == "operator":
+-                import operator
+-                exec_globals["operator"] = operator
+-            elif module_name == "typing":
+-                import typing
+-                exec_globals["typing"] = typing
+-            elif module_name == "dataclasses":
+-                import dataclasses
+-                exec_globals["dataclasses"] = dataclasses
+-            elif module_name == "enum":
+-                import enum
+-                exec_globals["enum"] = enum
+-            elif module_name == "abc":
+-                import abc
+-                exec_globals["abc"] = abc
+-            elif module_name == "copy":
+-                import copy
+-                exec_globals["copy"] = copy
+-            elif module_name == "re":
+-                import re
+-                exec_globals["re"] = re
+-            elif module_name == "json":
+-                import json
+-                exec_globals["json"] = json
+-            elif module_name == "hashlib":
+-                import hashlib
+-                exec_globals["hashlib"] = hashlib
+-            elif module_name == "base64":
+-                import base64
+-                exec_globals["base64"] = base64
+-            elif module_name == "decimal":
+-                import decimal
+-                exec_globals["decimal"] = decimal
+-            elif module_name == "fractions":
+-                import fractions
+-                exec_globals["fractions"] = fractions
+-        except ImportError:
+-            pass
+-
+-    return exec_globals
++    """Import allowed modules in subprocess context (no logging)."""
++    return _import_modules_shared(module_names, log_failures=False)
+ 
+ 
+ def _execute_in_subprocess(
+@@ -741,80 +729,5 @@ class SandboxExecutor:
+                 pass
+ 
+     def _import_allowed_modules(self) -> dict[str, Any]:
+-        """Import allowed modules and return as globals dict."""
+-        exec_globals: dict[str, Any] = {}
+-
+-        for module_name in self.config.allowed_modules:
+-            try:
+-                if module_name == "pandas":
+-                    import pandas as pd
+-                    exec_globals["pandas"] = pd
+-                    exec_globals["pd"] = pd
+-                elif module_name == "numpy":
+-                    import numpy as np
+-                    exec_globals["numpy"] = np
+-                    exec_globals["np"] = np
+-                elif module_name == "iqfmp.evaluation.qlib_stats":
+-                    from iqfmp.evaluation import qlib_stats
+-                    exec_globals["qlib_stats"] = qlib_stats
+-                elif module_name == "math":
+-                    import math
+-                    exec_globals["math"] = math
+-                elif module_name == "statistics":
+-                    import statistics
+-                    exec_globals["statistics"] = statistics
+-                elif module_name == "datetime":
+-                    import datetime
+-                    exec_globals["datetime"] = datetime
+-                elif module_name == "time":
+-                    import time as time_module
+-                    exec_globals["time"] = time_module
+-                elif module_name == "collections":
+-                    import collections
+-                    exec_globals["collections"] = collections
+-                elif module_name == "itertools":
+-                    import itertools
+-                    exec_globals["itertools"] = itertools
+-                elif module_name == "functools":
+-                    import functools
+-                    exec_globals["functools"] = functools
+-                elif module_name == "operator":
+-                    import operator
+-                    exec_globals["operator"] = operator
+-                elif module_name == "typing":
+-                    import typing
+-                    exec_globals["typing"] = typing
+-                elif module_name == "dataclasses":
+-                    import dataclasses
+-                    exec_globals["dataclasses"] = dataclasses
+-                elif module_name == "enum":
+-                    import enum
+-                    exec_globals["enum"] = enum
+-                elif module_name == "abc":
+-                    import abc
+-                    exec_globals["abc"] = abc
+-                elif module_name == "copy":
+-                    import copy
+-                    exec_globals["copy"] = copy
+-                elif module_name == "re":
+-                    import re
+-                    exec_globals["re"] = re
+-                elif module_name == "json":
+-                    import json
+-                    exec_globals["json"] = json
+-                elif module_name == "hashlib":
+-                    import hashlib
+-                    exec_globals["hashlib"] = hashlib
+-                elif module_name == "base64":
+-                    import base64
+-                    exec_globals["base64"] = base64
+-                elif module_name == "decimal":
+-                    import decimal
+-                    exec_globals["decimal"] = decimal
+-                elif module_name == "fractions":
+-                    import fractions
+-                    exec_globals["fractions"] = fractions
+-            except ImportError:
+-                logger.warning(f"Failed to import allowed module: {module_name}")
+-
+-        return exec_globals
++        """Import allowed modules and return as globals dict (with logging)."""
++        return _import_modules_shared(list(self.config.allowed_modules), log_failures=True)
+diff --git a/src/iqfmp/evaluation/factor_evaluator.py b/src/iqfmp/evaluation/factor_evaluator.py
+index 10ed528..43e98d6 100644
+--- a/src/iqfmp/evaluation/factor_evaluator.py
++++ b/src/iqfmp/evaluation/factor_evaluator.py
+@@ -1,11 +1,11 @@
+-"""Factor Evaluator - Qlib-native evaluation engine.
++"""Factor Evaluator - Qlib-integrated evaluation engine.
+ 
+-This module uses Qlib as the SOLE computational backend for factor evaluation:
+-- IC/Rank IC calculation via Qlib's correlation engine
+-- IR/Sharpe calculation via Qlib's risk metrics
+-- MaxDD/Win Rate via Qlib's backtest analytics
++This module uses Qlib as the primary computational backend for factor evaluation:
++- IC/Rank IC calculation via Qlib's correlation engine (with pandas fallback)
++- IR/Sharpe/MaxDD via standard financial metrics using numpy
++- Unified statistical functions via iqfmp.evaluation.qlib_stats
+ 
+-All computations MUST go through Qlib. No local numpy/scipy calculations.
++Note: scipy is intentionally excluded; numpy/pandas are used for core calculations.
+ """
+ 
+ from __future__ import annotations
+diff --git a/src/iqfmp/evaluation/research_ledger.py b/src/iqfmp/evaluation/research_ledger.py
+index 2382f45..03d8909 100644
+--- a/src/iqfmp/evaluation/research_ledger.py
++++ b/src/iqfmp/evaluation/research_ledger.py
+@@ -2,12 +2,12 @@
+ 
+ This module provides:
+ - TrialRecord: Data structure for recording individual trials
+-- DynamicThreshold: Calculator for adjusting significance thresholds
++- DynamicThreshold: Calculator for adjusting significance thresholds (Deflated Sharpe Ratio)
+ - ResearchLedger: Main ledger for trial tracking and querying
+-- Storage backends: MemoryStorage and FileStorage
++- Storage backends: PostgresStorage (production), MemoryStorage (testing), FileStorage (legacy)
+ 
+-The dynamic threshold uses a simplified Deflated Sharpe Ratio approach
+-to account for multiple hypothesis testing.
++The dynamic threshold uses Deflated Sharpe Ratio methodology to account for
++multiple hypothesis testing and prevent p-hacking in factor research.
+ """
+ 
+ from __future__ import annotations
+@@ -443,18 +443,15 @@ class LedgerStorage(ABC):
+ 
+ 
+ class MemoryStorage(LedgerStorage):
+-    """In-memory storage backend."""
++    """In-memory storage backend for testing. Not thread-safe, not persistent."""
+ 
+     def __init__(self) -> None:
+-        """Initialize empty storage."""
+         self._trials: list[TrialRecord] = []
+ 
+     def save(self, trials: list[TrialRecord]) -> None:
+-        """Save trials to memory."""
+         self._trials = trials.copy()
+ 
+     def load(self) -> list[TrialRecord]:
+-        """Load trials from memory."""
+         return self._trials.copy()
+ 
+ 
+diff --git a/src/iqfmp/exchange/adapter.py b/src/iqfmp/exchange/adapter.py
+index 4d4bbe3..150adcb 100644
+--- a/src/iqfmp/exchange/adapter.py
++++ b/src/iqfmp/exchange/adapter.py
+@@ -366,14 +366,21 @@ class ExchangeAdapter(ABC):
+         pass
+ 
+ 
+-# ============ Binance Adapter ============
++# ============ CCXT Base Adapter ============
+ 
+ 
+-class BinanceAdapter(ExchangeAdapter):
+-    """Binance Futures (USDT-M) adapter."""
++class CCXTBaseAdapter(ExchangeAdapter):
++    """Base adapter with shared CCXT implementation.
++
++    Subclasses only need to implement _setup_exchange() to configure
++    the specific exchange instance (Binance, OKX, etc.).
++    """
++
++    # Override in subclass for exchange-specific error messages
++    _exchange_name: str = "Exchange"
+ 
+     def __init__(self, config: ExchangeConfig) -> None:
+-        """Initialize Binance adapter.
++        """Initialize adapter.
+ 
+         Args:
+             config: Exchange configuration
+@@ -381,47 +388,25 @@ class BinanceAdapter(ExchangeAdapter):
+         super().__init__(config)
+         self._setup_exchange()
+ 
++    @abstractmethod
+     def _setup_exchange(self) -> None:
+-        """Setup ccxt exchange instance."""
+-        if ccxt is None:
+-            raise ImportError("ccxt is required for exchange connections")
+-
+-        options = {
+-            "defaultType": "future",
+-            "adjustForTimeDifference": True,
+-            **self.config.options,
+-        }
+-
+-        self._exchange = ccxt.binanceusdm({
+-            "apiKey": self.config.api_key,
+-            "secret": self.config.api_secret,
+-            "sandbox": self.config.sandbox,
+-            "timeout": self.config.timeout,
+-            "enableRateLimit": self.config.rate_limit,
+-            "options": options,
+-        })
++        """Setup ccxt exchange instance. Must be implemented by subclass."""
++        pass
+ 
+     async def connect(self) -> None:
+-        """Connect to Binance."""
++        """Connect to exchange."""
+         try:
+             await self._exchange.load_markets()
+         except Exception as e:
+-            raise ConnectionError(f"Failed to connect to Binance: {e}")
++            raise ConnectionError(f"Failed to connect to {self._exchange_name}: {e}")
+ 
+     async def disconnect(self) -> None:
+-        """Disconnect from Binance."""
++        """Disconnect from exchange."""
+         if hasattr(self._exchange, "close"):
+             await self._exchange.close()
+ 
+     async def fetch_ticker(self, symbol: str) -> Ticker:
+-        """Fetch ticker from Binance.
+-
+-        Args:
+-            symbol: Trading pair symbol
+-
+-        Returns:
+-            Ticker data
+-        """
++        """Fetch ticker data."""
+         try:
+             data = await self._exchange.fetch_ticker(symbol)
+             return Ticker(
+@@ -437,18 +422,8 @@ class BinanceAdapter(ExchangeAdapter):
+         except Exception as e:
+             raise ExchangeError(f"Failed to fetch ticker: {e}")
+ 
+-    async def fetch_orderbook(
+-        self, symbol: str, limit: int = 20
+-    ) -> OrderBook:
+-        """Fetch order book from Binance.
+-
+-        Args:
+-            symbol: Trading pair symbol
+-            limit: Number of levels
+-
+-        Returns:
+-            Order book data
+-        """
++    async def fetch_orderbook(self, symbol: str, limit: int = 20) -> OrderBook:
++        """Fetch order book data."""
+         try:
+             data = await self._exchange.fetch_order_book(symbol, limit)
+             return OrderBook(
+@@ -460,21 +435,9 @@ class BinanceAdapter(ExchangeAdapter):
+             raise ExchangeError(f"Failed to fetch orderbook: {e}")
+ 
+     async def fetch_ohlcv(
+-        self,
+-        symbol: str,
+-        timeframe: str = "1m",
+-        limit: int = 100,
++        self, symbol: str, timeframe: str = "1m", limit: int = 100
+     ) -> list[OHLCV]:
+-        """Fetch OHLCV from Binance.
+-
+-        Args:
+-            symbol: Trading pair symbol
+-            timeframe: Candle timeframe
+-            limit: Number of candles
+-
+-        Returns:
+-            List of OHLCV data
+-        """
++        """Fetch OHLCV candle data."""
+         try:
+             data = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+             return [
+@@ -492,11 +455,7 @@ class BinanceAdapter(ExchangeAdapter):
+             raise ExchangeError(f"Failed to fetch OHLCV: {e}")
+ 
+     async def fetch_balance(self) -> dict[str, Balance]:
+-        """Fetch balance from Binance.
+-
+-        Returns:
+-            Dictionary of balances by currency
+-        """
++        """Fetch account balance."""
+         try:
+             data = await self._exchange.fetch_balance()
+             result = {}
+@@ -521,21 +480,8 @@ class BinanceAdapter(ExchangeAdapter):
+         price: Optional[Decimal] = None,
+         **kwargs: Any,
+     ) -> Order:
+-        """Create order on Binance.
+-
+-        Args:
+-            symbol: Trading pair
+-            side: Buy or sell
+-            order_type: Order type
+-            amount: Order amount (Decimal for financial precision)
+-            price: Limit price (Decimal for financial precision)
+-            **kwargs: Additional order parameters
+-
+-        Returns:
+-            Created order
+-        """
++        """Create an order."""
+         try:
+-            # Convert Decimal to float for ccxt (ccxt uses float internally)
+             params = {}
+             if kwargs.get("reduceOnly"):
+                 params["reduceOnly"] = True
+@@ -557,15 +503,7 @@ class BinanceAdapter(ExchangeAdapter):
+             raise ExchangeError(f"Failed to create order: {e}")
+ 
+     async def cancel_order(self, order_id: str, symbol: str) -> bool:
+-        """Cancel order on Binance.
+-
+-        Args:
+-            order_id: Order ID
+-            symbol: Trading pair
+-
+-        Returns:
+-            True if canceled successfully
+-        """
++        """Cancel an order."""
+         try:
+             await self._exchange.cancel_order(order_id, symbol)
+             return True
+@@ -575,15 +513,7 @@ class BinanceAdapter(ExchangeAdapter):
+             raise ExchangeError(f"Failed to cancel order: {e}")
+ 
+     async def fetch_order(self, order_id: str, symbol: str) -> Order:
+-        """Fetch order from Binance.
+-
+-        Args:
+-            order_id: Order ID
+-            symbol: Trading pair
+-
+-        Returns:
+-            Order data
+-        """
++        """Fetch order status."""
+         try:
+             data = await self._exchange.fetch_order(order_id, symbol)
+             return self._parse_order(data)
+@@ -593,14 +523,7 @@ class BinanceAdapter(ExchangeAdapter):
+             raise ExchangeError(f"Failed to fetch order: {e}")
+ 
+     def _parse_order(self, data: dict[str, Any]) -> Order:
+-        """Parse order data from ccxt format.
+-
+-        Args:
+-            data: Raw order data
+-
+-        Returns:
+-            Parsed Order object
+-        """
++        """Parse order data from ccxt format."""
+         status_map = {
+             "open": OrderStatus.OPEN,
+             "closed": OrderStatus.CLOSED,
+@@ -608,7 +531,6 @@ class BinanceAdapter(ExchangeAdapter):
+             "expired": OrderStatus.EXPIRED,
+             "rejected": OrderStatus.REJECTED,
+         }
+-
+         return Order(
+             id=str(data["id"]),
+             symbol=data["symbol"],
+@@ -621,19 +543,13 @@ class BinanceAdapter(ExchangeAdapter):
+         )
+ 
+     async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+-        """Fetch open positions from Binance.
+-
+-        Args:
+-            symbol: Optional symbol filter
+-
+-        Returns:
+-            List of open positions
+-        """
++        """Fetch open positions."""
+         try:
+-            positions = await self._exchange.fetch_positions(symbols=[symbol] if symbol else None)
++            positions = await self._exchange.fetch_positions(
++                symbols=[symbol] if symbol else None
++            )
+             result = []
+             for pos in positions:
+-                # Skip positions with zero size
+                 size = Decimal(str(pos.get("contracts", 0) or pos.get("contractSize", 0) or 0))
+                 if size == Decimal("0"):
+                     continue
+@@ -656,243 +572,62 @@ class BinanceAdapter(ExchangeAdapter):
+             raise ExchangeError(f"Failed to fetch positions: {e}")
+ 
+ 
+-# ============ OKX Adapter ============
+-
++# ============ Binance Adapter ============
+ 
+-class OKXAdapter(ExchangeAdapter):
+-    """OKX Swap adapter."""
+ 
+-    def __init__(self, config: ExchangeConfig) -> None:
+-        """Initialize OKX adapter.
++class BinanceAdapter(CCXTBaseAdapter):
++    """Binance Futures (USDT-M) adapter."""
+ 
+-        Args:
+-            config: Exchange configuration
+-        """
+-        super().__init__(config)
+-        self._setup_exchange()
++    _exchange_name = "Binance"
+ 
+     def _setup_exchange(self) -> None:
+-        """Setup ccxt exchange instance."""
++        """Setup Binance ccxt instance."""
+         if ccxt is None:
+             raise ImportError("ccxt is required for exchange connections")
+ 
+         options = {
+-            "defaultType": "swap",
++            "defaultType": "future",
++            "adjustForTimeDifference": True,
+             **self.config.options,
+         }
+ 
+-        self._exchange = ccxt.okx({
++        self._exchange = ccxt.binanceusdm({
+             "apiKey": self.config.api_key,
+             "secret": self.config.api_secret,
+-            "password": self.config.passphrase,
+             "sandbox": self.config.sandbox,
+             "timeout": self.config.timeout,
+             "enableRateLimit": self.config.rate_limit,
+             "options": options,
+         })
+ 
+-    async def connect(self) -> None:
+-        """Connect to OKX."""
+-        try:
+-            await self._exchange.load_markets()
+-        except Exception as e:
+-            raise ConnectionError(f"Failed to connect to OKX: {e}")
+-
+-    async def disconnect(self) -> None:
+-        """Disconnect from OKX."""
+-        if hasattr(self._exchange, "close"):
+-            await self._exchange.close()
+-
+-    async def fetch_ticker(self, symbol: str) -> Ticker:
+-        """Fetch ticker from OKX."""
+-        try:
+-            data = await self._exchange.fetch_ticker(symbol)
+-            return Ticker(
+-                symbol=data["symbol"],
+-                bid=Decimal(str(data.get("bid", 0))),
+-                ask=Decimal(str(data.get("ask", 0))),
+-                last=Decimal(str(data.get("last", 0))),
+-                volume=Decimal(str(data.get("baseVolume", 0))),
+-                timestamp=datetime.fromtimestamp(
+-                    data["timestamp"] / 1000
+-                ) if data.get("timestamp") else None,
+-            )
+-        except Exception as e:
+-            raise ExchangeError(f"Failed to fetch ticker: {e}")
+-
+-    async def fetch_orderbook(
+-        self, symbol: str, limit: int = 20
+-    ) -> OrderBook:
+-        """Fetch order book from OKX."""
+-        try:
+-            data = await self._exchange.fetch_order_book(symbol, limit)
+-            return OrderBook(
+-                symbol=data.get("symbol", symbol),
+-                bids=data.get("bids", []),
+-                asks=data.get("asks", []),
+-            )
+-        except Exception as e:
+-            raise ExchangeError(f"Failed to fetch orderbook: {e}")
+-
+-    async def fetch_ohlcv(
+-        self,
+-        symbol: str,
+-        timeframe: str = "1m",
+-        limit: int = 100,
+-    ) -> list[OHLCV]:
+-        """Fetch OHLCV from OKX."""
+-        try:
+-            data = await self._exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+-            return [
+-                OHLCV(
+-                    timestamp=datetime.fromtimestamp(candle[0] / 1000),
+-                    open=float(candle[1]),
+-                    high=float(candle[2]),
+-                    low=float(candle[3]),
+-                    close=float(candle[4]),
+-                    volume=float(candle[5]),
+-                )
+-                for candle in data
+-            ]
+-        except Exception as e:
+-            raise ExchangeError(f"Failed to fetch OHLCV: {e}")
+-
+-    async def fetch_balance(self) -> dict[str, Balance]:
+-        """Fetch balance from OKX."""
+-        try:
+-            data = await self._exchange.fetch_balance()
+-            result = {}
+-            for currency, balance in data.items():
+-                if isinstance(balance, dict) and "free" in balance:
+-                    result[currency] = Balance(
+-                        currency=currency,
+-                        free=Decimal(str(balance.get("free", 0))),
+-                        used=Decimal(str(balance.get("used", 0))),
+-                        total=Decimal(str(balance.get("total", 0))),
+-                    )
+-            return result
+-        except Exception as e:
+-            raise ExchangeError(f"Failed to fetch balance: {e}")
+-
+-    async def create_order(
+-        self,
+-        symbol: str,
+-        side: OrderSide,
+-        order_type: OrderType,
+-        amount: Decimal,
+-        price: Optional[Decimal] = None,
+-        **kwargs: Any,
+-    ) -> Order:
+-        """Create order on OKX.
+ 
+-        Args:
+-            symbol: Trading pair
+-            side: Buy or sell
+-            order_type: Order type
+-            amount: Order amount (Decimal for financial precision)
+-            price: Limit price (Decimal for financial precision)
+-            **kwargs: Additional order parameters
++# ============ OKX Adapter ============
+ 
+-        Returns:
+-            Created order
+-        """
+-        try:
+-            # Convert Decimal to float for ccxt (ccxt uses float internally)
+-            params = {}
+-            if kwargs.get("reduceOnly"):
+-                params["reduceOnly"] = True
+-            if kwargs.get("postOnly"):
+-                params["postOnly"] = True
+ 
+-            data = await self._exchange.create_order(
+-                symbol=symbol,
+-                type=order_type.value,
+-                side=side.value,
+-                amount=float(amount),
+-                price=float(price) if price else None,
+-                params=params,
+-            )
+-            return self._parse_order(data)
+-        except Exception as e:
+-            if "insufficient" in str(e).lower():
+-                raise InsufficientFundsError(str(e))
+-            raise ExchangeError(f"Failed to create order: {e}")
++class OKXAdapter(CCXTBaseAdapter):
++    """OKX Swap adapter."""
+ 
+-    async def cancel_order(self, order_id: str, symbol: str) -> bool:
+-        """Cancel order on OKX."""
+-        try:
+-            await self._exchange.cancel_order(order_id, symbol)
+-            return True
+-        except Exception as e:
+-            if "not found" in str(e).lower():
+-                raise OrderNotFoundError(f"Order {order_id} not found")
+-            raise ExchangeError(f"Failed to cancel order: {e}")
++    _exchange_name = "OKX"
+ 
+-    async def fetch_order(self, order_id: str, symbol: str) -> Order:
+-        """Fetch order from OKX."""
+-        try:
+-            data = await self._exchange.fetch_order(order_id, symbol)
+-            return self._parse_order(data)
+-        except Exception as e:
+-            if "not found" in str(e).lower():
+-                raise OrderNotFoundError(f"Order {order_id} not found")
+-            raise ExchangeError(f"Failed to fetch order: {e}")
++    def _setup_exchange(self) -> None:
++        """Setup OKX ccxt instance."""
++        if ccxt is None:
++            raise ImportError("ccxt is required for exchange connections")
+ 
+-    def _parse_order(self, data: dict[str, Any]) -> Order:
+-        """Parse order data from ccxt format."""
+-        status_map = {
+-            "open": OrderStatus.OPEN,
+-            "closed": OrderStatus.CLOSED,
+-            "canceled": OrderStatus.CANCELED,
+-            "expired": OrderStatus.EXPIRED,
+-            "rejected": OrderStatus.REJECTED,
++        options = {
++            "defaultType": "swap",
++            **self.config.options,
+         }
+ 
+-        return Order(
+-            id=str(data["id"]),
+-            symbol=data["symbol"],
+-            side=OrderSide.BUY if data["side"] == "buy" else OrderSide.SELL,
+-            type=OrderType.LIMIT if data["type"] == "limit" else OrderType.MARKET,
+-            price=Decimal(str(data["price"])) if data.get("price") else None,
+-            amount=Decimal(str(data["amount"])),
+-            status=status_map.get(data["status"], OrderStatus.OPEN),
+-            filled=Decimal(str(data.get("filled", 0))),
+-        )
+-
+-    async def fetch_positions(self, symbol: Optional[str] = None) -> list[Position]:
+-        """Fetch open positions from OKX.
+-
+-        Args:
+-            symbol: Optional symbol filter
+-
+-        Returns:
+-            List of open positions
+-        """
+-        try:
+-            positions = await self._exchange.fetch_positions(symbols=[symbol] if symbol else None)
+-            result = []
+-            for pos in positions:
+-                # Skip positions with zero size
+-                size = Decimal(str(pos.get("contracts", 0) or pos.get("contractSize", 0) or 0))
+-                if size == Decimal("0"):
+-                    continue
+-
+-                side = OrderSide.BUY if pos.get("side") == "long" else OrderSide.SELL
+-                result.append(Position(
+-                    symbol=pos["symbol"],
+-                    side=side,
+-                    size=size,
+-                    entry_price=Decimal(str(pos.get("entryPrice", 0) or 0)),
+-                    unrealized_pnl=Decimal(str(pos.get("unrealizedPnl", 0) or 0)),
+-                    realized_pnl=Decimal(str(pos.get("realizedPnl", 0) or 0)),
+-                    leverage=int(pos.get("leverage", 1) or 1),
+-                    liquidation_price=Decimal(str(pos.get("liquidationPrice"))) if pos.get("liquidationPrice") else None,
+-                    margin=Decimal(str(pos.get("initialMargin", 0) or pos.get("margin", 0) or 0)),
+-                    timestamp=datetime.fromtimestamp(pos["timestamp"] / 1000) if pos.get("timestamp") else None,
+-                ))
+-            return result
+-        except Exception as e:
+-            raise ExchangeError(f"Failed to fetch positions: {e}")
++        self._exchange = ccxt.okx({
++            "apiKey": self.config.api_key,
++            "secret": self.config.api_secret,
++            "password": self.config.passphrase,
++            "sandbox": self.config.sandbox,
++            "timeout": self.config.timeout,
++            "enableRateLimit": self.config.rate_limit,
++            "options": options,
++        })
+ 
+ 
+ # ============ Connection Manager ============
+diff --git a/src/iqfmp/exchange/execution.py b/src/iqfmp/exchange/execution.py
+index ea4ea6b..b46be28 100644
+--- a/src/iqfmp/exchange/execution.py
++++ b/src/iqfmp/exchange/execution.py
+@@ -155,6 +155,34 @@ class IdempotencyCacheError(OrderExecutionError):
+     pass
+ 
+ 
++def get_required_redis_client(error_cls: type[Exception], purpose: str):
++    """Get Redis client or raise error. Critical state requires persistence.
++
++    Args:
++        error_cls: Exception class to raise on failure
++        purpose: Description of why Redis is needed (for error messages)
++
++    Returns:
++        Redis client instance
++
++    Raises:
++        error_cls: If Redis is unavailable
++    """
++    try:
++        from iqfmp.db import get_redis_client
++        client = get_redis_client()
++        if client is None:
++            raise error_cls(
++                f"Redis unavailable. {purpose} requires persistent storage "
++                "per CLAUDE.md critical state rules."
++            )
++        return client
++    except error_cls:
++        raise
++    except Exception as e:
++        raise error_cls(f"Failed to connect to Redis for {purpose}: {e}") from e
++
++
+ class IdempotencyCache:
+     """Redis-backed cache for preventing duplicate order execution.
+ 
+@@ -185,22 +213,7 @@ class IdempotencyCache:
+ 
+     def _get_redis_client(self):
+         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
+-        try:
+-            from iqfmp.db import get_redis_client
+-            client = get_redis_client()
+-            if client is None:
+-                raise IdempotencyCacheError(
+-                    "Redis unavailable. Idempotency cache requires persistent storage "
+-                    "per CLAUDE.md critical state rules. Cannot operate with in-memory only."
+-                )
+-            return client
+-        except IdempotencyCacheError:
+-            raise
+-        except Exception as e:
+-            raise IdempotencyCacheError(
+-                f"Failed to connect to Redis for idempotency cache: {e}. "
+-                "Critical state requires persistent storage."
+-            ) from e
++        return get_required_redis_client(IdempotencyCacheError, "Idempotency cache")
+ 
+     def _compute_hash(self, request: "OrderRequest") -> str:
+         """Compute hash of request for validation."""
+@@ -369,6 +382,9 @@ class OrderExecutor:
+         Returns:
+             Execution result
+ 
++        Raises:
++            IdempotencyCacheError: If Redis idempotency cache is unavailable or fails.
++
+         Note:
+             - If client_order_id is provided, the request is idempotent.
+               Duplicate requests with the same client_order_id return cached results.
+@@ -600,21 +616,7 @@ class OrderManager:
+ 
+     def _get_redis_client(self):
+         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
+-        try:
+-            from iqfmp.db import get_redis_client
+-            client = get_redis_client()
+-            if client is None:
+-                raise OrderManagerError(
+-                    "Redis unavailable. Order tracking requires persistent storage "
+-                    "per CLAUDE.md critical state rules."
+-                )
+-            return client
+-        except OrderManagerError:
+-            raise
+-        except Exception as e:
+-            raise OrderManagerError(
+-                f"Failed to connect to Redis for order tracking: {e}"
+-            ) from e
++        return get_required_redis_client(OrderManagerError, "Order tracking")
+ 
+     def _serialize_order(self, order: Order) -> str:
+         """Serialize Order to JSON for Redis storage."""
+@@ -849,21 +851,7 @@ class PartialFillHandler:
+ 
+     def _get_redis_client(self) -> Any:
+         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
+-        try:
+-            from iqfmp.db import get_redis_client
+-            client = get_redis_client()
+-            if client is None:
+-                raise PartialFillHandlerError(
+-                    "Redis unavailable. Partial fills require persistent storage "
+-                    "per CLAUDE.md critical state rules."
+-                )
+-            return client
+-        except PartialFillHandlerError:
+-            raise
+-        except Exception as e:
+-            raise PartialFillHandlerError(
+-                f"Failed to connect to Redis for partial fills: {e}"
+-            ) from e
++        return get_required_redis_client(PartialFillHandlerError, "Partial fills")
+ 
+     def _serialize_fill(self, fill: PartialFill) -> str:
+         """Serialize PartialFill to JSON."""
+@@ -1049,21 +1037,7 @@ class TimeoutHandler:
+ 
+     def _get_redis_client(self) -> Any:
+         """Get Redis client. Raises if unavailable (critical state requires persistence)."""
+-        try:
+-            from iqfmp.db import get_redis_client
+-            client = get_redis_client()
+-            if client is None:
+-                raise TimeoutHandlerError(
+-                    "Redis unavailable. Timeout data requires persistent storage "
+-                    "per CLAUDE.md critical state rules."
+-                )
+-            return client
+-        except TimeoutHandlerError:
+-            raise
+-        except Exception as e:
+-            raise TimeoutHandlerError(
+-                f"Failed to connect to Redis for timeout storage: {e}"
+-            ) from e
++        return get_required_redis_client(TimeoutHandlerError, "Timeout storage")
+ 
+     def _serialize_timeout(self, timeout: OrderTimeout) -> str:
+         """Serialize timeout to JSON (excluding callback)."""
+diff --git a/src/iqfmp/exchange/risk.py b/src/iqfmp/exchange/risk.py
+index 00515fd..7d28960 100644
+--- a/src/iqfmp/exchange/risk.py
++++ b/src/iqfmp/exchange/risk.py
+@@ -1,10 +1,25 @@
+ """Risk management module for IQFMP.
+ 
+-Provides risk control and monitoring:
+-- RiskController: Main risk management controller
+-- DrawdownMonitor: Monitor and alert on drawdown
+-- LossLimiter: Limit single and daily losses
+-- ConcentrationChecker: Check position concentration
++This module implements a two-tier risk threshold system:
++
++1. HARD THRESHOLDS (immutable, defined as class constants in RiskController):
++   - MAX_DRAWDOWN_THRESHOLD: 15% - triggers emergency close
++   - MAX_POSITION_RATIO: 30% - single position concentration limit
++   - MAX_LEVERAGE: 3x - maximum allowed leverage
++   - EMERGENCY_LOSS_THRESHOLD: 5% - single-day loss triggers emergency close
++   These cannot be adjusted at runtime and enforce absolute safety limits.
++
++2. SOFT THRESHOLDS (configurable via RiskConfig):
++   - max_drawdown, max_single_loss, max_position_concentration, daily_loss_limit
++   These can be customized per strategy but must remain within hard limits.
++
++Components:
++- RiskController: Main controller integrating both threshold tiers + MarginCalculator
++- DrawdownMonitor: Track equity peaks and drawdown with tiered alerts
++- LossLimiter: Track single-trade and daily losses
++- ConcentrationChecker: Monitor position concentration by symbol
++
++Alert levels follow a tiered pattern: CRITICAL (>100%), DANGER (>75%), WARNING (>50%).
+ """
+ 
+ from dataclasses import dataclass, field
+@@ -214,6 +229,37 @@ class LossRecord:
+     timestamp: datetime
+ 
+ 
++# ==================== Alert Level Helpers ====================
++
++
++def _determine_alert_level(
++    current_value: Decimal,
++    threshold: Decimal,
++    warning_ratio: Decimal = Decimal("0.5"),
++    danger_ratio: Decimal = Decimal("0.75"),
++) -> RiskLevel | None:
++    """Determine alert level based on threshold ratios.
++
++    Standard tiered alert pattern used across all risk monitors.
++
++    Args:
++        current_value: Current metric value
++        threshold: Maximum allowed threshold
++        warning_ratio: Ratio of threshold for WARNING (default 0.5 = 50%)
++        danger_ratio: Ratio of threshold for DANGER (default 0.75 = 75%)
++
++    Returns:
++        RiskLevel if threshold exceeded, None if safe
++    """
++    if current_value > threshold:
++        return RiskLevel.CRITICAL
++    elif current_value > threshold * danger_ratio:
++        return RiskLevel.DANGER
++    elif current_value > threshold * warning_ratio:
++        return RiskLevel.WARNING
++    return None
++
++
+ # ==================== DrawdownMonitor ====================
+ 
+ 
+@@ -291,40 +337,28 @@ class DrawdownMonitor:
+         """Check and generate drawdown alerts.
+ 
+         Returns:
+-            List of drawdown alerts
++            List of drawdown alerts (empty if below warning threshold)
+         """
+-        alerts: list[DrawdownAlert] = []
+         drawdown = self.current_drawdown
++        level = _determine_alert_level(drawdown, self._max_drawdown)
+ 
+-        if drawdown > self._max_drawdown:
+-            alerts.append(
+-                DrawdownAlert(
+-                    level=RiskLevel.CRITICAL,
+-                    current_drawdown=drawdown,
+-                    max_allowed=self._max_drawdown,
+-                    message=f"Max drawdown breached: {drawdown * 100:.1f}% > {self._max_drawdown * 100:.1f}%",
+-                )
+-            )
+-        elif drawdown > self._max_drawdown * Decimal("0.75"):
+-            alerts.append(
+-                DrawdownAlert(
+-                    level=RiskLevel.DANGER,
+-                    current_drawdown=drawdown,
+-                    max_allowed=self._max_drawdown,
+-                    message=f"Drawdown approaching limit: {drawdown * 100:.1f}%",
+-                )
+-            )
+-        elif drawdown > self._max_drawdown * Decimal("0.5"):
+-            alerts.append(
+-                DrawdownAlert(
+-                    level=RiskLevel.WARNING,
+-                    current_drawdown=drawdown,
+-                    max_allowed=self._max_drawdown,
+-                    message=f"Drawdown warning: {drawdown * 100:.1f}%",
+-                )
+-            )
++        if level is None:
++            return []
+ 
+-        return alerts
++        messages = {
++            RiskLevel.CRITICAL: f"Max drawdown breached: {drawdown * 100:.1f}% > {self._max_drawdown * 100:.1f}%",
++            RiskLevel.DANGER: f"Drawdown approaching limit: {drawdown * 100:.1f}%",
++            RiskLevel.WARNING: f"Drawdown warning: {drawdown * 100:.1f}%",
++        }
++
++        return [
++            DrawdownAlert(
++                level=level,
++                current_drawdown=drawdown,
++                max_allowed=self._max_drawdown,
++                message=messages[level],
++            )
++        ]
+ 
+ 
+ # ==================== LossLimiter ====================
+@@ -410,43 +444,29 @@ class LossLimiter:
+         """Check and generate loss alerts.
+ 
+         Returns:
+-            List of loss alerts
++            List of loss alerts (empty if below warning threshold)
+         """
+-        alerts: list[LossAlert] = []
+         loss_pct = self.daily_loss_percent
++        level = _determine_alert_level(loss_pct, self._daily_loss_limit)
+ 
+-        if loss_pct > self._daily_loss_limit:
+-            alerts.append(
+-                LossAlert(
+-                    level=RiskLevel.CRITICAL,
+-                    loss_amount=self._daily_loss,
+-                    loss_percent=loss_pct,
+-                    limit=self._daily_loss_limit,
+-                    message=f"Daily loss limit breached: {loss_pct * 100:.1f}%",
+-                )
+-            )
+-        elif loss_pct > self._daily_loss_limit * Decimal("0.75"):
+-            alerts.append(
+-                LossAlert(
+-                    level=RiskLevel.DANGER,
+-                    loss_amount=self._daily_loss,
+-                    loss_percent=loss_pct,
+-                    limit=self._daily_loss_limit,
+-                    message=f"Daily loss approaching limit: {loss_pct * 100:.1f}%",
+-                )
+-            )
+-        elif loss_pct > self._daily_loss_limit * Decimal("0.5"):
+-            alerts.append(
+-                LossAlert(
+-                    level=RiskLevel.WARNING,
+-                    loss_amount=self._daily_loss,
+-                    loss_percent=loss_pct,
+-                    limit=self._daily_loss_limit,
+-                    message=f"Daily loss warning: {loss_pct * 100:.1f}%",
+-                )
+-            )
++        if level is None:
++            return []
+ 
+-        return alerts
++        messages = {
++            RiskLevel.CRITICAL: f"Daily loss limit breached: {loss_pct * 100:.1f}%",
++            RiskLevel.DANGER: f"Daily loss approaching limit: {loss_pct * 100:.1f}%",
++            RiskLevel.WARNING: f"Daily loss warning: {loss_pct * 100:.1f}%",
++        }
++
++        return [
++            LossAlert(
++                level=level,
++                loss_amount=self._daily_loss,
++                loss_percent=loss_pct,
++                limit=self._daily_loss_limit,
++                message=messages[level],
++            )
++        ]
+ 
+ 
+ # ==================== ConcentrationChecker ====================
+@@ -527,37 +547,45 @@ class ConcentrationChecker:
+     ) -> list[ConcentrationAlert]:
+         """Check and generate concentration alerts.
+ 
++        Uses higher warning threshold (85%) than other monitors since
++        concentration issues require earlier intervention.
++
+         Args:
+             positions: Position values by symbol
+             total_equity: Total account equity
+ 
+         Returns:
+-            List of concentration alerts
++            List of concentration alerts (empty if all positions below 85%)
+         """
+         alerts: list[ConcentrationAlert] = []
+         concentrations = self.check_concentration(positions, total_equity)
+ 
+         for symbol, conc in concentrations.items():
+-            if conc > self._max_single:
+-                alerts.append(
+-                    ConcentrationAlert(
+-                        level=RiskLevel.CRITICAL,
+-                        symbol=symbol,
+-                        concentration=conc,
+-                        max_allowed=self._max_single,
+-                        message=f"{symbol} concentration breached: {conc * 100:.1f}%",
+-                    )
+-                )
+-            elif conc > self._max_single * Decimal("0.85"):
+-                alerts.append(
+-                    ConcentrationAlert(
+-                        level=RiskLevel.WARNING,
+-                        symbol=symbol,
+-                        concentration=conc,
+-                        max_allowed=self._max_single,
+-                        message=f"{symbol} concentration high: {conc * 100:.1f}%",
+-                    )
++            # Concentration uses 85% warning threshold (no danger tier)
++            level = _determine_alert_level(
++                conc, self._max_single,
++                warning_ratio=Decimal("0.85"),
++                danger_ratio=Decimal("1.0"),  # Skip danger level
++            )
++
++            if level is None:
++                continue
++
++            message = (
++                f"{symbol} concentration breached: {conc * 100:.1f}%"
++                if level == RiskLevel.CRITICAL
++                else f"{symbol} concentration high: {conc * 100:.1f}%"
++            )
++
++            alerts.append(
++                ConcentrationAlert(
++                    level=level,
++                    symbol=symbol,
++                    concentration=conc,
++                    max_allowed=self._max_single,
++                    message=message,
+                 )
++            )
+ 
+         return alerts
+ 
+diff --git a/src/iqfmp/llm/provider.py b/src/iqfmp/llm/provider.py
+index 93e7bdd..5d70252 100644
+--- a/src/iqfmp/llm/provider.py
++++ b/src/iqfmp/llm/provider.py
+@@ -181,6 +181,25 @@ class LLMConfig:
+ 
+ # === Rate Limiter ===
+ 
++def _deduplicate_candidates(candidates: list[str]) -> list[str]:
++    """Remove duplicate candidates based on normalized content.
++
++    Args:
++        candidates: List of candidate strings
++
++    Returns:
++        Deduplicated list preserving original order
++    """
++    seen: set[str] = set()
++    unique: list[str] = []
++    for c in candidates:
++        normalized = c.strip().lower()
++        if normalized not in seen:
++            seen.add(normalized)
++            unique.append(c)
++    return unique
++
++
+ class RateLimiter:
+     """Token bucket rate limiter for API requests."""
+ 
+@@ -463,17 +482,8 @@ class LLMProvider:
+ 
+             candidates = response if isinstance(response, list) else [response.content]
+ 
+-            # Deduplicate if requested
+             if deduplicate:
+-                seen = set()
+-                unique_candidates = []
+-                for c in candidates:
+-                    # Normalize for comparison
+-                    normalized = c.strip().lower()
+-                    if normalized not in seen:
+-                        seen.add(normalized)
+-                        unique_candidates.append(c)
+-                candidates = unique_candidates
++                candidates = _deduplicate_candidates(candidates)
+ 
+             return candidates
+ 
+@@ -517,14 +527,7 @@ class LLMProvider:
+                 )
+ 
+             if deduplicate:
+-                seen = set()
+-                unique_candidates = []
+-                for c in candidates:
+-                    normalized = c.strip().lower()
+-                    if normalized not in seen:
+-                        seen.add(normalized)
+-                        unique_candidates.append(c)
+-                candidates = unique_candidates
++                candidates = _deduplicate_candidates(candidates)
+ 
+             return candidates
+ 

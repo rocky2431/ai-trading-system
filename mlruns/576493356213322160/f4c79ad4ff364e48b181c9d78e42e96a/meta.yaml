@@ -1,0 +1,15 @@
+artifact_uri: file:///Users/rocky243/trading-system-v3/mlruns/576493356213322160/f4c79ad4ff364e48b181c9d78e42e96a/artifacts
+end_time: null
+entry_point_name: ''
+experiment_id: '576493356213322160'
+lifecycle_stage: active
+run_id: f4c79ad4ff364e48b181c9d78e42e96a
+run_name: mlflow_recorder
+run_uuid: f4c79ad4ff364e48b181c9d78e42e96a
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1767457850411
+status: 1
+tags: []
+user_id: rocky243

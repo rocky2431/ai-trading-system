@@ -1,0 +1,637 @@
+diff --git a/src/iqfmp/agents/factor_generation.py b/src/iqfmp/agents/factor_generation.py
+index fe5860f..a9c8d30 100644
+--- a/src/iqfmp/agents/factor_generation.py
++++ b/src/iqfmp/agents/factor_generation.py
+@@ -1217,6 +1217,126 @@ class FactorGenerationAgent:
+ 
+         return generated_factor
+ 
++    async def generate_with_feedback(
++        self,
++        user_request: str,
++        factor_family: FactorFamily | None = None,
++        feedback: Any | None = None,
++        similar_successes: list[Any] | None = None,
++        similar_failures: list[Any] | None = None,
++    ) -> GeneratedFactor:
++        """Generate a factor with feedback context for iterative improvement.
++
++        This method extends the standard generate() by incorporating:
++        - Structured feedback from previous evaluation attempts
++        - Success examples for inspiration
++        - Failure patterns to avoid
++
++        Used by the FeedbackLoop for closed-loop factor mining.
++
++        Args:
++            user_request: Natural language description/hypothesis
++            factor_family: Optional factor family constraint
++            feedback: StructuredFeedback from previous attempt (optional)
++            similar_successes: List of PatternRecord success examples
++            similar_failures: List of PatternRecord failure warnings
++
++        Returns:
++            Generated factor with code and metadata
++        """
++        # If no feedback context provided, fall back to standard generation
++        if feedback is None and not similar_successes and not similar_failures:
++            return await self.generate(user_request, factor_family)
++
++        # Build feedback-enhanced prompt
++        from iqfmp.feedback.prompt_builder import FeedbackPromptBuilder
++
++        builder = FeedbackPromptBuilder()
++        system_prompt, enhanced_prompt = builder.build_combined_prompt(
++            user_request=user_request,
++            feedback=feedback,
++            similar_successes=similar_successes,
++            similar_failures=similar_failures,
++        )
++
++        # Skip duplicate check for iterative generation (we want new approaches)
++
++        # Resolve model configuration
++        from iqfmp.agents.model_config import get_agent_full_config
++
++        model_id, config_temperature, _ = get_agent_full_config("factor_generation")
++
++        model = self.config.model or model_id
++        temperature = self.config.temperature or config_temperature
++
++        # Generate with enhanced prompt
++        try:
++            response = await self.llm_provider.complete(
++                prompt=enhanced_prompt,
++                system_prompt=system_prompt,
++                model=model,
++                temperature=temperature,
++            )
++        except Exception as e:
++            raise FactorGenerationError(f"LLM call failed with feedback: {e}") from e
++
++        raw_content = response.content if hasattr(response, "content") else str(response)
++        code = self._extract_code(raw_content)
++
++        if not code:
++            raise InvalidFactorError("No valid code generated from feedback iteration")
++
++        # Validate Qlib expression
++        is_python = (
++            code.strip().startswith("def ")
++            or code.strip().startswith("import ")
++            or code.strip().startswith("from ")
++            or "\ndef " in code
++        )
++
++        if not is_python and self.config.qlib_expression_validation_enabled:
++            expr_result = self._validate_qlib_expression(code)
++            if not expr_result.is_valid:
++                raise InvalidFactorError(
++                    f"Generated code is not a valid Qlib expression: {expr_result.error_message}"
++                )
++
++        # Security checks
++        if self.config.security_check_enabled:
++            self._run_security_check(code, is_python)
++
++        # Field constraint checks
++        if self.config.field_constraint_enabled and not is_python:
++            self._run_field_constraint_check(code)
++
++        # Extract metadata
++        name = self._extract_factor_name(code)
++        description = self._extract_description(code, user_request)
++        family = factor_family or self._infer_family(user_request)
++
++        metadata: dict[str, Any] = {
++            "user_request": user_request,
++            "security_checked": self.config.security_check_enabled,
++            "is_python_code": is_python,
++            "feedback_iteration": True,
++            "has_feedback": feedback is not None,
++            "num_success_examples": len(similar_successes) if similar_successes else 0,
++            "num_failure_warnings": len(similar_failures) if similar_failures else 0,
++        }
++
++        generated_factor = GeneratedFactor(
++            name=name,
++            description=description,
++            code=code,
++            family=family,
++            metadata=metadata,
++        )
++
++        # Store for future reference
++        self._store_generated_factor(generated_factor, user_request)
++
++        return generated_factor
++
+     def _extract_code(self, content: str) -> str:
+         """Extract Qlib expression or Python code from LLM response.
+ 
+diff --git a/src/iqfmp/agents/hypothesis_agent.py b/src/iqfmp/agents/hypothesis_agent.py
+index 8268c46..75a82f9 100644
+--- a/src/iqfmp/agents/hypothesis_agent.py
++++ b/src/iqfmp/agents/hypothesis_agent.py
+@@ -1154,6 +1154,66 @@ class HypothesisAgent:
+         self._hypothesis_history.append(updated)
+         return updated
+ 
++    async def refine_hypothesis_with_feedback(
++        self,
++        original_hypothesis: str,
++        feedback: Any,
++        family_statistics: Optional[dict[str, Any]] = None,
++    ) -> str:
++        """Refine a hypothesis based on structured feedback.
++
++        This method uses the FeedbackPromptBuilder to create a prompt
++        that helps the LLM generate an improved hypothesis based on
++        evaluation feedback from a failed factor.
++
++        Used by the FeedbackLoop for closed-loop hypothesis refinement.
++
++        Args:
++            original_hypothesis: The original research hypothesis text
++            feedback: StructuredFeedback from factor evaluation
++            family_statistics: Optional statistics about the factor family
++
++        Returns:
++            Refined hypothesis text
++        """
++        from iqfmp.agents.model_config import get_agent_full_config
++        from iqfmp.feedback.prompt_builder import FeedbackPromptBuilder
++
++        builder = FeedbackPromptBuilder()
++        system_prompt, user_prompt = builder.build_hypothesis_refinement_prompt(
++            original_hypothesis=original_hypothesis,
++            feedback=feedback,
++            family_statistics=family_statistics,
++        )
++
++        # Get configured model settings
++        model_id, temperature, custom_system = get_agent_full_config("hypothesis")
++        # Use custom system prompt if available, otherwise use the builder's prompt
++        final_system = custom_system or system_prompt
++
++        # Use LLM provider to generate refined hypothesis
++        try:
++            response = await self.llm_provider.complete(
++                prompt=user_prompt,
++                system_prompt=final_system,
++                model=model_id,
++                temperature=temperature,
++            )
++        except Exception as e:
++            logger.warning(f"Failed to refine hypothesis with LLM: {e}")
++            # Return original if refinement fails
++            return original_hypothesis
++
++        refined_text = response.content if hasattr(response, "content") else str(response)
++        refined_text = refined_text.strip()
++
++        # Basic validation: ensure we got some text back
++        if not refined_text or len(refined_text) < 20:
++            logger.warning("LLM returned insufficient refined hypothesis")
++            return original_hypothesis
++
++        return refined_text
++
+     def generate_hypotheses(
+         self,
+         market_data: pd.DataFrame,
+diff --git a/src/iqfmp/db/models.py b/src/iqfmp/db/models.py
+index 7404db0..9d46b89 100644
+--- a/src/iqfmp/db/models.py
++++ b/src/iqfmp/db/models.py
+@@ -900,6 +900,72 @@ class OrderBookSnapshotORM(Base):
+     )
+ 
+ 
++# =============================================================================
++# Feedback Loop Models (Closed-Loop Factor Mining)
++# =============================================================================
++
++
++class PatternRecordORM(Base):
++    """Pattern record table - stores success/failure patterns for closed-loop factor mining.
++
++    This table stores patterns learned from factor evaluation results:
++    - Success patterns: factors that passed evaluation thresholds
++    - Failure patterns: factors that failed, with classified failure reasons
++
++    Used by PatternMemory for similarity-based retrieval during factor generation.
++    """
++
++    __tablename__ = "pattern_records"
++
++    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
++    pattern_id: Mapped[str] = mapped_column(String(36), unique=True, nullable=False, index=True)
++    pattern_type: Mapped[str] = mapped_column(
++        String(20), nullable=False, index=True
++    )  # "success" or "failure"
++
++    # Factor information
++    hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
++    factor_code: Mapped[str] = mapped_column(Text, nullable=False)
++    factor_family: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
++
++    # Metrics (stored as JSONB for flexibility)
++    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False)
++    # Expected keys: ic, ir, sharpe, max_drawdown, win_rate
++
++    # Feedback (for failure patterns)
++    feedback: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
++    failure_reasons: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
++    # Expected values: ["low_ic", "low_ir", "high_drawdown", "overfitting", etc.]
++
++    # Reference to evaluation trial
++    trial_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
++
++    # Timestamps
++    created_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), server_default=func.now()
++    )
++
++    __table_args__ = (
++        Index("ix_pattern_records_type_family", "pattern_type", "factor_family"),
++        Index("ix_pattern_records_created_at", "created_at"),
++    )
++
++    def to_dict(self) -> dict:
++        """Convert to dictionary."""
++        return {
++            "pattern_id": self.pattern_id,
++            "pattern_type": self.pattern_type,
++            "hypothesis": self.hypothesis,
++            "factor_code": self.factor_code,
++            "factor_family": self.factor_family,
++            "metrics": self.metrics,
++            "feedback": self.feedback,
++            "failure_reasons": self.failure_reasons or [],
++            "trial_id": self.trial_id,
++            "created_at": self.created_at.isoformat() if self.created_at else None,
++        }
++
++
+ # SQL to create TimescaleDB hypertable (run after creating tables)
+ CREATE_HYPERTABLE_SQL = """
+ -- Enable TimescaleDB extension
+diff --git a/src/iqfmp/evaluation/factor_evaluator.py b/src/iqfmp/evaluation/factor_evaluator.py
+index c71d647..1aab781 100644
+--- a/src/iqfmp/evaluation/factor_evaluator.py
++++ b/src/iqfmp/evaluation/factor_evaluator.py
+@@ -14,7 +14,10 @@ import logging
+ import os
+ from dataclasses import dataclass, field
+ from datetime import datetime
+-from typing import Any, Callable, Optional
++from typing import TYPE_CHECKING, Any, Callable, Optional
++
++if TYPE_CHECKING:
++    from iqfmp.feedback.structured_feedback import StructuredFeedback
+ import pandas as pd
+ 
+ logger = logging.getLogger(__name__)
+@@ -597,6 +600,31 @@ class EvaluationResult:
+ 
+         return recommendations
+ 
++    def to_structured_feedback(
++        self,
++        hypothesis: str,
++        factor_code: str,
++    ) -> "StructuredFeedback":
++        """Convert to StructuredFeedback for closed-loop factor mining.
++
++        This method bridges the evaluation pipeline to the feedback loop,
++        enabling LLM-driven iterative improvement.
++
++        Args:
++            hypothesis: The research hypothesis that led to this factor
++            factor_code: The generated factor code (Qlib expression or Python)
++
++        Returns:
++            StructuredFeedback instance with classified failures and suggestions
++        """
++        from iqfmp.feedback.structured_feedback import StructuredFeedback
++
++        return StructuredFeedback.from_evaluation_result(
++            result=self,
++            hypothesis=hypothesis,
++            factor_code=factor_code,
++        )
++
+ 
+ class FactorEvaluator:
+     """Main factor evaluator - Qlib-native implementation.
+diff --git a/src/iqfmp/vector/store.py b/src/iqfmp/vector/store.py
+index d99c840..b73a867 100644
+--- a/src/iqfmp/vector/store.py
++++ b/src/iqfmp/vector/store.py
+@@ -6,9 +6,11 @@
+ import logging
+ import uuid
+ from dataclasses import dataclass, field
+-from datetime import datetime
++from datetime import datetime, timezone
+ from typing import Any, Optional
+ 
++from qdrant_client.http import models as qdrant_models
++
+ from .client import QdrantClient, QdrantConfig, get_qdrant_client
+ from .embedding import EmbeddingGenerator, get_embedding_generator
+ 
+@@ -112,18 +114,16 @@ class FactorVectorStore:
+             "code": code,
+             "hypothesis": hypothesis,
+             "family": family,
+-            "created_at": datetime.utcnow().isoformat(),
++            "created_at": datetime.now(timezone.utc).isoformat(),
+             **(metadata or {}),
+         }
+ 
+         # 存储到 Qdrant - 严格模式，无 Mock 降级
+-        from qdrant_client.http import models
+-
+         try:
+             self.qdrant.client.upsert(
+                 collection_name=self.collection_name,
+                 points=[
+-                    models.PointStruct(
++                    qdrant_models.PointStruct(
+                         id=factor_id,
+                         vector=embedding,
+                         payload=payload,
+@@ -172,13 +172,12 @@ class FactorVectorStore:
+                 "code": f["code"],
+                 "hypothesis": f["hypothesis"],
+                 "family": f["family"],
+-                "created_at": datetime.utcnow().isoformat(),
++                "created_at": datetime.now(timezone.utc).isoformat(),
+                 **(f.get("metadata") or {}),
+             }
+ 
+             # 严格模式：必须使用 Qdrant models，无 Mock 降级
+-            from qdrant_client.http import models
+-            points.append(models.PointStruct(
++            points.append(qdrant_models.PointStruct(
+                 id=factor_id,
+                 vector=embeddings[i],
+                 payload=payload,
+@@ -264,12 +263,10 @@ class FactorVectorStore:
+             是否删除成功
+         """
+         # 严格模式：必须使用真实 Qdrant，无 Mock 降级
+-        from qdrant_client.http import models
+-
+         try:
+             self.qdrant.client.delete(
+                 collection_name=self.collection_name,
+-                points_selector=models.PointIdsList(
++                points_selector=qdrant_models.PointIdsList(
+                     points=[factor_id],
+                 ),
+             )
+@@ -312,11 +309,10 @@ class FactorVectorStore:
+         return self.qdrant.get_collection_info(self.collection_name)
+ 
+     def health_check(self) -> tuple[bool, str]:
+-        """
+-        H2 FIX: 健康检查方法
++        """Check health of the vector store.
+ 
+         Returns:
+-            (is_healthy, message) 元组
++            Tuple of (is_healthy, message)
+         """
+         try:
+             # 检查 Qdrant 连接
+@@ -334,3 +330,227 @@ class FactorVectorStore:
+         """检查向量存储是否可用"""
+         healthy, _ = self.health_check()
+         return healthy
++
++    # =========================================================================
++    # Pattern Memory Support (Closed-Loop Factor Mining)
++    # =========================================================================
++
++    def ensure_pattern_collection(self, collection_name: str = "patterns") -> None:
++        """Ensure the patterns collection exists.
++
++        Args:
++            collection_name: Name of the patterns collection
++        """
++        if not self.qdrant.collection_exists(collection_name):
++            self.qdrant.create_collection(
++                collection_name=collection_name,
++                vector_size=self.embedding.dimension,
++                distance="Cosine",
++            )
++            logger.info(f"Created patterns collection: {collection_name}")
++
++    def add_pattern(
++        self,
++        pattern_id: str,
++        pattern_type: str,
++        hypothesis: str,
++        factor_code: str,
++        family: str,
++        metrics: dict[str, float],
++        feedback: Optional[str] = None,
++        failure_reasons: Optional[list[str]] = None,
++        trial_id: Optional[str] = None,
++        collection_name: str = "patterns",
++    ) -> str:
++        """Add a pattern to the vector store.
++
++        Patterns are success/failure records from factor evaluation,
++        used for similarity-based retrieval during factor generation.
++
++        Args:
++            pattern_id: Unique pattern identifier
++            pattern_type: "success" or "failure"
++            hypothesis: The research hypothesis
++            factor_code: Generated factor code
++            family: Factor family
++            metrics: Evaluation metrics (ic, ir, sharpe, etc.)
++            feedback: Structured feedback text (for failures)
++            failure_reasons: List of FailureReason values
++            trial_id: Reference to evaluation trial
++            collection_name: Qdrant collection name
++
++        Returns:
++            Stored pattern ID
++        """
++        # Ensure collection exists
++        self.ensure_pattern_collection(collection_name)
++
++        # Generate embedding from hypothesis + code
++        embedding = self.embedding.generate_factor_embedding(
++            factor_code=factor_code,
++            factor_name=f"{pattern_type}_pattern",
++            hypothesis=hypothesis,
++        )
++
++        # Build payload
++        payload = {
++            "pattern_id": pattern_id,
++            "pattern_type": pattern_type,
++            "hypothesis": hypothesis,
++            "factor_code": factor_code,
++            "family": family,
++            "metrics": metrics,
++            "feedback": feedback,
++            "failure_reasons": failure_reasons or [],
++            "trial_id": trial_id,
++            "created_at": datetime.now(timezone.utc).isoformat(),
++        }
++
++        # Store in Qdrant
++        try:
++            self.qdrant.client.upsert(
++                collection_name=collection_name,
++                points=[
++                    qdrant_models.PointStruct(
++                        id=pattern_id,
++                        vector=embedding,
++                        payload=payload,
++                    )
++                ],
++            )
++
++            logger.info(f"Added {pattern_type} pattern to vector store: {pattern_id}")
++            return pattern_id
++
++        except Exception as e:
++            logger.error(f"Failed to add pattern {pattern_id}: {e}")
++            raise
++
++    def search_patterns(
++        self,
++        hypothesis: str,
++        pattern_type: Optional[str] = None,
++        family: Optional[str] = None,
++        limit: int = 5,
++        collection_name: str = "patterns",
++    ) -> list[dict[str, Any]]:
++        """Search for similar patterns by hypothesis.
++
++        Args:
++            hypothesis: Query hypothesis for similarity search
++            pattern_type: Filter by "success" or "failure" (optional)
++            family: Filter by factor family (optional)
++            limit: Maximum number of results
++            collection_name: Qdrant collection name
++
++        Returns:
++            List of similar patterns with scores
++        """
++        # Ensure collection exists
++        self.ensure_pattern_collection(collection_name)
++
++        # Generate query embedding
++        query_embedding = self.embedding.generate_factor_embedding(
++            factor_code="",
++            factor_name="query",
++            hypothesis=hypothesis,
++        )
++
++        # Build filter conditions
++        filter_conditions = []
++
++        if pattern_type:
++            filter_conditions.append(
++                qdrant_models.FieldCondition(
++                    key="pattern_type",
++                    match=qdrant_models.MatchValue(value=pattern_type),
++                )
++            )
++
++        if family:
++            filter_conditions.append(
++                qdrant_models.FieldCondition(
++                    key="family",
++                    match=qdrant_models.MatchValue(value=family),
++                )
++            )
++
++        query_filter = None
++        if filter_conditions:
++            query_filter = qdrant_models.Filter(must=filter_conditions)
++
++        try:
++            results = self.qdrant.client.search(
++                collection_name=collection_name,
++                query_vector=query_embedding,
++                query_filter=query_filter,
++                limit=limit,
++                with_payload=True,
++            )
++
++            patterns = []
++            for result in results:
++                pattern = result.payload.copy()
++                pattern["score"] = result.score
++                patterns.append(pattern)
++
++            logger.debug(f"Found {len(patterns)} similar patterns for hypothesis")
++            return patterns
++
++        except Exception as e:
++            # Log detailed error info for debugging
++            logger.error(
++                f"Failed to search patterns: {e}",
++                extra={
++                    "hypothesis_preview": hypothesis[:100] if hypothesis else None,
++                    "pattern_type": pattern_type,
++                    "family": family,
++                    "collection": collection_name,
++                },
++            )
++            # Return empty list to allow caller to continue gracefully
++            return []
++
++    def delete_pattern(
++        self,
++        pattern_id: str,
++        collection_name: str = "patterns",
++    ) -> bool:
++        """Delete a pattern from the vector store.
++
++        Args:
++            pattern_id: Pattern ID to delete
++            collection_name: Qdrant collection name
++
++        Returns:
++            True if deleted successfully
++        """
++        try:
++            self.qdrant.client.delete(
++                collection_name=collection_name,
++                points_selector=qdrant_models.PointIdsList(
++                    points=[pattern_id],
++                ),
++            )
++
++            logger.info(f"Deleted pattern: {pattern_id}")
++            return True
++
++        except Exception as e:
++            logger.error(f"Failed to delete pattern {pattern_id}: {e}")
++            return False
++
++    def get_pattern_stats(
++        self,
++        collection_name: str = "patterns",
++    ) -> dict[str, Any]:
++        """Get statistics for the patterns collection.
++
++        Args:
++            collection_name: Qdrant collection name
++
++        Returns:
++            Collection statistics
++        """
++        self.ensure_pattern_collection(collection_name)
++        return self.qdrant.get_collection_info(collection_name)

@@ -1,0 +1,1 @@
+/opt/anaconda3/lib/python3.13/site-packages/pytest/__main__.py tests/ --no-cov -q

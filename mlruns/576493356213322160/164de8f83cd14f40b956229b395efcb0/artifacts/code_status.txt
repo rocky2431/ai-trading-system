@@ -1,0 +1,23 @@
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   src/iqfmp/agents/factor_generation.py
+	modified:   src/iqfmp/agents/hypothesis_agent.py
+	modified:   src/iqfmp/db/models.py
+	modified:   src/iqfmp/evaluation/factor_evaluator.py
+	modified:   src/iqfmp/vector/store.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	mlruns/576493356213322160/164de8f83cd14f40b956229b395efcb0/
+	mlruns/576493356213322160/875dd5ddf4a14d3980612c246622c945/
+	mlruns/576493356213322160/f4c79ad4ff364e48b181c9d78e42e96a/
+	src/iqfmp/db/migrations/versions/002_add_pattern_records.py
+	src/iqfmp/feedback/
+	tests/integration/feedback/
+	tests/unit/feedback/
+
+no changes added to commit (use "git add" and/or "git commit -a")

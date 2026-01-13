@@ -48,9 +48,10 @@ RUN pip install --no-cache-dir /wheels/*.whl && \
 # Copy application code
 COPY src/ /app/src/
 COPY vendor/qlib/ /app/vendor/qlib/
+COPY start.sh /app/start.sh
 
-# Set ownership
-RUN chown -R iqfmp:iqfmp /app
+# Set ownership and permissions
+RUN chown -R iqfmp:iqfmp /app && chmod +x /app/start.sh
 
 # Switch to non-root user
 USER iqfmp
@@ -66,12 +67,8 @@ ENV PYTHONUNBUFFERED=1 \
     QLIB_DATA_DIR=/home/iqfmp/.qlib/qlib_data \
     PORT=8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT}/health || exit 1
+# Expose port (Railway will override PORT)
+EXPOSE 8000
 
-# Expose port
-EXPOSE ${PORT}
-
-# Default command
-CMD ["python", "-m", "uvicorn", "iqfmp.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default command - uses shell to properly expand PORT
+CMD ["/bin/sh", "/app/start.sh"]

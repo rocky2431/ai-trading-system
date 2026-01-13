@@ -1,53 +1,27 @@
-# ==================== Builder Stage ====================
-# NOTE: Project requires Python >=3.12 (see pyproject.toml)
-FROM python:3.12-slim as builder
+# ==================== Production Stage ====================
+FROM python:3.12-slim as production
 
 WORKDIR /app
 
-# Install build dependencies
+# Install build dependencies (needed for some packages)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy source code
-COPY pyproject.toml README.md ./
-COPY src/ ./src/
-COPY vendor/qlib/ ./vendor/qlib/
-
-# Install Python dependencies including Qlib extras
-RUN pip install --no-cache-dir build && \
-    pip wheel --no-cache-dir --no-deps --wheel-dir /app/wheels -e ".[qlib]"
-
-# ==================== Production Stage ====================
-FROM python:3.12-slim as production
-
-WORKDIR /app
-
 # Create non-root user
 RUN groupadd --gid 1000 iqfmp && \
     useradd --uid 1000 --gid iqfmp --shell /bin/bash --create-home iqfmp
 
-# Install runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Copy source code first
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
+COPY vendor/qlib/ ./vendor/qlib/
 
-# Copy wheels from builder
-COPY --from=builder /app/wheels /wheels
-COPY --from=builder /app/src /app/src
-COPY --from=builder /app/vendor/qlib /app/vendor/qlib
-COPY --from=builder /app/pyproject.toml /app/
-
-# Install application with Qlib dependencies
-RUN pip install --no-cache-dir /wheels/*.whl && \
-    pip install --no-cache-dir gym cvxpy && \
-    rm -rf /wheels
-
-# Copy application code
-COPY src/ /app/src/
-COPY vendor/qlib/ /app/vendor/qlib/
+# Install all dependencies including the package itself
+RUN pip install --no-cache-dir -e ".[qlib]" && \
+    pip install --no-cache-dir gym cvxpy
 COPY start.sh /app/start.sh
 
 # Set ownership and permissions

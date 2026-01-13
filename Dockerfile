@@ -1,5 +1,5 @@
 # ==================== Production Stage ====================
-FROM python:3.12-slim as production
+FROM python:3.14-slim as production
 
 WORKDIR /app
 

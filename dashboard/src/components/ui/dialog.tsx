@@ -157,3 +157,22 @@ export function DialogFooter({
     </div>
   )
 }
+
+interface DialogDescriptionProps extends React.HTMLAttributes<HTMLParagraphElement> {
+  children: React.ReactNode
+}
+
+export function DialogDescription({
+  className,
+  children,
+  ...props
+}: DialogDescriptionProps) {
+  return (
+    <p
+      className={cn('text-sm text-gray-500 dark:text-gray-400', className)}
+      {...props}
+    >
+      {children}
+    </p>
+  )
+}
